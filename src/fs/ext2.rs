@@ -216,13 +216,7 @@ pub fn mount() -> Result<(), &'static str> {
         FS.mounted = true;
     }
 
-    crate::println!(
-        "ext2: blocks={} block_size={} groups={} inodes/group={}",
-        blocks_count,
-        block_size,
-        groups_count,
-        inodes_per_group
-    );
+    let _ = (blocks_count, block_size, groups_count, inodes_per_group);
 
     // Warm cache with root directory listing
     let _ = list_dir(ROOT_INODE);

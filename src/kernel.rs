@@ -2,15 +2,23 @@
 //!
 //! PR1–PR4: boot, GDT/IDT, memory, IRQs
 //! PR5: heap + interactive shell
+//! PR6: syscall + ring-3 user demo
+//! PR7: ELF64 loader + embedded hello
+//! PR8: IDE + ext2 (read) + shell FS commands
 
 #![no_std]
 #![no_main]
 
 pub mod console;
+pub mod drivers;
+pub mod elf;
+pub mod embedded_hello;
+pub mod fs;
 pub mod gdt;
 pub mod interrupts;
 pub mod memory;
 pub mod shell;
+pub mod syscalls;
 pub mod vga_print;
 pub mod x86;
 
@@ -26,6 +34,7 @@ use memory::{
     free_frames, init_heap, init_paging, init_pmm, kmalloc, kfree, page_directory_phys,
     MULTIBOOT2_MAGIC,
 };
+use syscalls::init_syscalls;
 
 extern "C" {
     static multiboot_magic_value: u32;
@@ -107,6 +116,12 @@ pub extern "C" fn kmain() -> ! {
     console::print("IRQs ON  IDT gates=");
     console::write_u64(present_gate_count() as u64);
     console::println("");
+
+    // --- PR6: syscalls ---
+    init_syscalls();
+
+    // --- PR8: filesystem ---
+    fs::init();
 
     // --- PR5: shell ---
     shell::init();

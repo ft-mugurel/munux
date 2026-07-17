@@ -1,130 +1,139 @@
-; int 0x80 syscall entry / leave user mode helpers
-bits 32
+; munux x86_64: syscall entry + enter_user_mode / return_from_user
+;
+; SYSCALL: RCX=user RIP, R11=user RFLAGS, RSP still user stack until we switch
+; SYSRETQ: RIP=RCX, RFLAGS=R11, CS/SS from STAR; RSP must be set by us
+
+bits 64
+default abs
+
+section .data
+align 8
+; Kernel stack pointer used while handling syscalls from ring 3
+syscall_kstack:
+	dq 0
+; User RSP saved across syscall
+saved_user_rsp:
+	dq 0
+; Kernel RSP for return_from_user (SYS_EXIT → shell)
+saved_kernel_rsp:
+	dq 0
+
 section .text
 
-global isr_syscall
+global syscall_entry
 global enter_user_mode
 global return_from_user
+global set_syscall_kstack
 
 extern syscall_dispatch
-extern tss_set_esp0_from_esp
 
-; Saved kernel ESP so SYS_EXIT can return into enter_user_mode's caller.
-; Points at the 4 callee-saved regs we pushed (edi,esi,ebx,ebp) then retaddr.
-saved_kernel_esp:
-	dd 0
+; Called from Rust: set_syscall_kstack(u64)
+set_syscall_kstack:
+	mov [rel syscall_kstack], rdi
+	ret
 
 ; ---------------------------------------------------------------------------
-; Syscall gate (vector 0x80)
-; User: EAX=num EBX=a1 ECX=a2 EDX=a3 ESI=a4 EDI=a5
-; Returns EAX=result
+; syscall_entry — LSTAR
 ; ---------------------------------------------------------------------------
-isr_syscall:
-	; Save user segments / general regs
-	push ds
-	push es
-	push fs
-	push gs
-	pusha				; EDI ESI EBP ESP EBX EDX ECX EAX (user order)
+syscall_entry:
+	; Save user stack pointer
+	mov [rel saved_user_rsp], rsp
 
-	; Kernel data segments
-	mov ax, 0x10
-	mov ds, ax
-	mov es, ax
-	mov fs, ax
-	mov gs, ax
+	; Kernel stack
+	mov rsp, [rel syscall_kstack]
 
-	; Args for cdecl syscall_dispatch(num, a1, a2, a3, a4, a5)
-	; After pusha, EAX is at [esp+28], EBX at [esp+16], ECX [esp+24], EDX [esp+20], ESI [esp+4], EDI [esp]
-	mov eax, [esp + 28]		; syscall number (saved EAX)
-	mov ebx, [esp + 16]		; arg1
-	mov ecx, [esp + 24]		; arg2
-	mov edx, [esp + 20]		; arg3
-	mov esi, [esp + 4]		; arg4
-	mov edi, [esp]			; arg5
+	; Build arg frame / preserve user state
+	push r11			; user rflags
+	push rcx			; user rip
+	push r9
+	push r8
+	push r10
+	push rdx
+	push rsi
+	push rdi
+	push rax			; syscall number
 
-	push edi
-	push esi
-	push edx
-	push ecx
-	push ebx
-	push eax
+	; dispatch(num, a1, a2, a3, a4, a5)  — Linux-like regs
+	mov rdi, [rsp]			; num
+	mov rsi, [rsp + 8]		; rdi user
+	mov rdx, [rsp + 16]		; rsi user
+	mov rcx, [rsp + 24]		; rdx user
+	mov r8,  [rsp + 32]		; r10 user
+	mov r9,  [rsp + 40]		; r8 user
+
+	mov rbp, rsp
+	and rsp, -16
 	call syscall_dispatch
-	add esp, 24
-	; EAX = return value — store into saved EAX on pusha frame
-	mov [esp + 28], eax
+	mov rsp, rbp
+	; rax = return value
 
-	popa
-	pop gs
-	pop fs
-	pop es
-	pop ds
-	iret
+	add rsp, 8			; pop num
+	pop rdi
+	pop rsi
+	pop rdx
+	pop r10
+	pop r8
+	pop r9
+	pop rcx				; user rip for sysret
+	pop r11				; user rflags for sysret
+
+	mov rsp, [rel saved_user_rsp]
+	o64 sysret
 
 ; ---------------------------------------------------------------------------
-; enter_user_mode(entry: u32, user_esp: u32)  cdecl
-; Does not return until user calls exit → return_from_user
-;
-; MUST preserve callee-saved regs (EBX/ESI/EDI/EBP): SYS_EXIT jumps here via
-; return_from_user without going through a normal epilogue, and user/syscall
-; path clobbers those registers. Leaving EBP=0 caused a page fault in the
-; Rust caller (frame-pointer addressing → CR2=0xffffffa2).
+; enter_user_mode(entry, user_rsp)  SysV: rdi=entry, rsi=user_rsp
+; Does not return until user SYS_EXIT → return_from_user
 ; ---------------------------------------------------------------------------
 enter_user_mode:
-	; [esp] ret, [esp+4] entry, [esp+8] user_esp
-	cli				; no IRQs while we build the ring-3 frame
-	push ebp
-	push ebx
-	push esi
-	push edi
-	; stack: edi, esi, ebx, ebp, ret, entry, user_esp
-	mov [saved_kernel_esp], esp
+	; Preserve callee-saved for shell return
+	push rbp
+	push rbx
+	push r12
+	push r13
+	push r14
+	push r15
+	mov [rel saved_kernel_rsp], rsp
 
-	; TSS.esp0 = current ESP so ring-3 IRQs push below our saved frame
-	mov eax, esp
-	push eax
-	call tss_set_esp0_from_esp
-	add esp, 4
+	; syscall_kstack is set by Rust to a dedicated kernel stack
+	; (must NOT reuse this shell frame — EXIT restores saved_kernel_rsp)
 
-	; Offsets after the 4 pushes:
-	; [esp+16]=ret [esp+20]=entry [esp+24]=user_esp
-	mov eax, [esp + 20]		; entry EIP
-	mov ebx, [esp + 24]		; user ESP
-
-	; Build iret frame: SS, ESP, EFLAGS, CS, EIP
-	push dword 0x33			; user SS (RPL=3)
-	push ebx			; user ESP
-	pushf
-	or dword [esp], 0x200		; IF=1 in user mode
-	push dword 0x23			; user CS (RPL=3)
-	push eax			; user EIP
+	; iretq frame: SS, RSP, RFLAGS, CS, RIP
+	; user SS = 0x1B, user CS = 0x23
+	push qword 0x1B			; SS
+	push rsi			; user RSP
+	pushfq
+	or qword [rsp], 0x200		; IF=1 in user
+	push qword 0x23			; CS
+	push rdi			; entry RIP
 
 	; User data segments
-	mov ax, 0x2B
+	mov ax, 0x1B
 	mov ds, ax
 	mov es, ax
 	mov fs, ax
 	mov gs, ax
 
-	iret
+	iretq
 
 ; ---------------------------------------------------------------------------
-; return_from_user — jump back to kernel after SYS_EXIT (does not return here)
-; Restores ESP + callee-saved regs saved in enter_user_mode, then RET.
+; return_from_user — SYS_EXIT jumps here (does not return to caller of this)
 ; ---------------------------------------------------------------------------
 return_from_user:
 	cli
+	; Kernel segments
 	mov ax, 0x10
 	mov ds, ax
 	mov es, ax
 	mov fs, ax
 	mov gs, ax
-	mov ax, 0x18
 	mov ss, ax
-	mov esp, [saved_kernel_esp]
-	pop edi
-	pop esi
-	pop ebx
-	pop ebp
-	; STI is done in Rust after enter_user_mode returns (int gate clears IF)
+
+	mov rsp, [rel saved_kernel_rsp]
+	pop r15
+	pop r14
+	pop r13
+	pop r12
+	pop rbx
+	pop rbp
+	; sti done in Rust after enter_user_mode returns
 	ret

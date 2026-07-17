@@ -1,231 +1,312 @@
-//! System call interface (`int 0x80`), ELF exec, and built-in ring-3 demo.
+//! System calls via `syscall` / `sysret` and ring-3 demo.
 
 use core::arch::asm;
 
-use crate::elf::{self, LoadedImage};
+use crate::console;
+use crate::gdt::{self, STAR_KERNEL_CS, STAR_USER_BASE, USER_CODE_SELECTOR, USER_DATA_SELECTOR};
 use crate::gdt::tss;
-use crate::interrupts::idt::{register_gate, GATE_INTERRUPT_USER};
-use crate::memory::pmm::FRAME_SIZE;
-use crate::process;
+use crate::memory::paging::{self, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
+use crate::memory::pmm::{self, FRAME_SIZE, PhysAddr};
 
 pub mod num {
-    pub const EXIT: u32 = 0;
-    pub const WRITE: u32 = 1;
-    pub const READ: u32 = 2;
-    pub const OPEN: u32 = 3;
-    pub const CLOSE: u32 = 4;
-    pub const GETPID: u32 = 5;
-    pub const GETUID: u32 = 6;
-    pub const FORK: u32 = 7;
-    pub const WAIT: u32 = 8;
-    pub const KILL: u32 = 9;
-    pub const SIGNAL: u32 = 10;
-    pub const EXEC: u32 = 11;
+    pub const EXIT: u64 = 0;
+    pub const WRITE: u64 = 1;
+    pub const GETPID: u64 = 5;
 }
 
-/// Built-in demo load address (hand-assembled, not ELF).
-const DEMO_CODE_BASE: u32 = 0x0040_0000;
-const DEMO_STACK_TOP: u32 = 0x0050_0000;
-const DEMO_STACK_PAGE: u32 = DEMO_STACK_TOP - 0x1000;
+/// User demo load addresses (outside 1 GiB identity map → mapped with U/S=1).
+const DEMO_CODE: u64 = 0x0000_0000_4000_0000;
+const DEMO_STACK_PAGE: u64 = 0x0000_0000_4000_1000;
+const DEMO_STACK_TOP: u64 = DEMO_STACK_PAGE + 0x1000;
+
+const PAGE_USER_RW: u64 = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
 
 extern "C" {
-    fn isr_syscall();
-    fn enter_user_mode(entry: u32, user_esp: u32);
+    fn enter_user_mode(entry: u64, user_rsp: u64);
     fn return_from_user() -> !;
+    fn set_syscall_kstack(rsp: u64);
+    fn syscall_entry();
 }
 
-/// Called from assembly with kernel ESP so TSS.esp0 is correct.
-#[no_mangle]
-pub extern "C" fn tss_set_esp0_from_esp(esp: u32) {
-    tss::set_kernel_stack(esp);
+/// MSR helpers
+unsafe fn wrmsr(msr: u32, value: u64) {
+    let lo = value as u32;
+    let hi = (value >> 32) as u32;
+    asm!(
+        "wrmsr",
+        in("ecx") msr,
+        in("eax") lo,
+        in("edx") hi,
+        options(nostack, preserves_flags)
+    );
 }
 
+unsafe fn rdmsr(msr: u32) -> u64 {
+    let lo: u32;
+    let hi: u32;
+    asm!(
+        "rdmsr",
+        in("ecx") msr,
+        out("eax") lo,
+        out("edx") hi,
+        options(nomem, nostack, preserves_flags)
+    );
+    ((hi as u64) << 32) | (lo as u64)
+}
+
+const IA32_EFER: u32 = 0xC000_0080;
+const IA32_STAR: u32 = 0xC000_0081;
+const IA32_LSTAR: u32 = 0xC000_0082;
+const IA32_FMASK: u32 = 0xC000_0084;
+const EFER_SCE: u64 = 1;
+
+/// Arm `syscall` (STAR / LSTAR / FMASK / EFER.SCE).
 pub fn init_syscalls() {
-    register_gate(0x80, isr_syscall, GATE_INTERRUPT_USER);
-    crate::println!("syscall: int 0x80 armed (DPL=3)");
+    unsafe {
+        // STAR: kernel CS in 47:32, user base in 63:48
+        let star = ((STAR_USER_BASE as u64) << 48) | ((STAR_KERNEL_CS as u64) << 32);
+        wrmsr(IA32_STAR, star);
+        wrmsr(IA32_LSTAR, syscall_entry as usize as u64);
+        // Clear IF (bit 9) among others on entry — 0x200
+        wrmsr(IA32_FMASK, 0x200);
+        let efer = rdmsr(IA32_EFER) | EFER_SCE;
+        wrmsr(IA32_EFER, efer);
+    }
+    let _ = (USER_CODE_SELECTOR, USER_DATA_SELECTOR);
+    console::println("syscall: STAR/LSTAR armed (SCE)");
 }
 
-/// C ABI entry from `isr_syscall`.
+/// C ABI from assembly.
 #[no_mangle]
 pub extern "C" fn syscall_dispatch(
-    num: u32,
-    a1: u32,
-    a2: u32,
-    a3: u32,
-    _a4: u32,
-    _a5: u32,
-) -> u32 {
+    num: u64,
+    a1: u64,
+    a2: u64,
+    a3: u64,
+    _a4: u64,
+    _a5: u64,
+) -> u64 {
     match num {
         num::EXIT => {
+            // Jump back to shell; does not return here.
             unsafe {
                 return_from_user();
             }
         }
         num::WRITE => sys_write(a1, a2, a3),
-        num::READ => sys_read(a1, a2, a3),
-        num::OPEN => sys_open(a1) as u32,
-        num::CLOSE => 0,
-        num::GETPID => process::current_pid() as u32,
-        num::GETUID => process::getuid() as u32,
-        num::FORK => process::fork() as u32,
-        num::WAIT => {
-            let mut st = 0i32;
-            process::wait(Some(&mut st)) as u32
-        }
-        num::KILL => process::kill(a1 as i32, a2) as u32,
-        num::SIGNAL => process::signal(a1, a2 as usize) as u32,
-        // In-process exec of a path is kernel-only for now (shell `run`).
-        // User-callable EXEC can be added once we have a path buffer ABI.
-        num::EXEC => u32::MAX,
-        _ => u32::MAX,
+        num::GETPID => 1,
+        _ => u64::MAX,
     }
 }
 
-fn user_ptr_ok(buf: u32, len: u32) -> bool {
-    if buf < 0x1000 || len > 0x10000 {
+fn user_ptr_ok(buf: u64, len: u64) -> bool {
+    if len > 0x10000 {
         return false;
     }
-    (buf as u64).saturating_add(len as u64) <= 0xC000_0000
+    let end = buf.saturating_add(len);
+    // Demo blob, classic ELF load (0x400000+), user stack (~0x7fff…), low identity
+    (buf >= DEMO_CODE && end <= DEMO_STACK_TOP + 0x1000)
+        || (buf >= 0x400000 && end <= 0x800000)
+        || (buf >= 0x0000_0000_7000_0000 && end <= 0x0000_0000_8000_0000)
+        || (buf >= 0x1000 && end <= 0x4000_0000)
 }
 
-fn sys_write(fd: u32, buf: u32, len: u32) -> u32 {
+fn sys_write(fd: u64, buf: u64, len: u64) -> u64 {
     if fd != 1 && fd != 2 {
-        return u32::MAX;
+        return u64::MAX;
     }
     let len = len.min(4096);
     if !user_ptr_ok(buf, len) {
-        return u32::MAX;
+        return u64::MAX;
     }
     let slice = unsafe { core::slice::from_raw_parts(buf as *const u8, len as usize) };
     for &b in slice {
         if b == b'\n' {
-            crate::println!();
+            console::put_char(b'\n');
         } else if (32..127).contains(&b) || b == b'\t' {
-            crate::print!("{}", b as char);
+            console::put_char(b);
         }
     }
     len
 }
 
-fn sys_read(fd: u32, buf: u32, len: u32) -> u32 {
-    let _ = (fd, buf, len);
-    0
-}
-
-fn sys_open(path_ptr: u32) -> i32 {
-    if !user_ptr_ok(path_ptr, 1) {
-        return -1;
+/// Ensure a user-accessible page at `virt`.
+fn map_user_page(virt: u64) -> Result<(), &'static str> {
+    if virt & 0xFFF != 0 {
+        return Err("unaligned");
     }
-    let mut path = [0u8; 128];
-    let mut n = 0usize;
-    unsafe {
-        loop {
-            let b = core::ptr::read_volatile((path_ptr as usize + n) as *const u8);
-            if b == 0 || n + 1 >= path.len() {
-                break;
-            }
-            path[n] = b;
-            n += 1;
-        }
+    // If already present, re-map with USER flags if needed
+    if let Some(phys) = paging::virt_to_phys(virt) {
+        let page = phys & !0xFFF;
+        paging::map_page(virt, PhysAddr::new(page), PAGE_USER_RW);
+        return Ok(());
     }
-    let s = core::str::from_utf8(&path[..n]).unwrap_or("");
-    if !crate::fs::is_ready() {
-        return -1;
-    }
-    let cwd = crate::fs::path::cwd_inode();
-    match crate::fs::ext2::resolve_path(cwd, s) {
-        Ok(ino) => ino as i32,
-        Err(_) => -1,
-    }
-}
-
-fn restore_kernel_after_user() {
-    unsafe {
-        asm!(
-            "mov ax, 0x10",
-            "mov ds, ax",
-            "mov es, ax",
-            "mov fs, ax",
-            "mov gs, ax",
-            "sti",
-            options(nostack)
-        );
-    }
-}
-
-fn enter_and_wait(image: LoadedImage) {
-    crate::println!(
-        "exec: entry={:#x} stack={:#x}",
-        image.entry,
-        image.stack_top
-    );
-    unsafe {
-        enter_user_mode(image.entry, image.stack_top);
-    }
-    restore_kernel_after_user();
-    crate::println!("exec: process exited -> kernel");
-}
-
-/// Load ELF from path and run it in ring 3 until `exit`.
-pub fn exec_path(path: &str) -> Result<(), &'static str> {
-    let image = elf::load_path(path)?;
-    enter_and_wait(image);
-    Ok(())
-}
-
-/// Built-in hand-assembled demo (no filesystem required).
-pub fn run_demo_user_program() -> Result<(), &'static str> {
-    setup_demo_image()?;
-    enter_and_wait(LoadedImage {
-        entry: DEMO_CODE_BASE,
-        stack_top: DEMO_STACK_TOP,
-    });
+    let frame = pmm::alloc_frame().ok_or("oom")?;
+    paging::map_page(virt, frame, PAGE_USER_RW);
     Ok(())
 }
 
 fn setup_demo_image() -> Result<(), &'static str> {
-    elf::map_user_page(DEMO_CODE_BASE)?;
-    elf::map_user_page(DEMO_STACK_PAGE)?;
+    map_user_page(DEMO_CODE)?;
+    map_user_page(DEMO_STACK_PAGE)?;
+
     let prog = user_demo_bytes();
     unsafe {
-        core::ptr::write_bytes(DEMO_CODE_BASE as *mut u8, 0, FRAME_SIZE);
-        core::ptr::copy_nonoverlapping(prog.as_ptr(), DEMO_CODE_BASE as *mut u8, prog.len());
+        core::ptr::write_bytes(DEMO_CODE as *mut u8, 0, FRAME_SIZE);
+        core::ptr::copy_nonoverlapping(prog.as_ptr(), DEMO_CODE as *mut u8, prog.len());
         core::ptr::write_bytes(DEMO_STACK_PAGE as *mut u8, 0, FRAME_SIZE);
     }
     Ok(())
 }
 
+/// Hand-assembled: write(1, msg, n); exit(0);
 fn user_demo_bytes() -> [u8; 256] {
     let mut out = [0u8; 256];
-    let msg = b"Hello from ring 3 user mode via int 0x80!\n\0";
+    let msg = b"Hello from ring 3 via syscall!\n";
+    // Place message at CODE+0x80
     out[0x80..0x80 + msg.len()].copy_from_slice(msg);
-    let msg_addr = DEMO_CODE_BASE + 0x80;
-    let msg_len = (msg.len() - 1) as u32;
+    let msg_addr = DEMO_CODE + 0x80;
+    let msg_len = msg.len() as u32;
 
     let mut i = 0usize;
-    out[i] = 0xB8;
-    out[i + 1..i + 5].copy_from_slice(&1u32.to_le_bytes());
-    i += 5;
-    out[i] = 0xBB;
-    out[i + 1..i + 5].copy_from_slice(&1u32.to_le_bytes());
-    i += 5;
-    out[i] = 0xB9;
-    out[i + 1..i + 5].copy_from_slice(&msg_addr.to_le_bytes());
-    i += 5;
-    out[i] = 0xBA;
-    out[i + 1..i + 5].copy_from_slice(&msg_len.to_le_bytes());
-    i += 5;
-    out[i] = 0xCD;
-    out[i + 1] = 0x80;
+    // mov rax, 1  (WRITE)
+    out[i] = 0x48;
+    out[i + 1] = 0xC7;
+    out[i + 2] = 0xC0;
+    out[i + 3..i + 7].copy_from_slice(&1u32.to_le_bytes());
+    i += 7;
+    // mov rdi, 1
+    out[i] = 0x48;
+    out[i + 1] = 0xC7;
+    out[i + 2] = 0xC7;
+    out[i + 3..i + 7].copy_from_slice(&1u32.to_le_bytes());
+    i += 7;
+    // mov rsi, msg_addr
+    out[i] = 0x48;
+    out[i + 1] = 0xBE;
+    out[i + 2..i + 10].copy_from_slice(&msg_addr.to_le_bytes());
+    i += 10;
+    // mov rdx, msg_len
+    out[i] = 0x48;
+    out[i + 1] = 0xC7;
+    out[i + 2] = 0xC2;
+    out[i + 3..i + 7].copy_from_slice(&msg_len.to_le_bytes());
+    i += 7;
+    // syscall
+    out[i] = 0x0F;
+    out[i + 1] = 0x05;
     i += 2;
-    out[i] = 0xB8;
-    out[i + 1..i + 5].copy_from_slice(&0u32.to_le_bytes());
-    i += 5;
-    out[i] = 0xBB;
-    out[i + 1..i + 5].copy_from_slice(&0u32.to_le_bytes());
-    i += 5;
-    out[i] = 0xCD;
-    out[i + 1] = 0x80;
+    // mov rax, 0 (EXIT)
+    out[i] = 0x48;
+    out[i + 1] = 0xC7;
+    out[i + 2] = 0xC0;
+    out[i + 3..i + 7].copy_from_slice(&0u32.to_le_bytes());
+    i += 7;
+    // xor rdi, rdi
+    out[i] = 0x48;
+    out[i + 1] = 0x31;
+    out[i + 2] = 0xFF;
+    i += 3;
+    // syscall
+    out[i] = 0x0F;
+    out[i + 1] = 0x05;
     let _ = i;
     out
+}
+
+fn enter_and_wait(entry: u64, stack_top: u64, label: &str) {
+    tss::set_kernel_stack(tss::kernel_stack_top());
+    unsafe {
+        set_syscall_kstack(tss::kernel_stack_top());
+    }
+
+    console::print(label);
+    console::print(" entry=");
+    console::write_hex64(entry);
+    console::print(" stack=");
+    console::write_hex64(stack_top);
+    console::println("");
+
+    unsafe {
+        enter_user_mode(entry, stack_top);
+    }
+
+    unsafe {
+        asm!(
+            "mov ax, {kd}",
+            "mov ds, ax",
+            "mov es, ax",
+            "mov ss, ax",
+            "sti",
+            kd = const gdt::KERNEL_DATA_SELECTOR,
+            options(nostack)
+        );
+    }
+    console::println("user: returned to kernel (exit)");
+}
+
+/// Run the built-in hand-assembled ring-3 demo until exit.
+pub fn run_demo_user_program() -> Result<(), &'static str> {
+    setup_demo_image()?;
+    enter_and_wait(DEMO_CODE, DEMO_STACK_TOP, "user: demo");
+    Ok(())
+}
+
+/// Load an ELF64 image from bytes and run until exit.
+pub fn exec_elf_bytes(file: &[u8], argv0: &str) -> Result<(), &'static str> {
+    let image = crate::elf::load_bytes(file, argv0)?;
+    enter_and_wait(image.entry, image.stack_top, "exec: ELF64");
+    Ok(())
+}
+
+/// Run the embedded static `hello` ELF (built by `make userland` / `make build`).
+pub fn run_embedded_hello() -> Result<(), &'static str> {
+    exec_elf_bytes(crate::embedded_hello::HELLO_ELF, "hello")
+}
+
+/// Load ELF64 from ext2 path (or embedded `hello` if path empty / "hello").
+pub fn run_path(path: &str) -> Result<(), &'static str> {
+    let path = path.trim();
+    if path.is_empty() || path == "hello" || path == "/bin/hello" || path == "bin/hello" {
+        // Prefer disk if present and file exists; else embedded.
+        if crate::fs::is_ready() {
+            if let Ok(()) = run_elf_from_fs("/bin/hello") {
+                return Ok(());
+            }
+            if let Ok(()) = run_elf_from_fs("bin/hello") {
+                return Ok(());
+            }
+        }
+        return run_embedded_hello();
+    }
+    run_elf_from_fs(path)
+}
+
+fn run_elf_from_fs(path: &str) -> Result<(), &'static str> {
+    if !crate::fs::is_ready() {
+        return Err("no filesystem");
+    }
+    let cwd = crate::fs::path::cwd_inode();
+    let ino = crate::fs::ext2::resolve_path(cwd, path)?;
+    if crate::fs::ext2::inode_is_dir(ino) {
+        return Err("is a directory");
+    }
+    let size = crate::fs::ext2::inode_file_size(ino) as usize;
+    if size == 0 || size > 512 * 1024 {
+        return Err("bad file size");
+    }
+    // Stack buffer for small ELFs (hello is tiny). Cap 64 KiB.
+    const CAP: usize = 64 * 1024;
+    if size > CAP {
+        return Err("ELF too large (max 64KiB)");
+    }
+    let mut buf = [0u8; CAP];
+    let n = crate::fs::ext2::read_file(ino, 0, &mut buf[..size])?;
+    exec_elf_bytes(&buf[..n], path)
+}
+
+/// Rust-callable from C asm (TSS rsp0).
+#[no_mangle]
+pub extern "C" fn tss_set_kernel_stack(rsp: u64) {
+    tss::set_kernel_stack(rsp);
 }

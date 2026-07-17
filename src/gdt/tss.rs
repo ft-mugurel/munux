@@ -1,14 +1,13 @@
-//! 64-bit Task State Segment (RSP0 for privilege transitions).
+//! 64-bit Task State Segment (RSP0 for ring-3 → ring-0).
 
 use core::arch::asm;
 use core::ptr::addr_of;
 
 use super::gdt::set_tss_descriptor;
 
-/// Selector for GDT index 3.
-pub const TSS_SELECTOR: u16 = 0x18;
+/// GDT index 5 → selector 0x28
+pub const TSS_SELECTOR: u16 = 0x28;
 
-/// Hardware TSS layout (Intel SDM).
 #[repr(C, packed)]
 pub struct Tss {
     reserved0: u32,
@@ -22,7 +21,6 @@ pub struct Tss {
     pub iomap_base: u16,
 }
 
-/// Packed 16-byte TSS descriptor fields (split across two GDT entries).
 pub struct TssDescriptor {
     pub limit_low: u16,
     pub base_low: u16,
@@ -45,38 +43,42 @@ static mut TSS: Tss = Tss {
     iomap_base: 0,
 };
 
-/// Dedicated double-fault / IST stacks later; for now one kernel IST page.
 #[repr(align(16))]
 struct IstStack {
     _bytes: [u8; 4096],
 }
 static mut IST_STACK: IstStack = IstStack { _bytes: [0; 4096] };
 
+/// Dedicated ring-0 stack for syscalls / IRQs from user mode.
+#[repr(align(16))]
+struct KernelStack {
+    _bytes: [u8; 16384],
+}
+static mut KERNEL_STACK: KernelStack = KernelStack { _bytes: [0; 16384] };
+
 fn tss_descriptor(base: u64, limit: u32) -> TssDescriptor {
     TssDescriptor {
         limit_low: (limit & 0xFFFF) as u16,
         base_low: (base & 0xFFFF) as u16,
         base_middle: ((base >> 16) & 0xFF) as u8,
-        access: 0x89, // present, 64-bit available TSS
+        access: 0x89,
         granularity: ((limit >> 16) & 0x0F) as u8,
         base_high: ((base >> 24) & 0xFF) as u8,
         base_upper: (base >> 32) as u32,
     }
 }
 
-/// Fill TSS, install descriptor, `ltr`.
 pub fn init_tss() {
     let base = addr_of!(TSS) as u64;
     let limit = (core::mem::size_of::<Tss>() - 1) as u32;
 
     unsafe {
-        // RSP0: current stack is fine until we enter ring 3.
-        let mut rsp: u64;
-        asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));
-        TSS.rsp0 = rsp;
+        let kstack_top =
+            (addr_of!(KERNEL_STACK) as *const u8 as usize + core::mem::size_of::<KernelStack>())
+                as u64;
+        TSS.rsp0 = kstack_top;
         TSS.iomap_base = core::mem::size_of::<Tss>() as u16;
 
-        // IST1: separate stack for double fault later.
         let ist_top = (addr_of!(IST_STACK) as *const u8 as usize + 4096) as u64;
         TSS.ist[0] = ist_top;
 
@@ -94,6 +96,10 @@ pub fn set_kernel_stack(rsp0: u64) {
     unsafe {
         TSS.rsp0 = rsp0;
     }
+}
+
+pub fn kernel_stack_top() -> u64 {
+    (addr_of!(KERNEL_STACK) as *const u8 as usize + core::mem::size_of::<KernelStack>()) as u64
 }
 
 pub fn tss_rsp0() -> u64 {

@@ -1,13 +1,11 @@
-/* Static ET_EXEC layout for KFS user programs (i386). */
+/* Static ET_EXEC for munux user programs (x86_64). */
 ENTRY(_start)
-OUTPUT_FORMAT(elf32-i386)
-OUTPUT_ARCH(i386)
+OUTPUT_FORMAT(elf64-x86-64)
+OUTPUT_ARCH(i386:x86-64)
 
 SECTIONS
 {
-    /* Classic Linux userspace base — outside kernel identity-low region;
-       the ELF loader maps pages with the PMM. */
-    . = 0x08048000;
+    . = 0x400000;
 
     .text ALIGN(4K) : {
         *(.text .text.*)

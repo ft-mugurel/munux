@@ -163,12 +163,19 @@ pub fn map_page(virt: u64, phys: PhysAddr, flags: u64) {
     };
 
     unsafe {
+        // Privilege bits that intermediate tables must allow for user pages.
+        let need = PAGE_PRESENT | PAGE_WRITABLE | (flags & PAGE_USER);
+
         // PML4 -> PDPT
         let t4 = table_mut(pml4);
         let i4 = pml4_index(virt);
         if !(*t4).entries[i4].is_present() {
             let pdpt = alloc_table();
-            (*t4).entries[i4] = Entry::new(pdpt.as_u64(), PAGE_PRESENT | PAGE_WRITABLE | (flags & PAGE_USER));
+            (*t4).entries[i4] = Entry::new(pdpt.as_u64(), need);
+        } else {
+            // Upgrade U/S if mapping a user page through an existing kernel PDE path
+            let e = (*t4).entries[i4];
+            (*t4).entries[i4] = Entry::new(e.addr(), e.flags() | need);
         }
         let e4 = (*t4).entries[i4];
 
@@ -177,20 +184,34 @@ pub fn map_page(virt: u64, phys: PhysAddr, flags: u64) {
         let i3 = pdpt_index(virt);
         if !(*t3).entries[i3].is_present() {
             let pd = alloc_table();
-            (*t3).entries[i3] = Entry::new(pd.as_u64(), PAGE_PRESENT | PAGE_WRITABLE | (flags & PAGE_USER));
+            (*t3).entries[i3] = Entry::new(pd.as_u64(), need);
+        } else {
+            let e = (*t3).entries[i3];
+            (*t3).entries[i3] = Entry::new(e.addr(), e.flags() | need);
         }
         let e3 = (*t3).entries[i3];
 
-        // PD -> PT (if currently a 2M page, refuse for simplicity)
+        // PD -> PT (split 2 MiB pages into 4 KiB tables if needed)
         let t2 = table_mut(e3.addr());
         let i2 = pd_index(virt);
         let e2 = (*t2).entries[i2];
         if e2.is_present() && e2.flags() & PAGE_SIZE_2M != 0 {
-            panic_paging("map_page over 2MiB page");
-        }
-        if !e2.is_present() {
+            // Expand huge page so we can set per-4K USER/flags (ELF at 0x400000).
+            let base = e2.addr() & !0x1F_FFFF;
             let pt = alloc_table();
-            (*t2).entries[i2] = Entry::new(pt.as_u64(), PAGE_PRESENT | PAGE_WRITABLE | (flags & PAGE_USER));
+            let pt_t = table_mut(pt.as_u64());
+            for i in 0..ENTRIES {
+                let phys = base + (i as u64) * FRAME_SIZE as u64;
+                // Preserve identity (supervisor R/W); leaf may upgrade USER below.
+                (*pt_t).entries[i] = Entry::new(phys, PAGE_PRESENT | PAGE_WRITABLE);
+            }
+            (*t2).entries[i2] = Entry::new(pt.as_u64(), need);
+        } else if !e2.is_present() {
+            let pt = alloc_table();
+            (*t2).entries[i2] = Entry::new(pt.as_u64(), need);
+        } else {
+            let e = (*t2).entries[i2];
+            (*t2).entries[i2] = Entry::new(e.addr(), e.flags() | need);
         }
         let e2 = (*t2).entries[i2];
 

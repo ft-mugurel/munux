@@ -1,25 +1,30 @@
-//! Path helpers and per-process working directory.
+//! Working directory and path helpers (global cwd until multi-process returns).
 
 use crate::fs::ext2;
-use crate::process;
 
-/// Get cwd inode for current process.
+static mut CWD_INODE: u32 = 2;
+
 pub fn cwd_inode() -> u32 {
-    process::get_cwd_inode()
+    unsafe { CWD_INODE }
 }
 
-/// Set cwd by path.
+pub fn set_cwd_inode(ino: u32) {
+    unsafe {
+        CWD_INODE = ino;
+    }
+}
+
 pub fn chdir(path: &str) -> Result<(), &'static str> {
     let cur = cwd_inode();
     let ino = ext2::resolve_path(cur, path)?;
     if !ext2::inode_is_dir(ino) {
         return Err("not a directory");
     }
-    process::set_cwd_inode(ino);
+    set_cwd_inode(ino);
     Ok(())
 }
 
-/// Reconstruct absolute path for current process cwd into `out`.
+/// Write absolute path of cwd into `out` (NUL-terminated). Returns length.
 pub fn getcwd_pretty(out: &mut [u8]) -> usize {
     let target = cwd_inode();
     if target == ext2::ROOT_INODE {
@@ -63,6 +68,7 @@ pub fn getcwd_pretty(out: &mut [u8]) -> usize {
             }
         }
         if !got {
+            // fallback #ino
             let mut n = cur;
             let mut tmp = [0u8; 10];
             let mut t = 0;

@@ -1,41 +1,56 @@
-//! Filesystem stack: VFS nodes + ext2 reader/writer.
+//! Filesystem: IDE probe + ext2 (read) + path helpers.
 
 pub mod ext2;
-pub mod ext2_write;
 pub mod path;
 pub mod vfs;
 
+use crate::console;
 use crate::drivers::ide;
-use crate::process;
 
 static mut FS_READY: bool = false;
 
 /// Probe IDE and mount ext2 root if possible.
 pub fn init() {
-    crate::println!("fs: probing IDE...");
+    console::print("fs: probing IDE... ");
     if !ide::init() {
-        crate::println!("fs: no IDE disk (attach -hda build/disk.img)");
+        console::println("no disk");
         unsafe {
             FS_READY = false;
         }
         return;
     }
-    crate::println!(
-        "fs: IDE present, {} sectors ({} KiB)",
-        ide::sector_count(),
-        (ide::sector_count() as u64 * 512) / 1024
-    );
+    console::print("OK sectors=");
+    console::write_u64(ide::sector_count() as u64);
+    console::println("");
 
     match ext2::mount() {
         Ok(()) => {
             unsafe {
                 FS_READY = true;
             }
-            process::set_cwd_inode(ext2::ROOT_INODE);
-            crate::println!("fs: ext2 mounted, root inode={}", ext2::ROOT_INODE);
+            path::set_cwd_inode(ext2::ROOT_INODE);
+            console::print("fs: ext2 mounted root=");
+            console::write_u64(ext2::ROOT_INODE as u64);
+            console::println("");
+            // Smoke: list root names on boot
+            if let Ok(_) = ext2::list_dir(ext2::ROOT_INODE) {
+                console::print("fs: root: ");
+                for i in 0..vfs::cache_len() {
+                    if let Some(n) = vfs::cache_get(i) {
+                        let name = n.name_str();
+                        if name == "." || name == ".." {
+                            continue;
+                        }
+                        console::print(name);
+                        console::print(" ");
+                    }
+                }
+                console::println("");
+            }
         }
         Err(e) => {
-            crate::println!("fs: ext2 mount failed: {}", e);
+            console::print("fs: ext2 mount failed: ");
+            console::println(e);
             unsafe {
                 FS_READY = false;
             }
