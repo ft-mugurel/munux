@@ -1,48 +1,63 @@
-# KFS — Kernel From Scratch (i686)
+# munux
 
-A **32-bit freestanding x86 kernel** in **Rust** + **NASM**, Multiboot/GRUB bootable, runnable under **QEMU**.
+**munux** is a freestanding operating-system kernel written in **Rust** and **NASM**. It boots via **Multiboot/GRUB**, runs under **QEMU**, and aims for long-term **Linux-compatible** userspace (syscalls, processes, VFS) while staying small and readable.
 
-Tracks the **42 KFS** series (boot → GDT/IDT → memory → processes → FS → user mode). Soft size goal: keep artifacts lean (~**10 MiB** subject guidance); run `make size`.
+Started as a **42 KFS** learning kernel; the project now continues independently as **munux**.
+
+| Branch | Role |
+|--------|------|
+| **`main`** | Active development (x86_64 port in progress) |
+| **`32bit`** | Frozen **i686** snapshot (full Multiboot kernel as of the rename) |
+
+Repository: [github.com/ft-mugurel/munux](https://github.com/ft-mugurel/munux)
 
 ---
 
-## Features
+## Current capabilities (i686 baseline on `32bit` / shared tree)
 
 ### Boot & build
 - Multiboot 1 header + assembly entry (`_start`), stack at `stack_top`
-- Custom target `i686-kernel.json` (`#![no_std]`, soft-float, panic = abort)
-- ELF32 link at **1 MiB**; GRUB ISO + QEMU targets
-- IDE disk image (`build/disk.img`) with a small **ext2** rootfs for FS demos
+- Custom freestanding Rust target (`#![no_std]`, soft-float, panic = abort)
+- Kernel linked at **1 MiB**; GRUB ISO + QEMU targets
+- IDE disk image (`build/disk.img`) with a small **ext2** rootfs
 
 ### CPU / interrupts
-- **GDT** at fixed address **`0x800`** (8 entries):
-  - null, kcode, kdata, kstack, ucode, udata, ustack, **TSS**
-- **TSS** (`ltr 0x38`) — `ESP0`/`SS0` for ring-3 → ring-0 stack switch
-- **IDT** — exceptions, **IRQ0** (PIT timer), **IRQ1** (keyboard), **int 0x80** (DPL=3 syscalls)
-- 8259 PIC remapped; signals / default handlers
+- **GDT** at fixed address **`0x800`** (8 entries): null, kcode, kdata, kstack, ucode, udata, ustack, **TSS**
+- **TSS** (`ltr 0x38`) — ring-3 → ring-0 stack switch
+- **IDT** — exceptions, **IRQ0** (PIT), **IRQ1** (keyboard), **int 0x80** (syscalls, DPL=3)
+- 8259 PIC remapped; kernel signal / callback helpers
 
 ### Memory
 - Multiboot memory map → **PMM** (frame bitmap)
-- Identity-mapped **paging** (CR0.PG), kernel vs user policy helpers
-- Kernel **heap** (`kmalloc` freelist, high VA)
+- Identity-mapped **paging** (CR0.PG)
+- Kernel **heap** (`kmalloc` freelist)
 
 ### Processes
-- PCB table, fork/wait/kill/signal/getuid, simple sockets
+- PCB table, fork/wait/kill/signal/getuid, simple in-kernel sockets
 - Timer-driven per-process signal delivery
 
 ### Filesystem
-- ATA PIO **IDE** primary master + **ext2** read/write
-- VFS helpers: `ls`, `cat`, `pwd`, `cd`, `mkdir`, `touch`, `rm`, `rmdir`
+- ATA PIO **IDE** (primary master) + **ext2** read/write
+- Shell: `ls`, `cat`, `pwd`, `cd`, `mkdir`, `touch`, `rm`, `rmdir`
 
 ### User mode
-- Ring-3 demo pages at `0x00400000` (code) / `0x00500000` (stack)
-- **ELF32 loader** (`src/elf`) — `run /bin/hello` loads `ET_EXEC` from ext2
+- Ring-3 demo at `0x00400000` (code) / `0x00500000` (stack)
+- **ELF32 loader** — `run /bin/hello` loads `ET_EXEC` from ext2
 - Syscalls via **`int 0x80`**: EXIT, WRITE, READ, OPEN, CLOSE, GETPID, GETUID, FORK, WAIT, KILL, SIGNAL
-- Shell: **`user`** (embedded demo) · **`run <path>`** / **`exec <path>`** (ELF)
+- Shell: **`user`** (embedded demo) · **`run` / `exec`** (ELF)
 
 ### Console
-- VGA 80×25, 6 virtual screens (F1–F6), modest scrollback (48 lines) for size
-- PS/2 keyboard (US QWERTY), interactive shell (`kfs> `)
+- VGA 80×25, 6 virtual screens (F1–F6), modest scrollback
+- PS/2 keyboard (US QWERTY), interactive shell (`kfs>` prompt in the i686 tree)
+
+---
+
+## Roadmap
+
+1. **x86_64 port** on `main` (long mode, 4-level paging, `syscall`)
+2. Linux-shaped **FD table**, VFS, and syscall ABI
+3. Per-process address spaces, `execve`, static musl / BusyBox
+4. Broader POSIX surface toward real-world use
 
 ---
 
@@ -50,7 +65,7 @@ Tracks the **42 KFS** series (boot → GDT/IDT → memory → processes → FS �
 
 ```sh
 make              # build ISO + disk + boot (run-iso)
-make run          # -kernel path + IDE disk (faster iteration)
+make run          # -kernel + IDE disk (faster iteration)
 make help         # all targets
 make size         # kernel / ISO size report
 ```
@@ -83,13 +98,14 @@ make size         # kernel / ISO size report
 | `ps` / `fork` / `wait` / `kill` / `signal` | Processes |
 | `ls` `cat` `pwd` `cd` `mkdir` `touch` `rm` `rmdir` | ext2 |
 | **`user`** | Enter ring 3, demo syscalls, return |
+| `run` / `exec` | Load ELF from disk into ring 3 |
 | `reboot` / `halt` / `panic` / `fault` | Machine control / tests |
 
 Keys: **F1–F6** screens · **Shift+Up/Down** scroll · **Ctrl+Alt+Del** poweroff
 
 ---
 
-## Boot flow
+## Boot flow (i686)
 
 ```text
 QEMU → GRUB (or -kernel) → _start (ESP=stack_top, save Multiboot)
@@ -113,7 +129,7 @@ QEMU → GRUB (or -kernel) → _start (ESP=stack_top, save Multiboot)
 | 6 | User stack | `0x33` |
 | 7 | TSS | `0x38` |
 
-### Syscall ABI (`int 0x80`)
+### Syscall ABI (`int 0x80`, current tree)
 
 | EAX | Name | Args |
 |----:|------|------|
@@ -157,9 +173,9 @@ QEMU → GRUB (or -kernel) → _start (ESP=stack_top, save Multiboot)
 | Tool | Purpose |
 |------|---------|
 | Rust nightly (`rust-toolchain.toml`) | `build-std` / freestanding |
-| nasm, ld (elf_i386) | ASM + final link |
-| grub-mkrescue + i386-pc modules | ISO |
-| qemu-system-i386 | Emulation |
+| nasm, ld | ASM + final link |
+| grub-mkrescue + appropriate GRUB modules | ISO |
+| qemu-system-i386 (32-bit baseline) / qemu-system-x86_64 (port) | Emulation |
 | e2fsprogs (`mkfs.ext2`) | Disk image |
 
 ```sh
@@ -178,9 +194,10 @@ See **[SMOKE.md](SMOKE.md)** for a step-by-step manual checklist (boot, FS, `use
 
 ## Limitations
 
-- Single shared address space; ring-3 demo is one fixed program (no ELF loader)
+- Single shared address space (no per-process page tables yet)
 - `read` / full file-descriptor table are stubs
 - No preemptive multi-process scheduling beyond cooperative PCBs
+- Custom syscall numbers (not Linux ABI yet)
 - VGA only (no serial console yet)
 - US QWERTY only
 
@@ -188,4 +205,4 @@ See **[SMOKE.md](SMOKE.md)** for a step-by-step manual checklist (boot, FS, `use
 
 ## License / acknowledgements
 
-Licensing not fully specified in-tree. Built for the **42** KFS track — bare-metal boot, interrupts, memory, and minimal OS services.
+Licensing not fully specified in-tree. Descended from the **42** KFS track (bare-metal boot, interrupts, memory, minimal OS services). Continuing as **munux**.
