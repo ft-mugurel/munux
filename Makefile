@@ -24,7 +24,8 @@ BOOT			=	./multiboot/header.asm
 # PR1 bring-up: only the Multiboot2 + long-mode trampoline is linked.
 # exceptions/timer/syscall asm return in later PRs.
 LINKER			=	linker/linker.ld
-ASM_OBJS		=	build/boot.o build/exceptions.o
+ASM_OBJS		=	build/boot.o build/exceptions.o build/irq.o
+IRQ_ASM			=	./multiboot/irq.asm
 EXCEPTIONS_ASM		=	./multiboot/exceptions.asm
 NASM_FMT		=	elf64
 LD_EMUL			=	elf_x86_64
@@ -130,6 +131,7 @@ build: ${SRCS}
 	@mkdir -p build
 	@${NASM} -f ${NASM_FMT} ${BOOT} -o build/boot.o
 	@${NASM} -f ${NASM_FMT} ${EXCEPTIONS_ASM} -o build/exceptions.o
+	@${NASM} -f ${NASM_FMT} ${IRQ_ASM} -o build/irq.o
 	@${CARGO} build --no-default-features --release
 	@echo -e "$(BOLD)$(GREEN)[✓] KERNEL BUILD DONE$(RESET)"
 	@${LD} -m ${LD_EMUL} -T ${LINKER} -o ${KERNEL_BIN} ${ASM_OBJS} ${KERNEL_OUT}
@@ -143,6 +145,7 @@ build_debug: ${SRCS}
 	@mkdir -p build
 	@${NASM} -f ${NASM_FMT} -g -F dwarf ${BOOT} -o build/boot.o
 	@${NASM} -f ${NASM_FMT} -g -F dwarf ${EXCEPTIONS_ASM} -o build/exceptions.o
+	@${NASM} -f ${NASM_FMT} -g -F dwarf ${IRQ_ASM} -o build/irq.o
 	@${CARGO} build
 	@echo -e "$(BOLD)$(GREEN)[✓] KERNEL BUILD DONE$(RESET)"
 	@${LD} -m ${LD_EMUL} -T ${LINKER} -o ${KERNEL_BIN} ${ASM_OBJS} ${KERNEL_DEBUG_OUT}

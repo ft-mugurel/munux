@@ -1,54 +1,49 @@
-//! Multiboot 1 information structure parsing (memory map).
+//! Multiboot2 information parsing (memory map tag).
 
-/// Multiboot magic value placed in EAX by a compliant bootloader.
-pub const MULTIBOOT_BOOTLOADER_MAGIC: u32 = 0x2BAD_B002;
+/// EAX magic from Multiboot2-compliant loader.
+pub const MULTIBOOT2_MAGIC: u32 = 0x36D7_6289;
 
-/// `flags` bit 0: mem_lower / mem_upper present.
-const FLAG_MEM: u32 = 1 << 0;
-/// `flags` bit 6: mmap_addr / mmap_length present.
-const FLAG_MMAP: u32 = 1 << 6;
+const TAG_END: u32 = 0;
+const TAG_MMAP: u32 = 6;
 
-/// Multiboot mmap type: available RAM.
+/// Available RAM (Multiboot2 mmap type).
 pub const MMAP_AVAILABLE: u32 = 1;
 
-/// Multiboot information structure (fields we care about).
-/// Layout matches the Multiboot 1 spec (partial).
 #[repr(C, packed)]
-pub struct MultibootInfo {
-    pub flags: u32,
-    pub mem_lower: u32, // KiB of memory below 1 MiB
-    pub mem_upper: u32, // KiB of memory above 1 MiB
-    pub boot_device: u32,
-    pub cmdline: u32,
-    pub mods_count: u32,
-    pub mods_addr: u32,
-    pub syms: [u32; 4],
-    pub mmap_length: u32,
-    pub mmap_addr: u32,
+struct Mb2Header {
+    total_size: u32,
+    reserved: u32,
 }
 
-/// One memory-map entry. `size` is the size of the *rest* of the entry.
+#[repr(C, packed)]
+struct Mb2Tag {
+    typ: u32,
+    size: u32,
+}
+
+#[repr(C, packed)]
+struct MmapTagHeader {
+    typ: u32,
+    size: u32,
+    entry_size: u32,
+    entry_version: u32,
+}
+
 #[repr(C, packed)]
 pub struct MmapEntry {
-    pub size: u32,
-    pub base_addr_low: u32,
-    pub base_addr_high: u32,
-    pub length_low: u32,
-    pub length_high: u32,
-    pub type_: u32,
+    pub base_addr: u64,
+    pub length: u64,
+    pub typ: u32,
+    pub reserved: u32,
 }
 
 impl MmapEntry {
     pub fn base(&self) -> u64 {
-        let lo = unsafe { core::ptr::addr_of!(self.base_addr_low).read_unaligned() };
-        let hi = unsafe { core::ptr::addr_of!(self.base_addr_high).read_unaligned() };
-        (hi as u64) << 32 | lo as u64
+        unsafe { core::ptr::addr_of!(self.base_addr).read_unaligned() }
     }
 
     pub fn length(&self) -> u64 {
-        let lo = unsafe { core::ptr::addr_of!(self.length_low).read_unaligned() };
-        let hi = unsafe { core::ptr::addr_of!(self.length_high).read_unaligned() };
-        (hi as u64) << 32 | lo as u64
+        unsafe { core::ptr::addr_of!(self.length).read_unaligned() }
     }
 
     pub fn end(&self) -> u64 {
@@ -56,90 +51,87 @@ impl MmapEntry {
     }
 
     pub fn is_available(&self) -> bool {
-        let t = unsafe { core::ptr::addr_of!(self.type_).read_unaligned() };
+        let t = unsafe { core::ptr::addr_of!(self.typ).read_unaligned() };
         t == MMAP_AVAILABLE
     }
-
-    pub fn entry_size(&self) -> u32 {
-        unsafe { core::ptr::addr_of!(self.size).read_unaligned() }
-    }
 }
 
-/// Validate magic and return a reference to the Multiboot info struct.
+/// Validate magic and walk Multiboot2 tags, calling `f` for each available mmap region.
 ///
 /// # Safety
-/// `info_addr` must point at a valid Multiboot info structure from the bootloader.
-pub unsafe fn load(magic: u32, info_addr: u32) -> Option<&'static MultibootInfo> {
-    if magic != MULTIBOOT_BOOTLOADER_MAGIC {
-        return None;
+/// `info_addr` must point at a valid Multiboot2 info block from the bootloader.
+pub unsafe fn for_each_available_region(
+    magic: u32,
+    info_addr: u32,
+    mut f: impl FnMut(u64, u64),
+) -> bool {
+    if magic != MULTIBOOT2_MAGIC || info_addr == 0 {
+        return false;
     }
-    if info_addr == 0 {
-        return None;
+
+    let hdr = &*(info_addr as *const Mb2Header);
+    let total = core::ptr::addr_of!(hdr.total_size).read_unaligned() as usize;
+    if total < 8 {
+        return false;
     }
-    Some(&*(info_addr as *const MultibootInfo))
+
+    let mut offset = 8usize; // skip fixed header
+    let end = info_addr as usize + total;
+    let mut found_mmap = false;
+
+    while info_addr as usize + offset + 8 <= end {
+        let tag_ptr = (info_addr as usize + offset) as *const Mb2Tag;
+        let typ = core::ptr::addr_of!((*tag_ptr).typ).read_unaligned();
+        let size = core::ptr::addr_of!((*tag_ptr).size).read_unaligned() as usize;
+
+        if size < 8 {
+            break;
+        }
+        if typ == TAG_END {
+            break;
+        }
+
+        if typ == TAG_MMAP && size >= core::mem::size_of::<MmapTagHeader>() {
+            found_mmap = true;
+            let mh = tag_ptr as *const MmapTagHeader;
+            let entry_size =
+                core::ptr::addr_of!((*mh).entry_size).read_unaligned() as usize;
+            if entry_size < core::mem::size_of::<MmapEntry>() {
+                // still try minimum layout
+            }
+            let entries_start =
+                info_addr as usize + offset + core::mem::size_of::<MmapTagHeader>();
+            let entries_end = info_addr as usize + offset + size;
+            let step = if entry_size >= 24 { entry_size } else { 24 };
+
+            let mut p = entries_start;
+            while p + 24 <= entries_end {
+                let e = &*(p as *const MmapEntry);
+                if e.is_available() && e.length() > 0 {
+                    f(e.base(), e.end());
+                }
+                p += step;
+            }
+        }
+
+        // tags are 8-byte aligned
+        offset = (offset + size + 7) & !7;
+    }
+
+    found_mmap
 }
 
-impl MultibootInfo {
-    pub fn has_mem(&self) -> bool {
-        let flags = unsafe { core::ptr::addr_of!(self.flags).read_unaligned() };
-        flags & FLAG_MEM != 0
-    }
-
-    pub fn has_mmap(&self) -> bool {
-        let flags = unsafe { core::ptr::addr_of!(self.flags).read_unaligned() };
-        flags & FLAG_MMAP != 0
-    }
-
-    pub fn mem_upper_kib(&self) -> u32 {
-        unsafe { core::ptr::addr_of!(self.mem_upper).read_unaligned() }
-    }
-
-    pub fn mmap_addr(&self) -> u32 {
-        unsafe { core::ptr::addr_of!(self.mmap_addr).read_unaligned() }
-    }
-
-    pub fn mmap_length(&self) -> u32 {
-        unsafe { core::ptr::addr_of!(self.mmap_length).read_unaligned() }
-    }
-
-    /// Iterate mmap entries if present.
-    pub fn mmap_entries(&self) -> MmapIter {
-        let addr = self.mmap_addr();
-        let len = self.mmap_length();
-        if !self.has_mmap() || addr == 0 || len == 0 {
-            return MmapIter {
-                cursor: 0,
-                end: 0,
-            };
+/// Highest exclusive end address among available regions (for sizing the PMM).
+pub unsafe fn max_available_end(magic: u32, info_addr: u32) -> Option<u64> {
+    let mut max = 0u64;
+    let ok = for_each_available_region(magic, info_addr, |_b, e| {
+        if e > max {
+            max = e;
         }
-        MmapIter {
-            cursor: addr as usize,
-            end: addr as usize + len as usize,
-        }
-    }
-}
-
-pub struct MmapIter {
-    cursor: usize,
-    end: usize,
-}
-
-impl Iterator for MmapIter {
-    type Item = &'static MmapEntry;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.cursor + 4 > self.end {
-            return None;
-        }
-        let entry = unsafe { &*(self.cursor as *const MmapEntry) };
-        let size = entry.entry_size() as usize;
-        // size field describes remaining bytes; total entry = size + 4
-        let total = size.checked_add(4)?;
-        if size < 20 {
-            // minimum: base(8)+len(8)+type(4) after size
-            return None;
-        }
-        self.cursor = self.cursor.saturating_add(total);
-        Some(entry)
+    });
+    if ok && max > 0 {
+        Some(max)
+    } else {
+        None
     }
 }

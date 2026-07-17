@@ -1,62 +1,85 @@
+//! PS/2 keyboard IRQ1 → vector 33 (ring buffer for shell).
+
 use crate::interrupts::idt::register_interrupt_handler;
-use crate::interrupts::keyboard::character_map::*;
+use crate::interrupts::keyboard::character_map::keycode_to_char;
 use crate::interrupts::keyboard::keycode::{decode_set1_scancode, KeyCode, KeyEvent, Modifiers};
-use crate::shell;
-use crate::vga::text_mod::out::{
-    scroll_view_down, scroll_view_up, switch_screen,
-};
-use crate::x86::io::{outb, outw};
+use crate::interrupts::pic;
+use crate::x86::io::{inb, outw};
 
 static mut EXTENDED_SCANCODE: bool = false;
 static mut MODIFIERS: Modifiers = Modifiers::empty();
 
 const SCANCODE_EXTENDED_PREFIX: u8 = 0xE0;
 const KEYBOARD_DATA_PORT: u16 = 0x60;
-const PIC_MASTER_COMMAND_PORT: u16 = 0x20;
-const PIC_EOI: u8 = 0x20;
-
 const KEYBOARD_IRQ_VECTOR: u8 = 33;
+
+const BUF_CAP: usize = 128;
+static mut KBUF: [u8; BUF_CAP] = [0; BUF_CAP];
+static mut KHEAD: usize = 0;
+static mut KTAIL: usize = 0;
+static mut KLEN: usize = 0;
+
+fn buf_push(b: u8) {
+    unsafe {
+        if KLEN >= BUF_CAP {
+            KHEAD = (KHEAD + 1) % BUF_CAP;
+            KLEN -= 1;
+        }
+        KBUF[KTAIL] = b;
+        KTAIL = (KTAIL + 1) % BUF_CAP;
+        KLEN += 1;
+    }
+}
+
+pub fn pop_char() -> Option<u8> {
+    unsafe {
+        if KLEN == 0 {
+            return None;
+        }
+        let b = KBUF[KHEAD];
+        KHEAD = (KHEAD + 1) % BUF_CAP;
+        KLEN -= 1;
+        Some(b)
+    }
+}
+
+pub fn buffered_len() -> usize {
+    unsafe { KLEN }
+}
 
 fn handle_key_press(event: KeyEvent, modifiers: Modifiers) -> bool {
     if event.key == KeyCode::Delete && modifiers.ctrl() && modifiers.alt() {
         return true;
     }
-
     match event.key {
-        // Scrollback (does not disturb the shell line buffer)
-        KeyCode::ArrowUp if modifiers.shift() => scroll_view_up(),
-        KeyCode::ArrowDown if modifiers.shift() => scroll_view_down(),
-        // Virtual screens
-        KeyCode::F1 => switch_screen(0),
-        KeyCode::F2 => switch_screen(1),
-        KeyCode::F3 => switch_screen(2),
-        KeyCode::F4 => switch_screen(3),
-        KeyCode::F5 => switch_screen(4),
-        KeyCode::F6 => switch_screen(5),
-        // Free cursor arrows without shift are ignored while shell owns input
         KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::ArrowLeft | KeyCode::ArrowRight => {}
+        KeyCode::F1 | KeyCode::F2 | KeyCode::F3 | KeyCode::F4 | KeyCode::F5 | KeyCode::F6 => {}
         _ => {
             if !modifiers.has_text_blocking_modifier() {
                 if let Some(ch) = keycode_to_char(event.key, modifiers) {
-                    shell::on_char(ch);
+                    if ch == '\n' || ch == '\r' {
+                        buf_push(b'\n');
+                    } else if ch == '\x08' {
+                        buf_push(0x08);
+                    } else if (ch as u32) >= 0x20 && (ch as u32) < 0x7F {
+                        buf_push(ch as u8);
+                    }
                 }
             }
         }
     }
-
     false
 }
 
 fn shutdown_system() -> ! {
     unsafe {
-        outw(0x604, 0x2000); // QEMU
-        outw(0xB004, 0x2000); // Bochs
-        outw(0x4004, 0x3400); // VirtualBox
+        outw(0x604, 0x2000);
+        outw(0xB004, 0x2000);
+        outw(0x4004, 0x3400);
     }
-
     loop {
         unsafe {
-            core::arch::asm!("hlt");
+            core::arch::asm!("cli; hlt");
         }
     }
 }
@@ -64,12 +87,7 @@ fn shutdown_system() -> ! {
 #[no_mangle]
 pub extern "C" fn keyboard_interrupt_handler() {
     let mut should_shutdown = false;
-
-    let scancode: u8 = unsafe {
-        let mut code: u8;
-        core::arch::asm!("in al, dx", out("al") code, in("dx") KEYBOARD_DATA_PORT);
-        code
-    };
+    let scancode = unsafe { inb(KEYBOARD_DATA_PORT) };
 
     unsafe {
         if scancode == SCANCODE_EXTENDED_PREFIX {
@@ -88,7 +106,7 @@ pub extern "C" fn keyboard_interrupt_handler() {
     }
 
     unsafe {
-        outb(PIC_MASTER_COMMAND_PORT, PIC_EOI);
+        pic::eoi_master();
     }
 
     if should_shutdown {

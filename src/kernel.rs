@@ -1,14 +1,18 @@
 //! munux kernel entry (x86_64).
 //!
-//! PR1: long mode + VGA banner
-//! PR2: GDT64 + TSS64 + IDT64 + exception handlers
+//! PR1–PR4: boot, GDT/IDT, memory, IRQs
+//! PR5: heap + interactive shell
 
 #![no_std]
 #![no_main]
 
+pub mod console;
 pub mod gdt;
 pub mod interrupts;
+pub mod memory;
+pub mod shell;
 pub mod vga_print;
+pub mod x86;
 
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -17,9 +21,11 @@ use gdt::gdt::load_gdt;
 use gdt::tss::init_tss;
 use interrupts::exceptions::init_exceptions;
 use interrupts::idt::{init_idt, present_gate_count};
-
-/// Multiboot2 magic in EAX at entry (saved by trampoline).
-const MULTIBOOT2_MAGIC: u32 = 0x36D7_6289;
+use interrupts::{enable_interrupts, init_keyboard, init_pic, init_timer};
+use memory::{
+    free_frames, init_heap, init_paging, init_pmm, kmalloc, kfree, page_directory_phys,
+    MULTIBOOT2_MAGIC,
+};
 
 extern "C" {
     static multiboot_magic_value: u32;
@@ -27,13 +33,11 @@ extern "C" {
 }
 
 #[panic_handler]
-fn rust_panic(info: &PanicInfo) -> ! {
+fn rust_panic(_info: &PanicInfo) -> ! {
+    // Best-effort: raw VGA (console may be mid-write)
     vga_print::clear_screen();
     vga_print::println_line(0, b"*** munux RUST PANIC ***", 0x4F);
-    // Message is often not static; show a fixed hint.
-    let _ = info;
-    vga_print::println_line(2, b"(see exception path for CPU faults)", 0x0F);
-    vga_print::println_line(22, b"System halted.", 0x08);
+    vga_print::println_line(2, b"System halted.", 0x08);
     loop {
         unsafe {
             asm!("cli; hlt", options(nomem, nostack));
@@ -44,39 +48,71 @@ fn rust_panic(info: &PanicInfo) -> ! {
 #[no_mangle]
 pub extern "C" fn kmain() -> ! {
     let magic = unsafe { core::ptr::addr_of!(multiboot_magic_value).read_unaligned() };
-    let _mbi = unsafe { core::ptr::addr_of!(multiboot_info_addr).read_unaligned() };
+    let mbi = unsafe { core::ptr::addr_of!(multiboot_info_addr).read_unaligned() };
 
-    vga_print::clear_screen();
-    vga_print::println_line(0, b"munux x86_64", 0x0F);
-    vga_print::println_line(1, b"long mode OK", 0x0A);
+    console::clear();
+    console::set_color(0x0F);
+    console::println("munux x86_64");
+    console::set_color(0x0A);
+    console::println("long mode OK");
+    console::set_color(0x07);
 
     if magic == MULTIBOOT2_MAGIC {
-        vga_print::println_line(2, b"multiboot2: OK", 0x0E);
+        console::println("multiboot2: OK");
     } else {
-        vga_print::println_line(2, b"multiboot2: bad magic", 0x0C);
+        console::set_color(0x0C);
+        console::println("multiboot2: bad magic");
+        console::set_color(0x07);
     }
 
-    // --- PR2: descriptors + exceptions ---
     load_gdt();
     init_tss();
     init_idt();
     init_exceptions();
+    console::print("GDT+TSS OK  IDT gates=");
+    console::write_u64(present_gate_count() as u64);
+    console::println("");
 
-    let gates = present_gate_count();
-    vga_print::print_str(4, 0, b"GDT+TSS: OK", 0x0A);
-    vga_print::print_str(5, 0, b"IDT gates present: ", 0x07);
-    vga_print::print_u64(5, 19, gates as u64, 0x0E);
+    init_pmm(magic, mbi);
+    console::print("PMM free frames=");
+    console::write_u64(free_frames() as u64);
+    console::println("");
 
-    vga_print::println_line(7, b"Triggering #UD (ud2) to test handler...", 0x0B);
+    init_paging();
+    let cr3 = page_directory_phys().map(|p| p.as_u64()).unwrap_or(0);
+    console::print("paging ON  CR3=");
+    console::write_hex64(cr3);
+    console::println("");
 
-    // Deliberate invalid opcode -> vector 6 -> exception_handler panic screen.
-    unsafe {
-        asm!("ud2", options(nomem, nostack));
+    // --- PR5: heap ---
+    init_heap();
+    if let Some(p) = kmalloc(32) {
+        console::print("heap kmalloc OK @ ");
+        console::write_hex64(p as u64);
+        console::println("");
+        kfree(p);
+    } else {
+        console::set_color(0x0C);
+        console::println("heap kmalloc FAIL");
+        console::set_color(0x07);
     }
 
-    // Unreachable if IDT works.
-    vga_print::println_line(9, b"ERROR: ud2 did not fault", 0x4F);
+    // --- PR4: IRQs ---
+    init_timer();
+    init_keyboard();
+    unsafe {
+        init_pic();
+    }
+    enable_interrupts();
+    console::print("IRQs ON  IDT gates=");
+    console::write_u64(present_gate_count() as u64);
+    console::println("");
+
+    // --- PR5: shell ---
+    shell::init();
+
     loop {
+        shell::poll();
         unsafe {
             asm!("hlt", options(nomem, nostack));
         }
