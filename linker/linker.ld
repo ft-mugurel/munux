@@ -1,14 +1,9 @@
 ENTRY(_start)
-OUTPUT_FORMAT(elf32-i386)
+OUTPUT_FORMAT(elf64-x86-64)
+OUTPUT_ARCH(i386:x86-64)
 
-/* Single loadable image starting at 1 MiB (standard Multiboot ELF layout). */
 SECTIONS {
 	. = 1M;
-
-	/* Multiboot header must be in the first 8 KiB of the OS image. */
-	.multiboot ALIGN(4) : {
-		KEEP(*(.multiboot))
-	}
 
 	.text ALIGN(4K) : {
 		*(.text .text.*)
@@ -22,7 +17,6 @@ SECTIONS {
 		*(.data .data.*)
 	}
 
-	/* Kernel stack: grows down toward stack_bottom. */
 	.stack ALIGN(16) (NOLOAD) : {
 		stack_bottom = .;
 		. += 64K;
@@ -34,6 +28,5 @@ SECTIONS {
 		*(.bss .bss.*)
 	}
 
-	/* Symbols useful for later memory management */
 	kernel_end = .;
 }

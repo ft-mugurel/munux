@@ -1,14 +1,8 @@
-; CPU exception stubs (vectors 0–31)
-; Builds a common stack frame and calls Rust `exception_handler`.
-;
-; CPU already pushed (same privilege):
-;   [ESP] EIP, CS, EFLAGS
-; Some vectors also push an error code before that.
-;
-; We normalize to:
-;   pusha regs, vector, error_code, EIP, CS, EFLAGS
+; munux x86_64 CPU exception stubs (vectors 0-31)
+; Builds a common frame and calls Rust exception_handler.
 
-bits 32
+bits 64
+default abs
 
 section .text
 
@@ -16,41 +10,71 @@ extern exception_handler
 
 ; ---------------------------------------------------------------------------
 ; Common path
+; After stub: [RSP] = vector, [RSP+8] = error_code, then CPU frame
+; We push GPRs so ExceptionFrame starts at RAX (lowest address).
 ; ---------------------------------------------------------------------------
 isr_common:
-	pusha				; EDI ESI EBP ESP EBX EDX ECX EAX
+	push r15
+	push r14
+	push r13
+	push r12
+	push r11
+	push r10
+	push r9
+	push r8
+	push rbp
+	push rdi
+	push rsi
+	push rdx
+	push rcx
+	push rbx
+	push rax
 
-	; Pass pointer to ExceptionFrame (ESP after pusha → &EDI) as cdecl arg
-	mov eax, esp
-	push eax
+	; System V AMD64: rdi = first arg = pointer to frame
+	mov rdi, rsp
+	; 16-byte align stack before call
+	mov rbp, rsp
+	and rsp, -16
 	call exception_handler
-	; exception_handler never returns. Fallback if it ever did:
-	add esp, 4
-	popa
-	add esp, 8			; pop vector + error_code
-	iret
+	; never returns; if it did:
+	mov rsp, rbp
+	pop rax
+	pop rbx
+	pop rcx
+	pop rdx
+	pop rsi
+	pop rdi
+	pop rbp
+	pop r8
+	pop r9
+	pop r10
+	pop r11
+	pop r12
+	pop r13
+	pop r14
+	pop r15
+	add rsp, 16			; pop vector + error
+	iretq
 
 ; ---------------------------------------------------------------------------
 ; Stub macros
 ; ---------------------------------------------------------------------------
-; No CPU error code: push dummy 0, then vector.
 %macro ISR_NO_ERR 1
 global isr_exception_%1
 isr_exception_%1:
-	push dword 0
-	push dword %1
+	push qword 0			; dummy error code
+	push qword %1			; vector
 	jmp isr_common
 %endmacro
 
-; CPU already pushed error code: only push vector.
 %macro ISR_ERR 1
 global isr_exception_%1
 isr_exception_%1:
-	push dword %1
+	push qword %1			; vector (error already on stack)
 	jmp isr_common
 %endmacro
 
-; Vectors 0–31 (error-code vectors: 8, 10–14, 17)
+; Vectors 0-31 (error-code: 8, 10-14, 17)
 ISR_NO_ERR 0
 ISR_NO_ERR 1
 ISR_NO_ERR 2

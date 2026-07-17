@@ -1,37 +1,25 @@
+//! munux kernel entry (x86_64).
+//!
+//! PR1: long mode + VGA banner
+//! PR2: GDT64 + TSS64 + IDT64 + exception handlers
+
 #![no_std]
 #![no_main]
 
-pub mod x86;
-pub mod interrupts;
-pub mod vga;
 pub mod gdt;
-pub mod shell;
-pub mod panic;
-pub mod memory;
-pub mod process;
-pub mod drivers;
-pub mod fs;
-pub mod elf;
-pub mod syscalls;
+pub mod interrupts;
+pub mod vga_print;
 
+use core::arch::asm;
 use core::panic::PanicInfo;
 
 use gdt::gdt::load_gdt;
 use gdt::tss::init_tss;
-use memory::{init_heap, init_pmm, init_paging};
-use process::init_processes;
-use syscalls::init_syscalls;
-
 use interrupts::exceptions::init_exceptions;
-use interrupts::keyboard::init::init_keyboard;
-use interrupts::idt::init_idt;
-use interrupts::pic::init_pic;
-use interrupts::signal::{init_default_handlers, process_signals};
-use interrupts::timer::init_timer;
-use interrupts::utils::enable_interrupts;
-use vga::text_mod::out::init_virtual_screens;
+use interrupts::idt::{init_idt, present_gate_count};
 
-use crate::vga::text_mod::cursor::set_big_cursor;
+/// Multiboot2 magic in EAX at entry (saved by trampoline).
+const MULTIBOOT2_MAGIC: u32 = 0x36D7_6289;
 
 extern "C" {
     static multiboot_magic_value: u32;
@@ -40,81 +28,57 @@ extern "C" {
 
 #[panic_handler]
 fn rust_panic(info: &PanicInfo) -> ! {
-    use core::fmt::Write;
-
-    struct Buf {
-        data: [u8; 256],
-        len: usize,
-    }
-
-    impl Buf {
-        fn new() -> Self {
-            Self {
-                data: [0; 256],
-                len: 0,
-            }
-        }
-
-        fn as_str(&self) -> &str {
-            core::str::from_utf8(&self.data[..self.len]).unwrap_or("panic")
+    vga_print::clear_screen();
+    vga_print::println_line(0, b"*** munux RUST PANIC ***", 0x4F);
+    // Message is often not static; show a fixed hint.
+    let _ = info;
+    vga_print::println_line(2, b"(see exception path for CPU faults)", 0x0F);
+    vga_print::println_line(22, b"System halted.", 0x08);
+    loop {
+        unsafe {
+            asm!("cli; hlt", options(nomem, nostack));
         }
     }
-
-    impl Write for Buf {
-        fn write_str(&mut self, s: &str) -> core::fmt::Result {
-            for &b in s.as_bytes() {
-                if self.len < self.data.len() {
-                    self.data[self.len] = b;
-                    self.len += 1;
-                }
-            }
-            Ok(())
-        }
-    }
-
-    let mut buf = Buf::new();
-    let _ = write!(&mut buf, "{}", info);
-    panic::kernel_panic(buf.as_str());
 }
 
 #[no_mangle]
 pub extern "C" fn kmain() -> ! {
     let magic = unsafe { core::ptr::addr_of!(multiboot_magic_value).read_unaligned() };
-    let mbi = unsafe { core::ptr::addr_of!(multiboot_info_addr).read_unaligned() };
+    let _mbi = unsafe { core::ptr::addr_of!(multiboot_info_addr).read_unaligned() };
 
+    vga_print::clear_screen();
+    vga_print::println_line(0, b"munux x86_64", 0x0F);
+    vga_print::println_line(1, b"long mode OK", 0x0A);
+
+    if magic == MULTIBOOT2_MAGIC {
+        vga_print::println_line(2, b"multiboot2: OK", 0x0E);
+    } else {
+        vga_print::println_line(2, b"multiboot2: bad magic", 0x0C);
+    }
+
+    // --- PR2: descriptors + exceptions ---
     load_gdt();
-    init_tss(); // GDT[7] + ltr — needed before ring-3 / int 0x80 stack switch
+    init_tss();
     init_idt();
     init_exceptions();
+
+    let gates = present_gate_count();
+    vga_print::print_str(4, 0, b"GDT+TSS: OK", 0x0A);
+    vga_print::print_str(5, 0, b"IDT gates present: ", 0x07);
+    vga_print::print_u64(5, 19, gates as u64, 0x0E);
+
+    vga_print::println_line(7, b"Triggering #UD (ud2) to test handler...", 0x0B);
+
+    // Deliberate invalid opcode -> vector 6 -> exception_handler panic screen.
     unsafe {
-        init_pic();
+        asm!("ud2", options(nomem, nostack));
     }
-    init_keyboard();
-    init_timer(); // IRQ0 — CPU ticks for process signals
-    init_default_handlers();
-    set_big_cursor();
-    enable_interrupts();
-    init_virtual_screens();
 
-    crate::println!("KFS i686 kernel");
-    crate::println!(
-        "IDT: {} gates | timer: on | signals: on",
-        interrupts::present_gate_count()
-    );
-
-    init_pmm(magic, mbi);
-    init_paging();
-    init_heap();
-    init_processes();
-    fs::init();
-    init_syscalls(); // int 0x80 DPL=3 (after paging so user pages can be mapped)
-
-    shell::init();
-
+    // Unreachable if IDT works.
+    vga_print::println_line(9, b"ERROR: ud2 did not fault", 0x4F);
     loop {
-        process_signals();
         unsafe {
-            core::arch::asm!("hlt");
+            asm!("hlt", options(nomem, nostack));
         }
     }
 }

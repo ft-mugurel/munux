@@ -1,120 +1,101 @@
-//! Task State Segment — required for ring-3 → ring-0 stack switch (syscalls / IRQs).
+//! 64-bit Task State Segment (RSP0 for privilege transitions).
 
 use core::arch::asm;
 use core::ptr::addr_of;
 
-use super::gdt::{GdtEntry, GDT_ADDRESS, KERNEL_STACK_SELECTOR};
+use super::gdt::set_tss_descriptor;
 
-/// GDT index 7 → selector 0x38
-pub const TSS_SELECTOR: u16 = 0x38;
+/// Selector for GDT index 3.
+pub const TSS_SELECTOR: u16 = 0x18;
 
+/// Hardware TSS layout (Intel SDM).
 #[repr(C, packed)]
 pub struct Tss {
-    pub link: u32,
-    pub esp0: u32,
-    pub ss0: u32,
-    pub esp1: u32,
-    pub ss1: u32,
-    pub esp2: u32,
-    pub ss2: u32,
-    pub cr3: u32,
-    pub eip: u32,
-    pub eflags: u32,
-    pub eax: u32,
-    pub ecx: u32,
-    pub edx: u32,
-    pub ebx: u32,
-    pub esp: u32,
-    pub ebp: u32,
-    pub esi: u32,
-    pub edi: u32,
-    pub es: u32,
-    pub cs: u32,
-    pub ss: u32,
-    pub ds: u32,
-    pub fs: u32,
-    pub gs: u32,
-    pub ldt: u32,
-    pub trap: u16,
+    reserved0: u32,
+    pub rsp0: u64,
+    pub rsp1: u64,
+    pub rsp2: u64,
+    reserved1: u64,
+    pub ist: [u64; 7],
+    reserved2: u64,
+    reserved3: u16,
     pub iomap_base: u16,
 }
 
-static mut TSS: Tss = Tss {
-    link: 0,
-    esp0: 0,
-    ss0: 0,
-    esp1: 0,
-    ss1: 0,
-    esp2: 0,
-    ss2: 0,
-    cr3: 0,
-    eip: 0,
-    eflags: 0,
-    eax: 0,
-    ecx: 0,
-    edx: 0,
-    ebx: 0,
-    esp: 0,
-    ebp: 0,
-    esi: 0,
-    edi: 0,
-    es: 0,
-    cs: 0,
-    ss: 0,
-    ds: 0,
-    fs: 0,
-    gs: 0,
-    ldt: 0,
-    trap: 0,
-    iomap_base: 104, // sizeof Tss
-};
-
-extern "C" {
-    static stack_top: u8;
+/// Packed 16-byte TSS descriptor fields (split across two GDT entries).
+pub struct TssDescriptor {
+    pub limit_low: u16,
+    pub base_low: u16,
+    pub base_middle: u8,
+    pub access: u8,
+    pub granularity: u8,
+    pub base_high: u8,
+    pub base_upper: u32,
 }
 
-/// Build a 32-bit available TSS descriptor (type 0x89).
-pub fn tss_gdt_entry(base: u32, limit: u32) -> GdtEntry {
-    GdtEntry {
+static mut TSS: Tss = Tss {
+    reserved0: 0,
+    rsp0: 0,
+    rsp1: 0,
+    rsp2: 0,
+    reserved1: 0,
+    ist: [0; 7],
+    reserved2: 0,
+    reserved3: 0,
+    iomap_base: 0,
+};
+
+/// Dedicated double-fault / IST stacks later; for now one kernel IST page.
+#[repr(align(16))]
+struct IstStack {
+    _bytes: [u8; 4096],
+}
+static mut IST_STACK: IstStack = IstStack { _bytes: [0; 4096] };
+
+fn tss_descriptor(base: u64, limit: u32) -> TssDescriptor {
+    TssDescriptor {
         limit_low: (limit & 0xFFFF) as u16,
         base_low: (base & 0xFFFF) as u16,
         base_middle: ((base >> 16) & 0xFF) as u8,
-        access: 0x89, // present, ring0, 32-bit TSS available
-        granularity: ((limit >> 16) & 0x0F) as u8, // G=0, limit high nibble
+        access: 0x89, // present, 64-bit available TSS
+        granularity: ((limit >> 16) & 0x0F) as u8,
         base_high: ((base >> 24) & 0xFF) as u8,
+        base_upper: (base >> 32) as u32,
     }
 }
 
-/// Initialize TSS (ESP0/SS0) and write descriptor into GDT[7], then `ltr`.
+/// Fill TSS, install descriptor, `ltr`.
 pub fn init_tss() {
-    let base = addr_of!(TSS) as u32;
+    let base = addr_of!(TSS) as u64;
     let limit = (core::mem::size_of::<Tss>() - 1) as u32;
+
     unsafe {
-        TSS.ss0 = KERNEL_STACK_SELECTOR as u32;
-        TSS.esp0 = addr_of!(stack_top) as u32;
+        // RSP0: current stack is fine until we enter ring 3.
+        let mut rsp: u64;
+        asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));
+        TSS.rsp0 = rsp;
         TSS.iomap_base = core::mem::size_of::<Tss>() as u16;
 
-        // Patch live GDT at 0x800, entry index 7
-        let entry = tss_gdt_entry(base, limit);
-        let dest = (GDT_ADDRESS as *mut GdtEntry).add(7);
-        dest.write_volatile(entry);
+        // IST1: separate stack for double fault later.
+        let ist_top = (addr_of!(IST_STACK) as *const u8 as usize + 4096) as u64;
+        TSS.ist[0] = ist_top;
+
+        set_tss_descriptor(tss_descriptor(base, limit));
 
         asm!(
-            "mov ax, {sel}",
-            "ltr ax",
-            sel = const TSS_SELECTOR,
+            "ltr {sel:x}",
+            sel = in(reg) TSS_SELECTOR,
             options(nostack, preserves_flags)
         );
     }
 }
 
-/// Update kernel stack pointer used on ring transitions into ring 0.
-pub fn set_kernel_stack(esp0: u32) {
+pub fn set_kernel_stack(rsp0: u64) {
     unsafe {
-        TSS.esp0 = esp0;
+        TSS.rsp0 = rsp0;
     }
 }
 
-pub fn tss_esp0() -> u32 {
-    unsafe { core::ptr::addr_of!(TSS.esp0).read_unaligned() }
+pub fn tss_rsp0() -> u64 {
+    unsafe { core::ptr::addr_of!(TSS.rsp0).read_unaligned() }
 }

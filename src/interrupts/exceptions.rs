@@ -1,58 +1,60 @@
-//! CPU exception handlers (vectors 0–31).
-//!
-//! On x86 these are faults/traps/aborts from the CPU itself (not PIC IRQs).
-//! Without handlers, a fault triple-faults → black screen / reboot.
-//! With handlers, we print a clear panic and halt.
+//! CPU exception handlers (vectors 0–31) for x86_64.
 
 use core::arch::asm;
 
 use crate::interrupts::idt::register_interrupt_handler;
-use crate::interrupts::signal::{self, sig};
-use crate::panic::kernel_panic_with_detail;
 
-/// Stack layout built by `multiboot/exceptions.asm` after `pusha`.
+/// Stack layout built by `multiboot/exceptions.asm` after saving GPRs.
 ///
-/// Memory grows down; `frame` points at the lowest address (EDI).
+/// `frame` points at the lowest address (saved RAX).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ExceptionFrame {
-    pub edi: u32,
-    pub esi: u32,
-    pub ebp: u32,
-    pub esp_dummy: u32, // ESP pushed by pusha (not very useful)
-    pub ebx: u32,
-    pub edx: u32,
-    pub ecx: u32,
-    pub eax: u32,
-    pub vector: u32,
-    pub error_code: u32,
-    pub eip: u32,
-    pub cs: u32,
-    pub eflags: u32,
+    pub rax: u64,
+    pub rbx: u64,
+    pub rcx: u64,
+    pub rdx: u64,
+    pub rsi: u64,
+    pub rdi: u64,
+    pub rbp: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub r10: u64,
+    pub r11: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    pub vector: u64,
+    pub error_code: u64,
+    pub rip: u64,
+    pub cs: u64,
+    pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
 }
 
-/// Human-readable names for the first 32 CPU exceptions.
 const EXCEPTION_NAMES: [&str; 32] = [
     "Divide-by-zero (#DE)",
     "Debug (#DB)",
-    "Non-maskable interrupt (NMI)",
+    "NMI",
     "Breakpoint (#BP)",
     "Overflow (#OF)",
-    "Bound range exceeded (#BR)",
+    "Bound range (#BR)",
     "Invalid opcode (#UD)",
     "Device not available (#NM)",
     "Double fault (#DF)",
     "Coprocessor segment overrun",
     "Invalid TSS (#TS)",
     "Segment not present (#NP)",
-    "Stack-segment fault (#SS)",
-    "General protection fault (#GP)",
+    "Stack fault (#SS)",
+    "General protection (#GP)",
     "Page fault (#PF)",
     "Reserved",
-    "x87 floating-point (#MF)",
+    "x87 FP (#MF)",
     "Alignment check (#AC)",
     "Machine check (#MC)",
-    "SIMD floating-point (#XM)",
+    "SIMD FP (#XM)",
     "Virtualization (#VE)",
     "Control protection (#CP)",
     "Reserved",
@@ -63,14 +65,11 @@ const EXCEPTION_NAMES: [&str; 32] = [
     "Reserved",
     "Hypervisor injection",
     "VMM communication",
-    "Security exception (#SX)",
+    "Security (#SX)",
     "Reserved",
 ];
 
-/// Called from assembly for every CPU exception.
-///
-/// # Safety
-/// `frame` must point at a valid [`ExceptionFrame`] on the interrupt stack.
+/// Called from assembly for every CPU exception. Does not return.
 #[no_mangle]
 pub unsafe extern "C" fn exception_handler(frame: *const ExceptionFrame) -> ! {
     let f = &*frame;
@@ -81,141 +80,83 @@ pub unsafe extern "C" fn exception_handler(frame: *const ExceptionFrame) -> ! {
         "Unknown exception"
     };
 
-    // CR2 holds the faulting linear address for page faults (#PF = 14).
     let cr2 = if vec == 14 { read_cr2() } else { 0 };
 
-    // Build a small detail string without heap allocation.
-    let mut detail = DetailBuf::new();
-    detail.push_str(name);
-    detail.push_str("\n  vector=");
-    detail.push_u32(f.vector);
-    detail.push_str(" error=");
-    detail.push_hex(f.error_code);
-    detail.push_str("\n  EIP=");
-    detail.push_hex(f.eip);
-    detail.push_str(" CS=");
-    detail.push_hex(f.cs);
-    detail.push_str(" EFLAGS=");
-    detail.push_hex(f.eflags);
-    detail.push_str("\n  EAX=");
-    detail.push_hex(f.eax);
-    detail.push_str(" EBX=");
-    detail.push_hex(f.ebx);
-    detail.push_str(" ECX=");
-    detail.push_hex(f.ecx);
-    detail.push_str(" EDX=");
-    detail.push_hex(f.edx);
-    detail.push_str("\n  ESI=");
-    detail.push_hex(f.esi);
-    detail.push_str(" EDI=");
-    detail.push_hex(f.edi);
-    detail.push_str(" EBP=");
-    detail.push_hex(f.ebp);
+    crate::vga_print::clear_screen();
+    crate::vga_print::println_line(0, b"*** munux KERNEL PANIC ***", 0x4F);
+    crate::vga_print::println_line(1, b"CPU exception", 0x0C);
+
+    let mut line = 3;
+    crate::vga_print::print_str(line, 0, name.as_bytes(), 0x0F);
+    line += 1;
+
+    crate::vga_print::print_str(line, 0, b"vector=", 0x07);
+    crate::vga_print::print_u64(line, 7, f.vector, 0x0E);
+    crate::vga_print::print_str(line, 26, b" error=", 0x07);
+    crate::vga_print::print_hex64(line, 33, f.error_code, 0x0E);
+    line += 1;
+
+    crate::vga_print::print_str(line, 0, b"RIP=", 0x07);
+    crate::vga_print::print_hex64(line, 4, f.rip, 0x0B);
+    line += 1;
+
+    crate::vga_print::print_str(line, 0, b"CS=", 0x07);
+    crate::vga_print::print_hex64(line, 3, f.cs, 0x07);
+    crate::vga_print::print_str(line, 22, b" RFLAGS=", 0x07);
+    crate::vga_print::print_hex64(line, 30, f.rflags, 0x07);
+    line += 1;
+
+    crate::vga_print::print_str(line, 0, b"RSP=", 0x07);
+    crate::vga_print::print_hex64(line, 4, f.rsp, 0x07);
+    crate::vga_print::print_str(line, 22, b" SS=", 0x07);
+    crate::vga_print::print_hex64(line, 26, f.ss, 0x07);
+    line += 1;
+
+    crate::vga_print::print_str(line, 0, b"RAX=", 0x07);
+    crate::vga_print::print_hex64(line, 4, f.rax, 0x07);
+    line += 1;
+    crate::vga_print::print_str(line, 0, b"RBX=", 0x07);
+    crate::vga_print::print_hex64(line, 4, f.rbx, 0x07);
+    line += 1;
+    crate::vga_print::print_str(line, 0, b"RCX=", 0x07);
+    crate::vga_print::print_hex64(line, 4, f.rcx, 0x07);
+    line += 1;
+    crate::vga_print::print_str(line, 0, b"RDX=", 0x07);
+    crate::vga_print::print_hex64(line, 4, f.rdx, 0x07);
+    line += 1;
 
     if vec == 14 {
-        detail.push_str("\n  CR2(fault addr)=");
-        detail.push_hex(cr2);
-        detail.push_str("\n  #PF bits:");
-        detail.push_str(if f.error_code & 1 != 0 {
-            " present"
-        } else {
-            " not-present"
-        });
-        detail.push_str(if f.error_code & 2 != 0 {
-            " write"
-        } else {
-            " read"
-        });
-        detail.push_str(if f.error_code & 4 != 0 {
-            " user"
-        } else {
-            " supervisor"
-        });
-        // Signal API: schedule before panic (callback may log; we still halt).
-        let _ = signal::schedule_signal(sig::PAGEFAULT);
-        signal::process_signals();
-    } else if vec == 13 {
-        let _ = signal::schedule_signal(sig::GPF);
-        signal::process_signals();
+        crate::vga_print::print_str(line, 0, b"CR2=", 0x07);
+        crate::vga_print::print_hex64(line, 4, cr2, 0x0C);
+        line += 1;
+        let bits = f.error_code;
+        crate::vga_print::print_str(
+            line,
+            0,
+            if bits & 1 != 0 {
+                b"#PF: present"
+            } else {
+                b"#PF: not-present"
+            },
+            0x0C,
+        );
     }
 
-    kernel_panic_with_detail("CPU exception", detail.as_str());
+    let _ = line;
+    crate::vga_print::println_line(22, b"System halted.", 0x08);
+
+    loop {
+        asm!("cli; hlt", options(nomem, nostack));
+    }
 }
 
-fn read_cr2() -> u32 {
-    let value: u32;
+fn read_cr2() -> u64 {
+    let value: u64;
     unsafe {
         asm!("mov {}, cr2", out(reg) value, options(nomem, nostack, preserves_flags));
     }
     value
 }
-
-/// Fixed-size string builder for panic details (no heap).
-struct DetailBuf {
-    buf: [u8; 512],
-    len: usize,
-}
-
-impl DetailBuf {
-    fn new() -> Self {
-        Self {
-            buf: [0; 512],
-            len: 0,
-        }
-    }
-
-    fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("<invalid utf8>")
-    }
-
-    fn push_str(&mut self, s: &str) {
-        for &b in s.as_bytes() {
-            if self.len >= self.buf.len() {
-                return;
-            }
-            self.buf[self.len] = b;
-            self.len += 1;
-        }
-    }
-
-    fn push_u32(&mut self, mut value: u32) {
-        if value == 0 {
-            self.push_str("0");
-            return;
-        }
-        let mut tmp = [0u8; 10];
-        let mut i = 0;
-        while value > 0 {
-            tmp[i] = b'0' + (value % 10) as u8;
-            value /= 10;
-            i += 1;
-        }
-        while i > 0 {
-            i -= 1;
-            if self.len < self.buf.len() {
-                self.buf[self.len] = tmp[i];
-                self.len += 1;
-            }
-        }
-    }
-
-    fn push_hex(&mut self, value: u32) {
-        self.push_str("0x");
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        for shift in (0..32).step_by(4).rev() {
-            let nibble = ((value >> shift) & 0xF) as usize;
-            if self.len < self.buf.len() {
-                self.buf[self.len] = HEX[nibble];
-                self.len += 1;
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ASM stubs are defined in multiboot/exceptions.asm and exported as symbols
-// isr_exception_0 ... isr_exception_31.
-// ---------------------------------------------------------------------------
 
 extern "C" {
     fn isr_exception_0();
@@ -252,7 +193,6 @@ extern "C" {
     fn isr_exception_31();
 }
 
-/// Install IDT gates for CPU exceptions 0–31.
 pub fn init_exceptions() {
     let handlers: [unsafe extern "C" fn(); 32] = [
         isr_exception_0,
@@ -290,6 +230,11 @@ pub fn init_exceptions() {
     ];
 
     for (vector, handler) in handlers.iter().enumerate() {
-        register_interrupt_handler(vector as u8, *handler);
+        // Double fault (#DF = 8) uses IST1 for a known-good stack.
+        if vector == 8 {
+            crate::interrupts::idt::register_gate(vector as u8, *handler, 1);
+        } else {
+            register_interrupt_handler(vector as u8, *handler);
+        }
     }
 }

@@ -14,18 +14,20 @@ RESET		=	\033[0m
 # **************************************************************************** #
 
 KERNEL_BIN		=	build/kernel.bin
-KERNEL_OUT		=	./target/i686-kernel/release/libkernel.a
-KERNEL_DEBUG_OUT	=	./target/i686-kernel/debug/libkernel.a
+KERNEL_OUT		=	./target/x86_64-kernel/release/libkernel.a
+KERNEL_DEBUG_OUT	=	./target/x86_64-kernel/debug/libkernel.a
 
 ISO_OUT			=	build/kernel.iso
 ISO_FULL_OUT		=	build/kernel-full.iso
 
 BOOT			=	./multiboot/header.asm
-EXCEPTIONS_ASM		=	./multiboot/exceptions.asm
-TIMER_ASM		=	./multiboot/timer.asm
-SYSCALL_ASM		=	./multiboot/syscall.asm
+# PR1 bring-up: only the Multiboot2 + long-mode trampoline is linked.
+# exceptions/timer/syscall asm return in later PRs.
 LINKER			=	linker/linker.ld
-ASM_OBJS		=	build/boot.o build/exceptions.o build/timer.o build/syscall.o
+ASM_OBJS		=	build/boot.o build/exceptions.o
+EXCEPTIONS_ASM		=	./multiboot/exceptions.asm
+NASM_FMT		=	elf64
+LD_EMUL			=	elf_x86_64
 
 # GDB remote port used by QEMU (-s is an alias for tcp::1234)
 GDB_PORT		=	1234
@@ -41,7 +43,7 @@ QEMU_COMMON_FLAGS	=
 
 GRUB_MKRESCUE	=	$(shell which grub2-mkrescue 2>/dev/null || which grub-mkrescue 2>/dev/null)
 GRUB_MODULE_DIR	=	$(shell [ -d /usr/lib/grub/i386-pc ] && echo /usr/lib/grub/i386-pc || ([ -d /usr/lib64/grub/i386-pc ] && echo /usr/lib64/grub/i386-pc))
-QEMU_SYSTEM	=	$(shell which qemu-system-i386 2>/dev/null || which qemu 2>/dev/null)
+QEMU_SYSTEM	=	$(shell which qemu-system-x86_64 2>/dev/null || which qemu 2>/dev/null)
 LD		=	$(shell which ld 2>/dev/null || which ld.bfd 2>/dev/null)
 NASM		=	$(shell which nasm 2>/dev/null)
 CARGO		=	$(shell which cargo 2>/dev/null)
@@ -61,7 +63,7 @@ endef
 
 SRCS = $(shell find src -name "*.rs" 2>/dev/null)
 
-all: run-iso
+all: run
 
 # --------------------------------------------------------------------------- #
 # Help
@@ -126,13 +128,11 @@ build: ${SRCS}
 	$(call require_tool,$(CARGO),cargo)
 	$(call require_tool,$(LD),ld)
 	@mkdir -p build
-	@${NASM} -f elf32 ${BOOT} -o build/boot.o
-	@${NASM} -f elf32 ${EXCEPTIONS_ASM} -o build/exceptions.o
-	@${NASM} -f elf32 ${TIMER_ASM} -o build/timer.o
-	@${NASM} -f elf32 ${SYSCALL_ASM} -o build/syscall.o
+	@${NASM} -f ${NASM_FMT} ${BOOT} -o build/boot.o
+	@${NASM} -f ${NASM_FMT} ${EXCEPTIONS_ASM} -o build/exceptions.o
 	@${CARGO} build --no-default-features --release
 	@echo -e "$(BOLD)$(GREEN)[✓] KERNEL BUILD DONE$(RESET)"
-	@${LD} -m elf_i386 -T ${LINKER} -o ${KERNEL_BIN} ${ASM_OBJS} ${KERNEL_OUT}
+	@${LD} -m ${LD_EMUL} -T ${LINKER} -o ${KERNEL_BIN} ${ASM_OBJS} ${KERNEL_OUT}
 	@echo -e "$(BOLD)$(GREEN)[✓] KERNEL LINK DONE → ${KERNEL_BIN}$(RESET)"
 
 build_debug: ${SRCS}
@@ -141,13 +141,11 @@ build_debug: ${SRCS}
 	$(call require_tool,$(LD),ld)
 	@echo -e "$(BOLD)$(YELLOW)[…] KERNEL DEBUG BUILD$(RESET)"
 	@mkdir -p build
-	@${NASM} -f elf32 -g -F dwarf ${BOOT} -o build/boot.o
-	@${NASM} -f elf32 -g -F dwarf ${EXCEPTIONS_ASM} -o build/exceptions.o
-	@${NASM} -f elf32 -g -F dwarf ${TIMER_ASM} -o build/timer.o
-	@${NASM} -f elf32 -g -F dwarf ${SYSCALL_ASM} -o build/syscall.o
+	@${NASM} -f ${NASM_FMT} -g -F dwarf ${BOOT} -o build/boot.o
+	@${NASM} -f ${NASM_FMT} -g -F dwarf ${EXCEPTIONS_ASM} -o build/exceptions.o
 	@${CARGO} build
 	@echo -e "$(BOLD)$(GREEN)[✓] KERNEL BUILD DONE$(RESET)"
-	@${LD} -m elf_i386 -T ${LINKER} -o ${KERNEL_BIN} ${ASM_OBJS} ${KERNEL_DEBUG_OUT}
+	@${LD} -m ${LD_EMUL} -T ${LINKER} -o ${KERNEL_BIN} ${ASM_OBJS} ${KERNEL_DEBUG_OUT}
 	@echo -e "$(BOLD)$(GREEN)[✓] KERNEL LINK DONE → ${KERNEL_BIN}$(RESET)"
 
 # Soft size report (subject often mentions ~10 MiB; BSS + image should stay lean)
@@ -188,10 +186,12 @@ disk: userland
 	@mkfs.ext2 -F -q -b 1024 -d build/rootfs ${DISK_IMG}
 	@echo -e "$(BOLD)$(GREEN)[✓] DISK IMAGE ${DISK_IMG}$(RESET)"
 
-run: build disk
-	$(call require_tool,$(QEMU_SYSTEM),qemu-system-i386)
-	@${QEMU_SYSTEM} -kernel ${KERNEL_BIN} -drive format=raw,file=${DISK_IMG},if=ide,index=0,media=disk -monitor stdio
-	@echo -e "\n$(BOLD)$(CYAN)[✓] KERNEL EXIT DONE$(RESET)"
+# PR1: Multiboot2 ELF64 needs GRUB (QEMU -kernel does not load MB2 ELF64).
+run: run-iso
+
+run-kernel-note:
+	@echo -e "$(YELLOW)Note: use 'make run' / 'make run-iso' (Multiboot2 via GRUB).$(RESET)"
+	@echo -e "$(YELLOW)QEMU -kernel cannot load this Multiboot2 x86_64 ELF.$(RESET)"
 
 iso: build
 	$(call require_tool,$(GRUB_MKRESCUE),grub-mkrescue)
@@ -203,7 +203,7 @@ iso: build
 	@cp grub/grub.cfg build/iso/boot/grub
 	@cp ${KERNEL_BIN} build/iso/boot
 	@${GRUB_MKRESCUE} -o ${ISO_OUT} build/iso --directory=${GRUB_MODULE_DIR} \
-		--modules="multiboot" --locales="" --fonts="" --themes=""
+		--modules="multiboot2" --locales="" --fonts="" --themes=""
 	@echo -e "$(BOLD)$(GREEN)[✓] KERNEL ISO BUILD → ${ISO_OUT}$(RESET)"
 
 iso-full: build
@@ -215,23 +215,24 @@ iso-full: build
 	@mkdir -p build/iso/boot/grub
 	@cp grub/grub.cfg build/iso/boot/grub
 	@cp ${KERNEL_BIN} build/iso/boot
-	@${GRUB_MKRESCUE} -o ${ISO_FULL_OUT} build/iso --directory=${GRUB_MODULE_DIR} --modules="multiboot"
+	@${GRUB_MKRESCUE} -o ${ISO_FULL_OUT} build/iso --directory=${GRUB_MODULE_DIR} --modules="multiboot2"
 	@echo -e "$(BOLD)$(GREEN)[✓] KERNEL FULL ISO BUILD → ${ISO_FULL_OUT}$(RESET)"
 
 # IDE layout for our ATA driver (primary master = index 0):
 #   index 0 = ext2 disk (build/disk.img)
 #   index 1 = GRUB ISO (cdrom)
 # Do not put two drives on index 0 — QEMU errors: "drive with bus=0, unit=0 exists"
-run-iso: iso disk
-	$(call require_tool,$(QEMU_SYSTEM),qemu-system-i386)
-	@${QEMU_SYSTEM} -m 4G \
-		-drive format=raw,file=${DISK_IMG},if=ide,index=0,media=disk \
-		-drive format=raw,file=${ISO_OUT},if=ide,index=1,media=cdrom \
-		-boot order=d
+# PR1 bring-up: ISO only (disk image optional later)
+run-iso: iso
+	$(call require_tool,$(QEMU_SYSTEM),qemu-system-x86_64)
+	@${QEMU_SYSTEM} -m 512M \
+		-cdrom ${ISO_OUT} \
+		-boot order=d \
+		-monitor stdio
 	@echo -e "\n$(BOLD)$(CYAN)[✓] KERNEL EXIT DONE$(RESET)"
 
 run-iso-full: iso-full disk
-	$(call require_tool,$(QEMU_SYSTEM),qemu-system-i386)
+	$(call require_tool,$(QEMU_SYSTEM),qemu-system-x86_64)
 	@${QEMU_SYSTEM} -m 4G \
 		-drive format=raw,file=${DISK_IMG},if=ide,index=0,media=disk \
 		-drive format=raw,file=${ISO_FULL_OUT},if=ide,index=1,media=cdrom \
@@ -239,7 +240,7 @@ run-iso-full: iso-full disk
 	@echo -e "\n$(BOLD)$(CYAN)[✓] KERNEL EXIT DONE$(RESET)"
 
 run-iso-term: iso disk
-	$(call require_tool,$(QEMU_SYSTEM),qemu-system-i386)
+	$(call require_tool,$(QEMU_SYSTEM),qemu-system-x86_64)
 	@${QEMU_SYSTEM} -m 4G \
 		-drive format=raw,file=${DISK_IMG},if=ide,index=0,media=disk \
 		-drive format=raw,file=${ISO_OUT},if=ide,index=1,media=cdrom \
@@ -258,7 +259,7 @@ run-iso-term: iso disk
 #   3. launch GDB with gdb/kfs.gdb (loads symbols, connects, breaks on kmain)
 
 debug: build_debug
-	$(call require_tool,$(QEMU_SYSTEM),qemu-system-i386)
+	$(call require_tool,$(QEMU_SYSTEM),qemu-system-x86_64)
 	$(call require_tool,$(GDB),gdb)
 	@echo -e "$(BOLD)$(YELLOW)[…] Starting QEMU (GDB stub :$(GDB_PORT), CPU frozen)$(RESET)"
 	@echo -e "$(BOLD)$(YELLOW)[…] Attaching GDB — use: continue / step / next / stepi$(RESET)"
@@ -275,7 +276,7 @@ debug: build_debug
 # Boot via ISO instead of -kernel (closer to real Multiboot/GRUB path).
 # Does NOT depend on `iso` (that target rebuilds a release kernel).
 debug-iso: build_debug disk
-	$(call require_tool,$(QEMU_SYSTEM),qemu-system-i386)
+	$(call require_tool,$(QEMU_SYSTEM),qemu-system-x86_64)
 	$(call require_tool,$(GDB),gdb)
 	$(call require_tool,$(GRUB_MKRESCUE),grub-mkrescue)
 	@if [ -z "$(GRUB_MODULE_DIR)" ]; then \
@@ -304,7 +305,7 @@ debug-iso: build_debug disk
 
 # Terminal A: only QEMU (wait for GDB)
 debug-qemu: build_debug
-	$(call require_tool,$(QEMU_SYSTEM),qemu-system-i386)
+	$(call require_tool,$(QEMU_SYSTEM),qemu-system-x86_64)
 	@echo -e "$(BOLD)$(YELLOW)[…] QEMU waiting for GDB on :$(GDB_PORT)$(RESET)"
 	@echo -e "$(BOLD)$(CYAN)    In another terminal: make debug-gdb$(RESET)"
 	@${QEMU_SYSTEM} -kernel ${KERNEL_BIN} $(QEMU_DEBUG_FLAGS) -serial stdio
