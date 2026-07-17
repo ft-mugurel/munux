@@ -5,7 +5,9 @@ pub const VGA_WIDTH: usize = 80;
 pub const VGA_HEIGHT: usize = 25;
 const VGA_SIZE: usize = VGA_WIDTH * VGA_HEIGHT;
 const VIRTUAL_SCREENS: usize = 6;
-pub(super) const SCROLLBACK_LINES: usize = 200;
+/// Scrollback depth. Keep modest so BSS stays well under the 10 MB subject limit
+/// (6 screens × lines × 80 × 25 × 2 bytes).
+pub(super) const SCROLLBACK_LINES: usize = 48;
 
 #[derive(Copy, Clone)]
 pub(super) struct ScreenCursor {

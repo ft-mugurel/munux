@@ -1,12 +1,39 @@
-#[macro_export]
-macro_rules! print {
-    ($($arg:tt)*) => ({
-        use crate::vga::text_mod::out::{print, ColorCode, Color};
-        let _ = writeln!(&mut io::stdout(), $($arg)*);
-    });
-}
+//! VGA text output helpers and `print!` / `println!` macros.
+
+use core::fmt::{self, Write};
 
 use super::out;
+
+/// Writer that sends formatted text to the active virtual screen.
+pub struct VgaWriter;
+
+impl Write for VgaWriter {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        write_str(s);
+        Ok(())
+    }
+}
+
+/// Format to VGA (like `print!`).
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => {{
+        use core::fmt::Write as _;
+        let _ = write!($crate::vga::text_mod::print::VgaWriter, $($arg)*);
+    }};
+}
+
+/// Format to VGA with a trailing newline.
+#[macro_export]
+macro_rules! println {
+    () => {{
+        $crate::print!("\n");
+    }};
+    ($($arg:tt)*) => {{
+        use core::fmt::Write as _;
+        let _ = writeln!($crate::vga::text_mod::print::VgaWriter, $($arg)*);
+    }};
+}
 
 fn blank_cell() -> u16 {
     unsafe { (b' ' as u16) | ((out::CURRENT_COLOR.0 as u16) << 8) }
@@ -112,4 +139,3 @@ pub fn write_char(c: char) {
 pub fn newline() {
     newline_with_scroll();
 }
-

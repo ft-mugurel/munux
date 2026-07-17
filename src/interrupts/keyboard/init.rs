@@ -1,8 +1,8 @@
 use crate::interrupts::idt::register_interrupt_handler;
 use crate::interrupts::keyboard::character_map::*;
 use crate::interrupts::keyboard::keycode::{decode_set1_scancode, KeyCode, KeyEvent, Modifiers};
+use crate::shell;
 use crate::vga::text_mod::out::{
-    move_cursor_down, move_cursor_left, move_cursor_right, move_cursor_up, print_char,
     scroll_view_down, scroll_view_up, switch_screen,
 };
 use crate::x86::io::{outb, outw};
@@ -23,32 +23,22 @@ fn handle_key_press(event: KeyEvent, modifiers: Modifiers) -> bool {
     }
 
     match event.key {
-        KeyCode::ArrowUp => {
-            if modifiers.shift() {
-                scroll_view_up();
-            } else {
-                move_cursor_up();
-            }
-        }
-        KeyCode::ArrowDown => {
-            if modifiers.shift() {
-                scroll_view_down();
-            } else {
-                move_cursor_down();
-            }
-        }
-        KeyCode::ArrowLeft => move_cursor_left(),
-        KeyCode::ArrowRight => move_cursor_right(),
+        // Scrollback (does not disturb the shell line buffer)
+        KeyCode::ArrowUp if modifiers.shift() => scroll_view_up(),
+        KeyCode::ArrowDown if modifiers.shift() => scroll_view_down(),
+        // Virtual screens
         KeyCode::F1 => switch_screen(0),
         KeyCode::F2 => switch_screen(1),
         KeyCode::F3 => switch_screen(2),
         KeyCode::F4 => switch_screen(3),
         KeyCode::F5 => switch_screen(4),
         KeyCode::F6 => switch_screen(5),
+        // Free cursor arrows without shift are ignored while shell owns input
+        KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::ArrowLeft | KeyCode::ArrowRight => {}
         _ => {
             if !modifiers.has_text_blocking_modifier() {
                 if let Some(ch) = keycode_to_char(event.key, modifiers) {
-                    print_char(ch);
+                    shell::on_char(ch);
                 }
             }
         }
@@ -75,7 +65,6 @@ fn shutdown_system() -> ! {
 pub extern "C" fn keyboard_interrupt_handler() {
     let mut should_shutdown = false;
 
-    // Read scancode from PS/2 keyboard data port (0x60)
     let scancode: u8 = unsafe {
         let mut code: u8;
         core::arch::asm!("in al, dx", out("al") code, in("dx") KEYBOARD_DATA_PORT);
@@ -98,7 +87,6 @@ pub extern "C" fn keyboard_interrupt_handler() {
         }
     }
 
-    // Send End of Interrupt (EOI) to master PIC
     unsafe {
         outb(PIC_MASTER_COMMAND_PORT, PIC_EOI);
     }
@@ -109,11 +97,9 @@ pub extern "C" fn keyboard_interrupt_handler() {
 }
 
 extern "C" {
-    fn isr_keyboard(); // the ISR we defined in NASM
+    fn isr_keyboard();
 }
 
 pub fn init_keyboard() {
-    unsafe {
-        register_interrupt_handler(KEYBOARD_IRQ_VECTOR, isr_keyboard); // IRQ1 = IDT index 32 + 1 = 33
-    }
+    register_interrupt_handler(KEYBOARD_IRQ_VECTOR, isr_keyboard);
 }

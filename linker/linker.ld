@@ -1,40 +1,39 @@
 ENTRY(_start)
 OUTPUT_FORMAT(elf32-i386)
 
-PHDRS {
-	boot PT_LOAD;
-	text PT_LOAD;
-	data PT_LOAD;
-	rodata PT_LOAD;
-}
-
+/* Single loadable image starting at 1 MiB (standard Multiboot ELF layout). */
 SECTIONS {
-	. = 0M;
-
-	.multiboot ALIGN(1K) : {
-		KEEP(*(.multiboot))
-	} : boot
-
 	. = 1M;
 
+	/* Multiboot header must be in the first 8 KiB of the OS image. */
+	.multiboot ALIGN(4) : {
+		KEEP(*(.multiboot))
+	}
+
 	.text ALIGN(4K) : {
-		*(.text)
-		*(.text.*)
-	} : text
+		*(.text .text.*)
+	}
 
 	.rodata ALIGN(4K) : {
-		*(.rodata)
-		*(.rodata.*)
-	} : rodata
+		*(.rodata .rodata.*)
+	}
 
 	.data ALIGN(4K) : {
-		*(.data)
-		*(.data.*)
-	} : data
+		*(.data .data.*)
+	}
+
+	/* Kernel stack: grows down toward stack_bottom. */
+	.stack ALIGN(16) (NOLOAD) : {
+		stack_bottom = .;
+		. += 64K;
+		stack_top = .;
+	}
 
 	.bss ALIGN(4K) : {
 		*(COMMON)
-		*(.bss)
-		*(.bss.*)
-	} : data
+		*(.bss .bss.*)
+	}
+
+	/* Symbols useful for later memory management */
+	kernel_end = .;
 }
