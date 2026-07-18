@@ -16,6 +16,7 @@ pub mod elf;
 pub mod embedded_cat;
 pub mod embedded_echo;
 pub mod embedded_hello;
+pub mod embedded_ls;
 pub mod fd;
 pub mod fs;
 pub mod gdt;

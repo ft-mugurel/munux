@@ -1,6 +1,4 @@
-//! File descriptors and open-file objects (U1–U3).
-//!
-//! v0.2: global FD table; console + read-only ext2 files.
+//! File descriptors (U1–U4): console, files, directories + getdents64.
 
 use core::arch::asm;
 
@@ -15,18 +13,23 @@ pub const STDIN_FILENO: usize = 0;
 pub const STDOUT_FILENO: usize = 1;
 pub const STDERR_FILENO: usize = 2;
 
+/// Linux open flag O_DIRECTORY.
+pub const O_DIRECTORY: u64 = 0o200000;
+/// Linux O_ACCMODE
+const O_ACCMODE: u64 = 3;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FileKind {
     None,
-    /// VGA console (write) + keyboard (read).
     Console,
-    /// Read-only ext2 regular file.
     Ext2File { ino: u32 },
+    Ext2Dir { ino: u32 },
 }
 
 #[derive(Clone, Copy)]
 pub struct File {
     pub kind: FileKind,
+    /// File byte offset, or directory cookie for getdents64.
     pub offset: u64,
     pub readable: bool,
     pub writable: bool,
@@ -60,9 +63,18 @@ impl File {
         }
     }
 
-    pub fn ext2_ro(ino: u32) -> Self {
+    pub fn ext2_file(ino: u32) -> Self {
         Self {
             kind: FileKind::Ext2File { ino },
+            offset: 0,
+            readable: true,
+            writable: false,
+        }
+    }
+
+    pub fn ext2_dir(ino: u32) -> Self {
+        Self {
+            kind: FileKind::Ext2Dir { ino },
             offset: 0,
             readable: true,
             writable: false,
@@ -123,7 +135,6 @@ impl FdTable {
         None
     }
 
-    /// Install a new open file; returns FD number.
     pub fn install(&mut self, file: File) -> Result<usize, FdError> {
         let i = self.alloc_slot().ok_or(FdError::NoMem)?;
         self.entries[i] = file;
@@ -139,13 +150,7 @@ impl FdTable {
     }
 
     pub fn open_count(&self) -> usize {
-        let mut n = 0;
-        for f in &self.entries {
-            if f.kind != FileKind::None {
-                n += 1;
-            }
-        }
-        n
+        self.entries.iter().filter(|f| f.kind != FileKind::None).count()
     }
 
     pub fn write(&mut self, fd: usize, data: &[u8]) -> Result<usize, FdError> {
@@ -155,25 +160,23 @@ impl FdTable {
         }
         match file.kind {
             FileKind::Console => Ok(console_write(data)),
-            FileKind::Ext2File { .. } => Err(FdError::BadFd), // read-only for now
-            FileKind::None => Err(FdError::BadFd),
+            _ => Err(FdError::BadFd),
         }
     }
 
     pub fn read(&mut self, fd: usize, buf: &mut [u8]) -> Result<usize, FdError> {
-        // Split borrow: take kind/offset, then mutate offset after read.
-        let (kind, offset, readable) = {
+        let (kind, offset) = {
             let file = self.get(fd).ok_or(FdError::BadFd)?;
             if !file.readable {
                 return Err(FdError::BadFd);
             }
-            (file.kind, file.offset, file.readable)
+            (file.kind, file.offset)
         };
-        let _ = readable;
 
         let n = match kind {
             FileKind::Console => console_read(buf),
-            FileKind::Ext2File { ino } => ext2_read(ino, offset, buf)?,
+            FileKind::Ext2File { ino } => ext2_file_read(ino, offset, buf)?,
+            FileKind::Ext2Dir { .. } => return Err(FdError::IsDir),
             FileKind::None => return Err(FdError::BadFd),
         };
 
@@ -181,6 +184,67 @@ impl FdTable {
             file.offset = file.offset.saturating_add(n as u64);
         }
         Ok(n)
+    }
+
+    /// Linux getdents64(fd, dirp, count) — fill buffer, advance dir offset cookie.
+    pub fn getdents64(&mut self, fd: usize, out: &mut [u8]) -> Result<usize, FdError> {
+        let (ino, mut cookie) = {
+            let file = self.get(fd).ok_or(FdError::BadFd)?;
+            match file.kind {
+                FileKind::Ext2Dir { ino } => (ino, file.offset as u32),
+                FileKind::Ext2File { .. } => return Err(FdError::NotDir),
+                FileKind::Console => return Err(FdError::NotDir),
+                FileKind::None => return Err(FdError::BadFd),
+            }
+        };
+
+        if out.len() < 24 {
+            return Err(FdError::Inval);
+        }
+
+        let mut written = 0usize;
+        loop {
+            let ent = match ext2::dir_next_entry(ino, cookie) {
+                Ok(Some(e)) => e,
+                Ok(None) => break,
+                Err(_) => return Err(FdError::Fault),
+            };
+
+            // linux_dirent64: ino u64, off i64, reclen u16, type u8, name...
+            let name_len = ent.name_len as usize;
+            let reclen = (19 + name_len + 1 + 7) & !7; // align 8, include NUL
+            if written + reclen > out.len() {
+                if written == 0 {
+                    return Err(FdError::Inval); // buffer too small for one entry
+                }
+                break;
+            }
+
+            let base = written;
+            // d_ino
+            out[base..base + 8].copy_from_slice(&(ent.ino as u64).to_le_bytes());
+            // d_off = next cookie
+            out[base + 8..base + 16].copy_from_slice(&(ent.next_off as i64).to_le_bytes());
+            // d_reclen
+            out[base + 16..base + 18].copy_from_slice(&(reclen as u16).to_le_bytes());
+            // d_type
+            out[base + 18] = ent.d_type;
+            // d_name + NUL
+            out[base + 19..base + 19 + name_len].copy_from_slice(&ent.name[..name_len]);
+            out[base + 19 + name_len] = 0;
+            // pad
+            for b in out.iter_mut().take(base + reclen).skip(base + 20 + name_len) {
+                *b = 0;
+            }
+
+            written += reclen;
+            cookie = ent.next_off;
+        }
+
+        if let Some(file) = self.get_mut(fd) {
+            file.offset = cookie as u64;
+        }
+        Ok(written)
     }
 }
 
@@ -190,6 +254,7 @@ pub enum FdError {
     Fault,
     NoEnt,
     IsDir,
+    NotDir,
     NoMem,
     Inval,
 }
@@ -256,7 +321,7 @@ fn console_read(buf: &mut [u8]) -> usize {
     n
 }
 
-fn ext2_read(ino: u32, offset: u64, buf: &mut [u8]) -> Result<usize, FdError> {
+fn ext2_file_read(ino: u32, offset: u64, buf: &mut [u8]) -> Result<usize, FdError> {
     if !fs::is_ready() {
         return Err(FdError::NoEnt);
     }
@@ -269,8 +334,7 @@ fn ext2_read(ino: u32, offset: u64, buf: &mut [u8]) -> Result<usize, FdError> {
     }
 }
 
-/// Open path relative to cwd (absolute if starts with '/'). Read-only.
-/// Linux O_RDONLY = 0; we reject write-only/rdwr for now.
+/// Open path. Files → Ext2File; directories → Ext2Dir (for getdents64).
 pub fn open_path(path: &str, flags: u64) -> Result<usize, FdError> {
     if !is_ready() {
         return Err(FdError::BadFd);
@@ -278,10 +342,8 @@ pub fn open_path(path: &str, flags: u64) -> Result<usize, FdError> {
     if !fs::is_ready() {
         return Err(FdError::NoEnt);
     }
-    // O_ACCMODE = 3; only allow O_RDONLY (0)
-    let acc = flags & 3;
+    let acc = flags & O_ACCMODE;
     if acc != 0 {
-        // no write support yet
         return Err(FdError::Inval);
     }
     if path.is_empty() {
@@ -290,12 +352,18 @@ pub fn open_path(path: &str, flags: u64) -> Result<usize, FdError> {
 
     let cwd = fs::path::cwd_inode();
     let ino = fs::ext2::resolve_path(cwd, path).map_err(|_| FdError::NoEnt)?;
-    if fs::ext2::inode_is_dir(ino) {
-        // directories need getdents (U4)
-        return Err(FdError::IsDir);
+    let is_dir = fs::ext2::inode_is_dir(ino);
+
+    if flags & O_DIRECTORY != 0 && !is_dir {
+        return Err(FdError::NotDir);
     }
 
-    with_current(|t| t.install(File::ext2_ro(ino)))
+    let file = if is_dir {
+        File::ext2_dir(ino)
+    } else {
+        File::ext2_file(ino)
+    };
+    with_current(|t| t.install(file))
 }
 
 pub fn sys_write_slice(fd: u64, data: &[u8]) -> Result<usize, FdError> {
@@ -325,4 +393,11 @@ pub fn sys_close(fd: u64) -> Result<(), FdError> {
 
 pub fn sys_open_path(path: &str, flags: u64) -> Result<usize, FdError> {
     open_path(path, flags)
+}
+
+pub fn sys_getdents64(fd: u64, buf: &mut [u8]) -> Result<usize, FdError> {
+    if !is_ready() || fd >= FD_MAX as u64 {
+        return Err(FdError::BadFd);
+    }
+    with_current(|t| t.getdents64(fd as usize, buf))
 }

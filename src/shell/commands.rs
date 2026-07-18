@@ -113,11 +113,20 @@ pub fn dispatch(line: &str) {
                 return;
             }
             if path == "cat" {
-                // Userland cat hello.txt via open/read/write/close
                 match crate::syscalls::run_embedded_cat() {
                     Ok(()) => {}
                     Err(e) => {
                         console::print("run cat: ");
+                        console::println(e);
+                    }
+                }
+                return;
+            }
+            if path == "ls" {
+                match crate::syscalls::run_embedded_ls() {
+                    Ok(()) => {}
+                    Err(e) => {
+                        console::print("run ls: ");
                         console::println(e);
                     }
                 }
@@ -158,7 +167,7 @@ fn cmd_help() {
     console::println("  fault [ud2]     Trigger CPU exception");
     console::println("  panic           Rust panic");
     console::println("  user            Enter ring 3 hand-asm demo");
-    console::println("  run [path|echo|cat]  ELF64; cat=open/read file");
+    console::println("  run [path|echo|cat|ls]  user ELF tests");
     console::println("  ls [path]       List directory");
     console::println("  cat <path>      Print file");
     console::println("  pwd / cd        Working directory");

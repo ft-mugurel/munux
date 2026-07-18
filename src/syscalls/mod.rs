@@ -25,6 +25,7 @@ pub mod num {
     pub const GETCWD: u64 = 79;
     pub const CHDIR: u64 = 80;
     pub const EXIT_GROUP: u64 = 231; // musl/glibc often use this
+    pub const GETDENTS64: u64 = 217;
     pub const OPENAT: u64 = 257; // planned (modern libc)
 }
 
@@ -55,6 +56,7 @@ fn map_fd_err(e: fd::FdError) -> u64 {
         fd::FdError::Fault => errno::neg(errno::EFAULT),
         fd::FdError::NoEnt => errno::neg(errno::ENOENT),
         fd::FdError::IsDir => errno::neg(errno::EISDIR),
+        fd::FdError::NotDir => errno::neg(errno::ENOTDIR),
         fd::FdError::NoMem => errno::neg(errno::EMFILE),
         fd::FdError::Inval => errno::neg(errno::EINVAL),
     }
@@ -140,6 +142,7 @@ pub extern "C" fn syscall_dispatch(
         num::GETPID => 1,
         num::GETCWD => sys_getcwd(a1, a2),
         num::CHDIR => sys_chdir(a1),
+        num::GETDENTS64 => sys_getdents64(a1, a2, a3),
         num::EXIT | num::EXIT_GROUP => {
             let _status = a1;
             unsafe {
@@ -248,6 +251,26 @@ fn sys_getcwd(buf: u64, size: u64) -> u64 {
         core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, need);
     }
     need as u64
+}
+
+/// Linux getdents64(fd, dirp, count) — bytes written, 0 at EOF, or -errno.
+fn sys_getdents64(fd: u64, dirp: u64, count: u64) -> u64 {
+    if count == 0 {
+        return errno::neg(errno::EINVAL);
+    }
+    let count = count.min(4096) as usize;
+    if !user_ptr_ok(dirp, count as u64) {
+        return errno::neg(errno::EFAULT);
+    }
+    let mut tmp = [0u8; 4096];
+    let n = match fd::sys_getdents64(fd, &mut tmp[..count]) {
+        Ok(n) => n,
+        Err(e) => return map_fd_err(e),
+    };
+    unsafe {
+        core::ptr::copy_nonoverlapping(tmp.as_ptr(), dirp as *mut u8, n);
+    }
+    n as u64
 }
 
 /// Linux chdir(path) — 0 or -errno.
@@ -446,6 +469,11 @@ pub fn run_embedded_echo() -> Result<(), &'static str> {
 /// Run embedded `cat` (OPEN/READ file + WRITE) — U3 test (expects hello.txt on FS).
 pub fn run_embedded_cat() -> Result<(), &'static str> {
     exec_elf_bytes(crate::embedded_cat::CAT_ELF, "cat")
+}
+
+/// Run embedded `ls` (open . + getdents64) — U4 test.
+pub fn run_embedded_ls() -> Result<(), &'static str> {
+    exec_elf_bytes(crate::embedded_ls::LS_ELF, "ls")
 }
 
 /// Load ELF64 from ext2 path (or embedded `hello` if path empty / "hello").

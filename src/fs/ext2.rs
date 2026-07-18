@@ -466,6 +466,118 @@ pub fn list_dir(dir_ino: u32) -> Result<usize, &'static str> {
     Ok(count)
 }
 
+/// Linux `d_type` values for getdents64.
+pub mod dt {
+    pub const UNKNOWN: u8 = 0;
+    pub const FIFO: u8 = 1;
+    pub const CHR: u8 = 2;
+    pub const DIR: u8 = 4;
+    pub const BLK: u8 = 6;
+    pub const REG: u8 = 8;
+    pub const LNK: u8 = 10;
+    pub const SOCK: u8 = 12;
+}
+
+fn ext2_ft_to_dt(ft: u8) -> u8 {
+    match ft {
+        EXT2_FT_REG => dt::REG,
+        EXT2_FT_DIR => dt::DIR,
+        EXT2_FT_CHR => dt::CHR,
+        EXT2_FT_BLK => dt::BLK,
+        EXT2_FT_FIFO => dt::FIFO,
+        EXT2_FT_SOCK => dt::SOCK,
+        EXT2_FT_SYMLINK => dt::LNK,
+        _ => dt::UNKNOWN,
+    }
+}
+
+/// One directory entry for getdents64 (kernel-side).
+pub struct DirentInfo {
+    pub ino: u32,
+    pub next_off: u32,
+    pub d_type: u8,
+    pub name: [u8; 255],
+    pub name_len: u8,
+}
+
+/// Read the next valid directory entry at or after byte `offset` in the dir.
+/// Returns `Ok(None)` at end of directory.
+pub fn dir_next_entry(dir_ino: u32, mut offset: u32) -> Result<Option<DirentInfo>, &'static str> {
+    let inode = read_inode(dir_ino)?;
+    let mode = inode_mode(&inode);
+    if mode & S_IFMT != S_IFDIR {
+        return Err("not a directory");
+    }
+    let size = inode_size(&inode);
+    let bs = block_size();
+
+    while offset < size {
+        let lb = offset / bs;
+        let boff = (offset % bs) as usize;
+        let block = get_data_block(&inode, lb)?;
+        if block == 0 {
+            break;
+        }
+        let mut bbuf = [0u8; 4096];
+        read_fs_block(block, &mut bbuf)?;
+
+        let mut pos = boff;
+        while pos + 8 <= bs as usize {
+            let ent = unsafe { &*(bbuf.as_ptr().add(pos) as *const Ext2DirEntry) };
+            let ino = unsafe { core::ptr::addr_of!(ent.inode).read_unaligned() };
+            let rec_len = unsafe { core::ptr::addr_of!(ent.rec_len).read_unaligned() } as usize;
+            let name_len = unsafe { core::ptr::addr_of!(ent.name_len).read_unaligned() } as usize;
+            let file_type = unsafe { core::ptr::addr_of!(ent.file_type).read_unaligned() };
+
+            if rec_len < 8 {
+                return Ok(None);
+            }
+            let entry_off = (lb * bs) + pos as u32;
+            let next_off = entry_off + rec_len as u32;
+
+            if ino != 0 && name_len > 0 && pos + 8 + name_len <= bs as usize && entry_off >= offset
+            {
+                let name_bytes = &bbuf[pos + 8..pos + 8 + name_len];
+                let mut info = DirentInfo {
+                    ino,
+                    next_off,
+                    d_type: ext2_ft_to_dt(file_type),
+                    name: [0; 255],
+                    name_len: name_len.min(255) as u8,
+                };
+                let n = info.name_len as usize;
+                info.name[..n].copy_from_slice(&name_bytes[..n]);
+                // If type unknown, try inode mode
+                if info.d_type == dt::UNKNOWN {
+                    if let Ok(ci) = read_inode(ino) {
+                        let m = inode_mode(&ci);
+                        info.d_type = if m & S_IFMT == S_IFDIR {
+                            dt::DIR
+                        } else if m & S_IFMT == S_IFREG {
+                            dt::REG
+                        } else if m & S_IFMT == S_IFLNK {
+                            dt::LNK
+                        } else {
+                            dt::UNKNOWN
+                        };
+                    }
+                }
+                return Ok(Some(info));
+            }
+
+            pos += rec_len;
+            if rec_len == 0 {
+                break;
+            }
+            // advance search offset past this record
+            offset = next_off;
+        }
+        // next block
+        offset = (lb + 1) * bs;
+    }
+    Ok(None)
+}
+
 /// Lookup a single path component in directory.
 pub fn lookup(dir_ino: u32, name: &str) -> Result<u32, &'static str> {
     list_dir(dir_ino)?;

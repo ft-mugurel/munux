@@ -32,7 +32,7 @@ Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.
 |---|------------|--------------|
 | 0 | `read` | **done** (stdin or open file FD) |
 | 1 | `write` | **done** (stdout/stderr console) |
-| 2 | `open` | **done** (read-only ext2 files; dirs → `-EISDIR`) |
+| 2 | `open` | **done** (files + directories; dirs for getdents) |
 | 3 | `close` | **done** |
 | 39 | `getpid` | **done** (returns 1 for now) |
 | 57 | `fork` | planned U6 |
@@ -42,6 +42,7 @@ Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.
 | 79 | `getcwd` | **done** |
 | 80 | `chdir` | **done** |
 | 231 | `exit_group` | **done** (same as `exit` for now) |
+| 217 | `getdents64` | **done** (directory listing) |
 | 257 | `openat` | planned (modern libc) |
 
 Unimplemented numbers return **`-ENOSYS`** (`-38`).
@@ -115,3 +116,4 @@ But using **wrong numbers guarantees** Linux binaries will never work — so mun
 | 0.1 | Custom numbers (EXIT=0, WRITE=1, …) |
 | **0.2** | **Linux x86_64 numbers** + `-errno` returns |
 | 0.2+U3 | `open` / file `read` / `chdir` / `getcwd` |
+| 0.2+U4 | `getdents64` + open directory FDs |
