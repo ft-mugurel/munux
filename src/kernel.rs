@@ -19,6 +19,7 @@ pub mod embedded_exectest;
 pub mod embedded_forktest;
 pub mod embedded_hello;
 pub mod embedded_ls;
+pub mod embedded_sh;
 pub mod fd;
 pub mod fs;
 pub mod gdt;

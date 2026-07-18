@@ -688,6 +688,9 @@ fn load_exec_image(path: &str, argv0: &str) -> Result<crate::elf::LoadedImage, &
     if path == "exectest" || path == "/bin/exectest" || path.ends_with("/exectest") {
         return crate::elf::load_bytes(crate::embedded_exectest::EXECTEST_ELF, argv0);
     }
+    if path == "sh" || path == "/bin/sh" || path == "bin/sh" || path.ends_with("/sh") {
+        return crate::elf::load_bytes(crate::embedded_sh::SH_ELF, argv0);
+    }
     Err("ENOENT")
 }
 
@@ -849,6 +852,17 @@ pub fn run_embedded_forktest() -> Result<(), &'static str> {
 /// Run embedded `exectest` (fork + execve + wait4) — U6 test.
 pub fn run_embedded_exectest() -> Result<(), &'static str> {
     exec_elf_bytes(crate::embedded_exectest::EXECTEST_ELF, "exectest")
+}
+
+/// Run embedded `/bin/sh` (U7 user shell).
+pub fn run_embedded_sh() -> Result<(), &'static str> {
+    exec_elf_bytes(crate::embedded_sh::SH_ELF, "sh")
+}
+
+/// Run `/bin/sh` with preloaded stdin (automated U7 smoke).
+pub fn run_embedded_sh_script(script: &[u8]) -> Result<(), &'static str> {
+    crate::interrupts::keyboard::init::inject_str(script);
+    exec_elf_bytes(crate::embedded_sh::SH_ELF, "sh")
 }
 
 /// Load ELF64 from ext2 path (or embedded `hello` if path empty / "hello").

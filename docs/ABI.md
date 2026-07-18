@@ -104,7 +104,9 @@ Common errno values we use:
 
 Cooperative model (no preemptive multi-process scheduler, no private page tables yet). Nested kernel stacks for wait/exec.
 
-Future init: `execve("/bin/sh")` as pid 1 (U7–U8).
+**U7:** freestanding `/bin/sh` in userspace (`run sh`). Builtins: `help`, `exit`, `cd`, `pwd`. Other words → `fork` + `execve("/bin/<cmd>")` + `wait4`.
+
+Future (U8): boot directly into `/bin/sh` as init (hand off from kernel shell).
 
 ---
 
@@ -132,3 +134,4 @@ But using **wrong numbers guarantees** Linux binaries will never work — so mun
 | 0.2+U4 | `getdents64` + open directory FDs |
 | 0.2+U5 | PCB, real pid/ppid, zombie exit, wait4, per-process cwd |
 | 0.2+U6 | `fork` + `execve`; wait schedules Ready children; nested enter |
+| 0.2+U7 | Freestanding `/bin/sh` (prompt, builtins, fork/exec/wait) |

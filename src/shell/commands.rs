@@ -152,6 +152,29 @@ pub fn dispatch(line: &str) {
                 }
                 return;
             }
+            if path == "sh" || path == "/bin/sh" {
+                match crate::syscalls::run_embedded_sh() {
+                    Ok(()) => {}
+                    Err(e) => {
+                        console::print("run sh: ");
+                        console::println(e);
+                    }
+                }
+                return;
+            }
+            if path == "shtest" || path == "shdemo" {
+                // Preload a short script into the keyboard ring (no sendkey races).
+                match crate::syscalls::run_embedded_sh_script(
+                    b"help\nhello\nls\npwd\nexit\n",
+                ) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        console::print("run shtest: ");
+                        console::println(e);
+                    }
+                }
+                return;
+            }
             match crate::syscalls::run_path(path) {
                 Ok(()) => {}
                 Err(e) => {
@@ -188,7 +211,7 @@ fn cmd_help() {
     console::println("  fault [ud2]     Trigger CPU exception");
     console::println("  panic           Rust panic");
     console::println("  user            Enter ring 3 hand-asm demo");
-    console::println("  run [path|echo|cat|ls|fork|exec]  user ELF tests");
+    console::println("  run [path|echo|cat|ls|fork|exec|sh|shtest]  user ELF / shell");
     console::println("  ls [path]       List directory");
     console::println("  cat <path>      Print file");
     console::println("  pwd / cd        Working directory");
