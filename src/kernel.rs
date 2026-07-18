@@ -68,12 +68,16 @@ pub extern "C" fn kmain() -> ! {
     let magic = unsafe { core::ptr::addr_of!(multiboot_magic_value).read_unaligned() };
     let mbi = unsafe { core::ptr::addr_of!(multiboot_info_addr).read_unaligned() };
 
+    // Serial early so boot messages + typing work with `qemu -serial stdio`
+    drivers::serial::init();
+
     console::clear();
     console::set_color(0x0F);
     console::println("munux x86_64");
     console::set_color(0x0A);
     console::println("long mode OK");
     console::set_color(0x07);
+    console::println("serial COM1 ready (type in QEMU terminal if using -serial stdio)");
 
     if magic == MULTIBOOT2_MAGIC {
         console::println("multiboot2: OK");

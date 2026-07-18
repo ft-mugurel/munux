@@ -46,6 +46,15 @@ fn scroll() {
 }
 
 pub fn put_char(ch: u8) {
+    // Mirror to serial so `qemu -serial stdio` shows the same text.
+    // (Ignore before serial::init — is_ready is false.)
+    // serial::write_bytes expands \n → \r\n
+    if ch == b'\n' {
+        crate::drivers::serial::write_bytes(b"\n");
+    } else {
+        crate::drivers::serial::write_byte(ch);
+    }
+
     unsafe {
         match ch {
             b'\n' => {
@@ -65,9 +74,29 @@ pub fn put_char(ch: u8) {
             }
             b'\t' => {
                 for _ in 0..4 {
-                    put_char(b' ');
+                    put_char_vga_only(b' ');
                 }
             }
+            c if c >= 0x20 && c < 0x7F => {
+                VGA.add(ROW * WIDTH + COL).write_volatile(cell(c, COLOR));
+                COL += 1;
+                if COL >= WIDTH {
+                    COL = 0;
+                    ROW += 1;
+                    if ROW >= HEIGHT {
+                        scroll();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// VGA only (used for tab expansion to avoid serial spam).
+fn put_char_vga_only(ch: u8) {
+    unsafe {
+        match ch {
             c if c >= 0x20 && c < 0x7F => {
                 VGA.add(ROW * WIDTH + COL).write_volatile(cell(c, COLOR));
                 COL += 1;

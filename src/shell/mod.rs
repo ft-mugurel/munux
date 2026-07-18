@@ -24,8 +24,10 @@ fn print_prompt() {
     console::set_color(0x07);
 }
 
-/// Drain keyboard buffer (call from idle loop).
+/// Drain keyboard + serial into the line editor (call from idle loop).
 pub fn poll() {
+    // Serial (QEMU `-serial stdio`) → same ring as PS/2 keys
+    crate::drivers::serial::poll_to_keyboard();
     while let Some(b) = pop_char() {
         on_byte(b);
     }

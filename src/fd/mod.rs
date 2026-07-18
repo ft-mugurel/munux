@@ -304,10 +304,17 @@ fn console_read(buf: &mut [u8]) -> usize {
         return 0;
     }
     while kbd::buffered_len() == 0 {
+        // Pull serial RX (terminal) as well as waiting for PS/2 IRQ
+        crate::drivers::serial::poll_to_keyboard();
+        if kbd::buffered_len() > 0 {
+            break;
+        }
         unsafe {
             asm!("sti; hlt", options(nomem, nostack));
         }
     }
+    // Drain any serial that arrived during/after hlt
+    crate::drivers::serial::poll_to_keyboard();
     let mut n = 0usize;
     while n < buf.len() {
         match kbd::pop_char() {
