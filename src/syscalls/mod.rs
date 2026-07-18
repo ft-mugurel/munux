@@ -102,7 +102,7 @@ pub extern "C" fn syscall_dispatch(
             }
         }
         num::WRITE => sys_write(a1, a2, a3),
-        num::READ => RET_ERR, // U2
+        num::READ => sys_read(a1, a2, a3),
         num::OPEN => RET_ERR, // U3
         num::CLOSE => sys_close(a1),
         num::GETPID => 1,
@@ -113,6 +113,9 @@ pub extern "C" fn syscall_dispatch(
 fn user_ptr_ok(buf: u64, len: u64) -> bool {
     if len > 0x10000 {
         return false;
+    }
+    if len == 0 {
+        return true;
     }
     let end = buf.saturating_add(len);
     // Demo blob, classic ELF load (0x400000+), user stack (~0x7fff…), low identity
@@ -128,11 +131,30 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> u64 {
         return RET_ERR;
     }
     let slice = unsafe { core::slice::from_raw_parts(buf as *const u8, len as usize) };
-    // Route through FD table (stdout/stderr → console ops).
     match fd::sys_write_slice(fd, slice) {
         Ok(n) => n as u64,
         Err(_) => RET_ERR,
     }
+}
+
+fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
+    let len = len.min(4096) as usize;
+    if len == 0 {
+        return 0;
+    }
+    if !user_ptr_ok(buf, len as u64) {
+        return RET_ERR;
+    }
+    // Kernel bounce buffer (avoid holding user mapping issues while blocking).
+    let mut tmp = [0u8; 4096];
+    let n = match fd::sys_read_into(fd, &mut tmp[..len]) {
+        Ok(n) => n,
+        Err(_) => return RET_ERR,
+    };
+    unsafe {
+        core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, n);
+    }
+    n as u64
 }
 
 fn sys_close(fd: u64) -> u64 {
@@ -274,6 +296,11 @@ pub fn exec_elf_bytes(file: &[u8], argv0: &str) -> Result<(), &'static str> {
 /// Run the embedded static `hello` ELF (built by `make userland` / `make build`).
 pub fn run_embedded_hello() -> Result<(), &'static str> {
     exec_elf_bytes(crate::embedded_hello::HELLO_ELF, "hello")
+}
+
+/// Run embedded `echo` (READ stdin + WRITE stdout) — U2 test.
+pub fn run_embedded_echo() -> Result<(), &'static str> {
+    exec_elf_bytes(crate::embedded_echo::ECHO_ELF, "echo")
 }
 
 /// Load ELF64 from ext2 path (or embedded `hello` if path empty / "hello").

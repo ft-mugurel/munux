@@ -85,8 +85,32 @@ pub fn dispatch(line: &str) {
         "run" | "exec" | "hello" => {
             let path = rest.split_whitespace().next().unwrap_or("hello");
             if path == "help" || path == "?" {
-                console::println("run [path|hello]  — ELF64 from disk or embedded");
-                console::println("  examples: run   run /bin/hello   run hello");
+                console::println("run [path|hello|echo]  — ELF64 from disk or embedded");
+                console::println("  echo = U2 read/write test (type then Enter)");
+                return;
+            }
+            if path == "echo" {
+                // Preload stdin so automated tests / first keystroke path is reliable.
+                // Interactive use: omit preload by using `run echoi` or type during read>
+                crate::interrupts::keyboard::init::inject_str(b"hi\n");
+                match crate::syscalls::run_embedded_echo() {
+                    Ok(()) => {}
+                    Err(e) => {
+                        console::print("run echo: ");
+                        console::println(e);
+                    }
+                }
+                return;
+            }
+            if path == "echoi" {
+                // Interactive: blocks on READ until you type (then Enter).
+                match crate::syscalls::run_embedded_echo() {
+                    Ok(()) => {}
+                    Err(e) => {
+                        console::print("run echoi: ");
+                        console::println(e);
+                    }
+                }
                 return;
             }
             match crate::syscalls::run_path(path) {
@@ -124,7 +148,7 @@ fn cmd_help() {
     console::println("  fault [ud2]     Trigger CPU exception");
     console::println("  panic           Rust panic");
     console::println("  user            Enter ring 3 hand-asm demo");
-    console::println("  run [path]      ELF64 from ext2 or embedded hello");
+    console::println("  run [path|echo] ELF64; echo tests READ(0)");
     console::println("  ls [path]       List directory");
     console::println("  cat <path>      Print file");
     console::println("  pwd / cd        Working directory");

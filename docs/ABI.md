@@ -31,7 +31,7 @@ A future epic may renumber to Linux x86_64; that will be an explicit ABI break.
 |---|------|------|--------|
 | 0 | `EXIT` | `rdi` = status | does not return to caller |
 | 1 | `WRITE` | `rdi`=fd, `rsi`=buf, `rdx`=len | bytes written, or error |
-| 2 | `READ` | *(planned U2)* | |
+| 2 | `READ` | `rdi`=fd, `rsi`=buf, `rdx`=len | bytes read, or error |
 | 3 | `OPEN` | *(planned U3)* | |
 | 4 | `CLOSE` | `rdi`=fd | 0 or error |
 | 5 | `GETPID` | — | pid |
@@ -52,9 +52,15 @@ User code must treat `!0` as error until errno is introduced.
 
 | FD | Name | v0.1 backend |
 |----|------|----------------|
-| 0 | stdin | console / keyboard (read in U2) |
+| 0 | stdin | keyboard ring buffer via console FD (blocking `READ`) |
 | 1 | stdout | VGA console write |
 | 2 | stderr | VGA console write (same device) |
+
+### `READ` on stdin (U2)
+
+- Blocks (with interrupts enabled + `hlt`) until **at least one** byte is available.
+- Then copies `min(available, len)` without requiring a full line.
+- Line editing / canonical mode is **userspace** responsibility.
 
 ### Rules
 
@@ -105,3 +111,4 @@ U1 FD table + WRITE via FD (this milestone) → U2 READ → U3 OPEN → … → 
 | Ver | Notes |
 |-----|--------|
 | 0.1 | Initial freeze: syscall regs, numbers 0/1/4/5, FD 0/1/2, error=`!0` |
+| 0.1+U2 | `READ` on fd 0 implemented (blocking, byte stream) |

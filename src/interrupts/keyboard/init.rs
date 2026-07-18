@@ -47,6 +47,18 @@ pub fn buffered_len() -> usize {
     unsafe { KLEN }
 }
 
+/// Push a decoded byte as if typed (tests / automated smoke).
+pub fn inject_char(b: u8) {
+    buf_push(b);
+}
+
+/// Inject a short string (e.g. for U2 smoke without QEMU sendkey races).
+pub fn inject_str(s: &[u8]) {
+    for &b in s {
+        buf_push(b);
+    }
+}
+
 fn handle_key_press(event: KeyEvent, modifiers: Modifiers) -> bool {
     if event.key == KeyCode::Delete && modifiers.ctrl() && modifiers.alt() {
         return true;

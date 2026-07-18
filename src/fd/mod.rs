@@ -1,9 +1,12 @@
-//! File descriptors and open-file objects (U1).
+//! File descriptors and open-file objects (U1–U2).
 //!
 //! v0.1: one global FD table (becomes per-process in U5).
-//! WRITE goes through this table.
+//! WRITE/READ go through this table.
+
+use core::arch::asm;
 
 use crate::console;
+use crate::interrupts::keyboard::init as kbd;
 
 /// Maximum open FDs per table.
 pub const FD_MAX: usize = 32;
@@ -129,13 +132,14 @@ impl FdTable {
         }
     }
 
-    pub fn read(&mut self, fd: usize, _buf: &mut [u8]) -> Result<usize, FdError> {
+    /// Read up to `buf.len()` bytes. Console: block until ≥1 byte, then drain available.
+    pub fn read(&mut self, fd: usize, buf: &mut [u8]) -> Result<usize, FdError> {
         let file = self.get_mut(fd).ok_or(FdError::BadFd)?;
         if !file.readable {
             return Err(FdError::BadFd);
         }
         match file.kind {
-            FileKind::Console => Ok(0), // U2
+            FileKind::Console => Ok(console_read(buf)),
             FileKind::None => Err(FdError::BadFd),
         }
     }
@@ -187,11 +191,48 @@ fn console_write(data: &[u8]) -> usize {
     n
 }
 
+/// Blocking console read: wait for keyboard data, then copy what is available.
+///
+/// Policy (docs/ABI.md v0.1 / U2):
+/// - If the ring buffer is empty, `sti; hlt` until an IRQ delivers bytes.
+/// - Then copy `min(available, buf.len())` without waiting for a full line.
+/// Line buffering is left to userspace (future `/bin/sh`).
+fn console_read(buf: &mut [u8]) -> usize {
+    if buf.is_empty() {
+        return 0;
+    }
+    // Wait for at least one byte (interrupts must be on — syscall clears IF via FMASK).
+    while kbd::buffered_len() == 0 {
+        unsafe {
+            asm!("sti; hlt", options(nomem, nostack));
+        }
+    }
+    let mut n = 0usize;
+    while n < buf.len() {
+        match kbd::pop_char() {
+            Some(b) => {
+                buf[n] = b;
+                n += 1;
+            }
+            None => break,
+        }
+    }
+    n
+}
+
 pub fn sys_write_slice(fd: u64, data: &[u8]) -> Result<usize, FdError> {
     if !is_ready() || fd > (FD_MAX as u64) {
         return Err(FdError::BadFd);
     }
     with_current(|t| t.write(fd as usize, data))
+}
+
+/// Read into a kernel-side temporary buffer; caller copies out to user.
+pub fn sys_read_into(fd: u64, buf: &mut [u8]) -> Result<usize, FdError> {
+    if !is_ready() || fd > (FD_MAX as u64) {
+        return Err(FdError::BadFd);
+    }
+    with_current(|t| t.read(fd as usize, buf))
 }
 
 pub fn sys_close(fd: u64) -> Result<(), FdError> {
