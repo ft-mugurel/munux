@@ -35,10 +35,10 @@ Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.
 | 2 | `open` | **done** (files + directories; dirs for getdents) |
 | 3 | `close` | **done** |
 | 39 | `getpid` | **done** (real PCB pid) |
-| 57 | `fork` | planned U6 |
-| 59 | `execve` | planned U6 |
+| 57 | `fork` | **done** (PCB + Ready child; shared AS) |
+| 59 | `execve` | **done** (load ELF; argv/envp ignored) |
 | 60 | `exit` | **done** (zombie + return to parent) |
-| 61 | `wait4` | **done** (reap zombie; non-blocking) |
+| 61 | `wait4` | **done** (reap; schedules Ready children) |
 | 79 | `getcwd` | **done** (per-process cwd) |
 | 80 | `chdir` | **done** (per-process cwd) |
 | 110 | `getppid` | **done** |
@@ -88,7 +88,7 @@ Common errno values we use:
 
 ---
 
-## 4. Process model (U5)
+## 4. Process model (U5–U6)
 
 | Item | Behavior |
 |------|----------|
@@ -96,9 +96,13 @@ Common errno values we use:
 | `run` / `user` | spawn child PCB, switch current → child, enter ring 3 |
 | `getpid` | current process pid |
 | `getppid` | parent pid (`0` if none) |
-| `exit` / `exit_group` | mark **zombie**, switch current → parent, return to launcher |
-| `wait4` | reap a zombie child; Linux status `((code & 0xff) << 8)`; **non-blocking** (no scheduler sleep yet): returns `0` if children exist but none zombie, `-ECHILD` if no children |
+| `fork` | new PCB; child gets **private stack copy** and `rax=0`; parent stays current. Cooperative: child is run to completion **inside** `fork` before parent resumes (then child is a zombie for `wait4`) |
+| `execve` | load ELF into current process (path from FS or embedded); argv/envp ignored; on success never returns to old image. Kernel snapshots parent text/data so shared-AS `execve` does not destroy the waiting parent |
+| `exit` / `exit_group` | mark **zombie**, switch current → parent, `return_from_user` (nested enter stack) |
+| `wait4` | reap zombie; can also run leftover Ready children; `WNOHANG` skips schedule; `-ECHILD` if no children |
 | cwd | **per-process** (`chdir` / `getcwd` use current PCB) |
+
+Cooperative model (no preemptive multi-process scheduler, no private page tables yet). Nested kernel stacks for wait/exec.
 
 Future init: `execve("/bin/sh")` as pid 1 (U7–U8).
 
@@ -112,7 +116,7 @@ Numbers alone are **not** enough. Also needed over time:
 - Full pointer validation and signal/`rt_sigreturn` paths
 - ELF aux vector completeness for dynamic linker (later)
 - Correct `errno` coverage for each call
-- `fork` + `execve` and per-process FD tables
+- Per-process FD tables and real page-table isolation on fork
 
 But using **wrong numbers guarantees** Linux binaries will never work — so munux uses Linux numbers from this version forward.
 
@@ -127,3 +131,4 @@ But using **wrong numbers guarantees** Linux binaries will never work — so mun
 | 0.2+U3 | `open` / file `read` / `chdir` / `getcwd` |
 | 0.2+U4 | `getdents64` + open directory FDs |
 | 0.2+U5 | PCB, real pid/ppid, zombie exit, wait4, per-process cwd |
+| 0.2+U6 | `fork` + `execve`; wait schedules Ready children; nested enter |

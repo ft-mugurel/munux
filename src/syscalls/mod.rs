@@ -18,8 +18,8 @@ pub mod num {
     pub const OPEN: u64 = 2;
     pub const CLOSE: u64 = 3;
     pub const GETPID: u64 = 39;
-    pub const FORK: u64 = 57; // planned U6
-    pub const EXECVE: u64 = 59; // planned U6
+    pub const FORK: u64 = 57;
+    pub const EXECVE: u64 = 59;
     pub const EXIT: u64 = 60;
     pub const WAIT4: u64 = 61;
     pub const GETCWD: u64 = 79;
@@ -37,6 +37,8 @@ mod errno {
     pub const ENOENT: i64 = 2;
     pub const EBADF: i64 = 9;
     pub const ECHILD: i64 = 10;
+    pub const EAGAIN: i64 = 11;
+    pub const ENOMEM: i64 = 12;
     pub const EFAULT: i64 = 14;
     pub const EISDIR: i64 = 21;
     pub const EINVAL: i64 = 22;
@@ -71,11 +73,102 @@ const DEMO_STACK_TOP: u64 = DEMO_STACK_PAGE + 0x1000;
 
 const PAGE_USER_RW: u64 = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
 
+/// Nested syscall stacks so wait4/execve → child does not clobber the outer
+/// syscall frame (all would otherwise share one `syscall_kstack` top).
+const NEST_KSTACK_BYTES: usize = 16384;
+const NEST_KSTACK_MAX: usize = 6;
+
+#[repr(align(16))]
+struct NestKStack {
+    #[allow(dead_code)]
+    bytes: [u8; NEST_KSTACK_BYTES],
+}
+
+static mut NEST_KSTACKS: [NestKStack; NEST_KSTACK_MAX] = [
+    NestKStack {
+        bytes: [0; NEST_KSTACK_BYTES],
+    },
+    NestKStack {
+        bytes: [0; NEST_KSTACK_BYTES],
+    },
+    NestKStack {
+        bytes: [0; NEST_KSTACK_BYTES],
+    },
+    NestKStack {
+        bytes: [0; NEST_KSTACK_BYTES],
+    },
+    NestKStack {
+        bytes: [0; NEST_KSTACK_BYTES],
+    },
+    NestKStack {
+        bytes: [0; NEST_KSTACK_BYTES],
+    },
+];
+/// Depth 0 = base TSS/kernel stack; 1.. = NEST_KSTACKS[depth-1]
+static mut SYSCALL_STACK_DEPTH: usize = 0;
+
 extern "C" {
-    fn enter_user_mode(entry: u64, user_rsp: u64);
+    /// Enter ring 3; `user_rax` is initial RAX (0 after fork for child).
+    fn enter_user_mode(entry: u64, user_rsp: u64, user_rax: u64);
     fn return_from_user() -> !;
     fn set_syscall_kstack(rsp: u64);
     fn syscall_entry();
+    static last_user_rip: u64;
+    static last_user_rsp: u64;
+    static last_user_rflags: u64;
+}
+
+fn nest_stack_top(index: usize) -> u64 {
+    unsafe {
+        let base = core::ptr::addr_of!(NEST_KSTACKS[index]) as *const u8 as u64;
+        base + NEST_KSTACK_BYTES as u64
+    }
+}
+
+/// Push a fresh syscall/IRQ kernel stack for a nested user entry.
+fn push_syscall_stack() {
+    unsafe {
+        if SYSCALL_STACK_DEPTH >= NEST_KSTACK_MAX {
+            return;
+        }
+        SYSCALL_STACK_DEPTH += 1;
+        let top = nest_stack_top(SYSCALL_STACK_DEPTH - 1);
+        set_syscall_kstack(top);
+        tss::set_kernel_stack(top);
+    }
+}
+
+fn pop_syscall_stack() {
+    unsafe {
+        if SYSCALL_STACK_DEPTH == 0 {
+            ensure_kstack_base();
+            return;
+        }
+        SYSCALL_STACK_DEPTH -= 1;
+        if SYSCALL_STACK_DEPTH == 0 {
+            ensure_kstack_base();
+        } else {
+            let top = nest_stack_top(SYSCALL_STACK_DEPTH - 1);
+            set_syscall_kstack(top);
+            tss::set_kernel_stack(top);
+        }
+    }
+}
+
+fn ensure_kstack_base() {
+    tss::set_kernel_stack(tss::kernel_stack_top());
+    unsafe {
+        set_syscall_kstack(tss::kernel_stack_top());
+    }
+}
+
+/// Enter user with a private syscall stack for nested sessions.
+fn enter_user_nested(entry: u64, user_rsp: u64, user_rax: u64) {
+    push_syscall_stack();
+    unsafe {
+        enter_user_mode(entry, user_rsp, user_rax);
+    }
+    pop_syscall_stack();
 }
 
 /// MSR helpers
@@ -150,6 +243,8 @@ pub extern "C" fn syscall_dispatch(
                 pp as u64
             }
         }
+        num::FORK => sys_fork(),
+        num::EXECVE => sys_execve(a1, a2, a3),
         num::WAIT4 => sys_wait4(a1, a2, a3),
         num::GETCWD => sys_getcwd(a1, a2),
         num::CHDIR => sys_chdir(a1),
@@ -173,10 +268,11 @@ fn user_ptr_ok(buf: u64, len: u64) -> bool {
         return true;
     }
     let end = buf.saturating_add(len);
-    // Demo blob, classic ELF load (0x400000+), user stack (~0x7fff…), low identity
+    // Demo blob, classic ELF load (0x400000+), user stacks, fork child stacks
     (buf >= DEMO_CODE && end <= DEMO_STACK_TOP + 0x1000)
         || (buf >= 0x400000 && end <= 0x800000)
         || (buf >= 0x0000_0000_7000_0000 && end <= 0x0000_0000_8000_0000)
+        || (buf >= 0x0000_0000_6F00_0000 && end <= 0x0000_0000_7000_0000)
         || (buf >= 0x1000 && end <= 0x4000_0000)
 }
 
@@ -423,36 +519,241 @@ fn user_demo_bytes() -> [u8; 256] {
     out
 }
 
+/// Snapshot of low user image (shared AS): restored after child may `execve`.
+const USER_IMAGE_BASE: u64 = 0x400000;
+const USER_IMAGE_MAX: usize = 64 * 1024;
+static mut USER_IMAGE_SNAP: [u8; USER_IMAGE_MAX] = [0; USER_IMAGE_MAX];
+static mut USER_IMAGE_SNAP_LEN: usize = 0;
+
+fn snapshot_user_image() {
+    // Copy present pages in [0x400000, 0x400000+64K)
+    let mut len = 0usize;
+    unsafe {
+        for off in (0..USER_IMAGE_MAX).step_by(FRAME_SIZE) {
+            let v = USER_IMAGE_BASE + off as u64;
+            if paging::virt_to_phys(v).is_none() {
+                break;
+            }
+            let n = (USER_IMAGE_MAX - off).min(FRAME_SIZE);
+            core::ptr::copy_nonoverlapping(
+                v as *const u8,
+                USER_IMAGE_SNAP.as_mut_ptr().add(off),
+                n,
+            );
+            len = off + n;
+        }
+        USER_IMAGE_SNAP_LEN = len;
+    }
+}
+
+fn restore_user_image() {
+    unsafe {
+        let len = USER_IMAGE_SNAP_LEN;
+        if len == 0 {
+            return;
+        }
+        // Ensure pages exist and are user-writable, then restore bytes.
+        let mut off = 0usize;
+        while off < len {
+            let v = USER_IMAGE_BASE + off as u64;
+            let _ = map_user_page(v);
+            let n = (len - off).min(FRAME_SIZE);
+            core::ptr::copy_nonoverlapping(
+                USER_IMAGE_SNAP.as_ptr().add(off),
+                v as *mut u8,
+                n,
+            );
+            off += n;
+        }
+    }
+}
+
+/// Run a Ready child to completion; restore parent user image afterward
+/// (child `execve` would otherwise clobber shared code/data).
+fn run_child_frame(frame: crate::process::UserFrame) {
+    snapshot_user_image();
+    enter_user_nested(frame.rip, frame.rsp, frame.rax);
+    restore_user_image();
+}
+
+/// Linux fork() — parent returns child pid.
+///
+/// Cooperative: the Ready child is run to completion **before** the parent
+/// resumes (avoids concurrent shared-AS mess). Parent then sees a zombie and
+/// can `wait4` to reap.
+fn sys_fork() -> u64 {
+    let (rip, rsp, rflags) = unsafe {
+        (
+            core::ptr::read_volatile(core::ptr::addr_of!(last_user_rip)),
+            core::ptr::read_volatile(core::ptr::addr_of!(last_user_rsp)),
+            core::ptr::read_volatile(core::ptr::addr_of!(last_user_rflags)),
+        )
+    };
+    let child_pid = match crate::process::fork_from_user(rip, rsp, rflags) {
+        Ok(pid) => pid,
+        Err(_) => return errno::neg(errno::EAGAIN),
+    };
+
+    // Run child now (nested enter). Child typically exits (or execve+exit).
+    if let Some(frame) = crate::process::take_ready_child(child_pid) {
+        run_child_frame(frame);
+        // After exit: current is parent again; child is zombie.
+    }
+
+    child_pid as u64
+}
+
+/// Linux execve(path, argv, envp) — argv/envp ignored (argv0 = path basename).
+/// On success does not return to the old image (nested enter + exit chain).
+fn sys_execve(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
+    let mut path_buf = [0u8; 256];
+    let n = match copy_user_path(path_ptr, &mut path_buf) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let path = match core::str::from_utf8(&path_buf[..n]) {
+        Ok(s) => s,
+        Err(_) => return errno::neg(errno::ENOENT),
+    };
+
+    let argv0 = path.rsplit('/').next().unwrap_or(path);
+    let image = match load_exec_image(path, argv0) {
+        Ok(img) => img,
+        Err("no filesystem") | Err("not found") | Err("ENOENT") => {
+            return errno::neg(errno::ENOENT);
+        }
+        Err("is a directory") => return errno::neg(errno::EISDIR),
+        Err("OOM") | Err("elf: OOM page") => return errno::neg(errno::ENOMEM),
+        Err(_) => return errno::neg(errno::ENOENT),
+    };
+
+    let _ = crate::process::with_current(|p| {
+        p.set_name(argv0);
+        p.user_rip = image.entry;
+        p.user_rsp = image.stack_top;
+        p.user_rax = 0;
+    });
+
+    // Nested enter: new image runs until exit, then we unwind this session.
+    enter_user_nested(image.entry, image.stack_top, 0);
+    // New image exited: exit_user already switched to parent. Finish the
+    // outer user session (wait4 child / shell task) — do not sysret.
+    unsafe {
+        return_from_user();
+    }
+}
+
+fn load_exec_image(path: &str, argv0: &str) -> Result<crate::elf::LoadedImage, &'static str> {
+    // Prefer filesystem; fall back to embedded known binaries.
+    if crate::fs::is_ready() {
+        if let Ok(img) = load_elf_from_fs(path, argv0) {
+            return Ok(img);
+        }
+        // try absolute /bin/*
+        if !path.starts_with('/') {
+            let mut abs = [0u8; 128];
+            let prefix = b"/bin/";
+            if prefix.len() + path.len() < abs.len() {
+                abs[..prefix.len()].copy_from_slice(prefix);
+                abs[prefix.len()..prefix.len() + path.len()]
+                    .copy_from_slice(path.as_bytes());
+                if let Ok(s) = core::str::from_utf8(&abs[..prefix.len() + path.len()]) {
+                    if let Ok(img) = load_elf_from_fs(s, argv0) {
+                        return Ok(img);
+                    }
+                }
+            }
+        }
+    }
+    // Embedded fallbacks
+    if path == "hello"
+        || path == "/bin/hello"
+        || path == "bin/hello"
+        || path.ends_with("/hello")
+    {
+        return crate::elf::load_bytes(crate::embedded_hello::HELLO_ELF, argv0);
+    }
+    if path == "echo" || path == "/bin/echo" || path.ends_with("/echo") {
+        return crate::elf::load_bytes(crate::embedded_echo::ECHO_ELF, argv0);
+    }
+    if path == "cat" || path == "/bin/cat" || path.ends_with("/cat") {
+        return crate::elf::load_bytes(crate::embedded_cat::CAT_ELF, argv0);
+    }
+    if path == "ls" || path == "/bin/ls" || path.ends_with("/ls") {
+        return crate::elf::load_bytes(crate::embedded_ls::LS_ELF, argv0);
+    }
+    if path == "forktest" || path == "/bin/forktest" || path.ends_with("/forktest") {
+        return crate::elf::load_bytes(crate::embedded_forktest::FORKTEST_ELF, argv0);
+    }
+    if path == "exectest" || path == "/bin/exectest" || path.ends_with("/exectest") {
+        return crate::elf::load_bytes(crate::embedded_exectest::EXECTEST_ELF, argv0);
+    }
+    Err("ENOENT")
+}
+
+fn load_elf_from_fs(path: &str, argv0: &str) -> Result<crate::elf::LoadedImage, &'static str> {
+    if !crate::fs::is_ready() {
+        return Err("no filesystem");
+    }
+    let cwd = crate::fs::path::cwd_inode();
+    let ino = crate::fs::ext2::resolve_path(cwd, path).map_err(|_| "not found")?;
+    if crate::fs::ext2::inode_is_dir(ino) {
+        return Err("is a directory");
+    }
+    let size = crate::fs::ext2::inode_file_size(ino) as usize;
+    if size == 0 || size > 512 * 1024 {
+        return Err("bad file size");
+    }
+    const CAP: usize = 64 * 1024;
+    if size > CAP {
+        return Err("ELF too large");
+    }
+    let mut buf = [0u8; CAP];
+    let n = crate::fs::ext2::read_file(ino, 0, &mut buf[..size])?;
+    crate::elf::load_bytes(&buf[..n], argv0)
+}
+
 /// Linux wait4(pid, status, options, rusage) — rusage ignored.
-/// options: bit0 = WNOHANG.
+/// Reaps zombies. Also schedules any leftover Ready children (if fork did not
+/// run them), then reaps.
 fn sys_wait4(pid: u64, status_ptr: u64, options: u64) -> u64 {
     const WNOHANG: u64 = 1;
     let wait_for = pid as i32;
     let nohang = (options & WNOHANG) != 0;
 
-    let mut status = 0i32;
-    let got = crate::process::waitpid(wait_for, Some(&mut status), nohang);
+    for _ in 0..16 {
+        let mut status = 0i32;
+        let got = crate::process::waitpid(wait_for, Some(&mut status), true);
 
-    if got == 0 {
-        // WNOHANG, no zombie yet
+        if got > 0 {
+            if status_ptr != 0 {
+                if !user_ptr_ok(status_ptr, 4) {
+                    return errno::neg(errno::EFAULT);
+                }
+                unsafe {
+                    core::ptr::write_volatile(status_ptr as *mut i32, status);
+                }
+            }
+            return got as u64;
+        }
+        if got < 0 {
+            return errno::neg(errno::ECHILD);
+        }
+        // got == 0: children exist, none zombie yet
+        if nohang {
+            return 0;
+        }
+        if let Some(frame) = crate::process::take_ready_child(wait_for) {
+            run_child_frame(frame);
+            continue;
+        }
         return 0;
     }
-    if got < 0 {
-        return errno::neg(errno::ECHILD);
-    }
-    if status_ptr != 0 {
-        if !user_ptr_ok(status_ptr, 4) {
-            return errno::neg(errno::EFAULT);
-        }
-        unsafe {
-            core::ptr::write_volatile(status_ptr as *mut i32, status);
-        }
-    }
-    got as u64
+    0
 }
 
 fn enter_and_wait(entry: u64, stack_top: u64, label: &str) {
-    // U5: run as a child of init (shell) so getpid/exit/wait are real
+    // U5/U6: run as a child of init (shell) so getpid/exit/wait/fork are real
     let child = match crate::process::begin_user_task(label) {
         Ok(p) => p,
         Err(_) => {
@@ -461,10 +762,13 @@ fn enter_and_wait(entry: u64, stack_top: u64, label: &str) {
         }
     };
 
-    tss::set_kernel_stack(tss::kernel_stack_top());
+    // Base level (shell → first user task). Syscalls from that task use the
+    // dedicated TSS/kernel stack (not a nest slot). Nested fork/exec children
+    // get push_syscall_stack() so they do not clobber this frame.
     unsafe {
-        set_syscall_kstack(tss::kernel_stack_top());
+        SYSCALL_STACK_DEPTH = 0;
     }
+    ensure_kstack_base();
 
     console::print(label);
     console::print(" pid=");
@@ -476,7 +780,7 @@ fn enter_and_wait(entry: u64, stack_top: u64, label: &str) {
     console::println("");
 
     unsafe {
-        enter_user_mode(entry, stack_top);
+        enter_user_mode(entry, stack_top, 0);
     }
 
     unsafe {
@@ -535,6 +839,16 @@ pub fn run_embedded_cat() -> Result<(), &'static str> {
 /// Run embedded `ls` (open . + getdents64) — U4 test.
 pub fn run_embedded_ls() -> Result<(), &'static str> {
     exec_elf_bytes(crate::embedded_ls::LS_ELF, "ls")
+}
+
+/// Run embedded `forktest` (fork + wait4) — U6 test.
+pub fn run_embedded_forktest() -> Result<(), &'static str> {
+    exec_elf_bytes(crate::embedded_forktest::FORKTEST_ELF, "forktest")
+}
+
+/// Run embedded `exectest` (fork + execve + wait4) — U6 test.
+pub fn run_embedded_exectest() -> Result<(), &'static str> {
+    exec_elf_bytes(crate::embedded_exectest::EXECTEST_ELF, "exectest")
 }
 
 /// Load ELF64 from ext2 path (or embedded `hello` if path empty / "hello").

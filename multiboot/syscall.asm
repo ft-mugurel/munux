@@ -2,6 +2,8 @@
 ;
 ; SYSCALL: RCX=user RIP, R11=user RFLAGS, RSP still user stack until we switch
 ; SYSRETQ: RIP=RCX, RFLAGS=R11, CS/SS from STAR; RSP must be set by us
+;
+; U6: nested enter_user_mode (fork/wait/execve), last-user context for fork
 
 bits 64
 default abs
@@ -14,8 +16,18 @@ syscall_kstack:
 ; User RSP saved across syscall
 saved_user_rsp:
 	dq 0
-; Kernel RSP for return_from_user (SYS_EXIT → shell)
-saved_kernel_rsp:
+; Nested enter_user_mode return frames (shell → wait → exec, …)
+MAX_ENTER_NEST equ 8
+saved_kernel_rsp_depth:
+	dq 0
+saved_kernel_rsp_stack:
+	times MAX_ENTER_NEST dq 0
+; Snapshot at syscall entry (for fork)
+last_user_rip:
+	dq 0
+last_user_rsp:
+	dq 0
+last_user_rflags:
 	dq 0
 
 section .text
@@ -24,6 +36,9 @@ global syscall_entry
 global enter_user_mode
 global return_from_user
 global set_syscall_kstack
+global last_user_rip
+global last_user_rsp
+global last_user_rflags
 
 extern syscall_dispatch
 
@@ -36,6 +51,11 @@ set_syscall_kstack:
 ; syscall_entry — LSTAR
 ; ---------------------------------------------------------------------------
 syscall_entry:
+	; Snapshot user context for fork before switching stacks
+	mov [rel last_user_rsp], rsp
+	mov [rel last_user_rip], rcx
+	mov [rel last_user_rflags], r11
+
 	; Save user stack pointer
 	mov [rel saved_user_rsp], rsp
 
@@ -81,21 +101,27 @@ syscall_entry:
 	o64 sysret
 
 ; ---------------------------------------------------------------------------
-; enter_user_mode(entry, user_rsp)  SysV: rdi=entry, rsi=user_rsp
-; Does not return until user SYS_EXIT → return_from_user
+; enter_user_mode(entry, user_rsp, user_rax)
+; SysV: rdi=entry, rsi=user_rsp, rdx=initial user rax
+; Nested: pushes kernel frame; return_from_user pops one level
 ; ---------------------------------------------------------------------------
 enter_user_mode:
-	; Preserve callee-saved for shell return
+	; Preserve callee-saved for return to kernel caller
 	push rbp
 	push rbx
 	push r12
 	push r13
 	push r14
 	push r15
-	mov [rel saved_kernel_rsp], rsp
+	mov r8, rdx			; save initial user rax
 
-	; syscall_kstack is set by Rust to a dedicated kernel stack
-	; (must NOT reuse this shell frame — EXIT restores saved_kernel_rsp)
+	; Nest: store this frame's RSP
+	mov rax, [rel saved_kernel_rsp_depth]
+	cmp rax, MAX_ENTER_NEST
+	jae .nest_full
+	lea rbx, [rel saved_kernel_rsp_stack]
+	mov [rbx + rax*8], rsp
+	inc qword [rel saved_kernel_rsp_depth]
 
 	; iretq frame: SS, RSP, RFLAGS, CS, RIP
 	; user SS = 0x1B, user CS = 0x23
@@ -113,10 +139,37 @@ enter_user_mode:
 	mov fs, ax
 	mov gs, ax
 
+	; Initial user rax (0 for child after fork; garbage ok for _start)
+	mov rax, r8
+	xor rbx, rbx
+	xor rcx, rcx
+	xor rdx, rdx
+	xor rsi, rsi
+	xor rdi, rdi
+	xor rbp, rbp
+	xor r8, r8
+	xor r9, r9
+	xor r10, r10
+	xor r11, r11
+	xor r12, r12
+	xor r13, r13
+	xor r14, r14
+	xor r15, r15
+
 	iretq
 
+.nest_full:
+	; Should not happen; restore and return
+	pop r15
+	pop r14
+	pop r13
+	pop r12
+	pop rbx
+	pop rbp
+	ret
+
 ; ---------------------------------------------------------------------------
-; return_from_user — SYS_EXIT jumps here (does not return to caller of this)
+; return_from_user — SYS_EXIT (and failed/finished execve) jumps here
 ; ---------------------------------------------------------------------------
 return_from_user:
 	cli
@@ -128,7 +181,13 @@ return_from_user:
 	mov gs, ax
 	mov ss, ax
 
-	mov rsp, [rel saved_kernel_rsp]
+	mov rax, [rel saved_kernel_rsp_depth]
+	test rax, rax
+	jz .no_frame
+	dec rax
+	mov [rel saved_kernel_rsp_depth], rax
+	lea rbx, [rel saved_kernel_rsp_stack]
+	mov rsp, [rbx + rax*8]
 	pop r15
 	pop r14
 	pop r13
@@ -137,3 +196,8 @@ return_from_user:
 	pop rbp
 	; sti done in Rust after enter_user_mode returns
 	ret
+
+.no_frame:
+.hang:
+	hlt
+	jmp .hang

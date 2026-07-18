@@ -132,6 +132,26 @@ pub fn dispatch(line: &str) {
                 }
                 return;
             }
+            if path == "fork" || path == "forktest" {
+                match crate::syscalls::run_embedded_forktest() {
+                    Ok(()) => {}
+                    Err(e) => {
+                        console::print("run forktest: ");
+                        console::println(e);
+                    }
+                }
+                return;
+            }
+            if path == "exec" || path == "exectest" {
+                match crate::syscalls::run_embedded_exectest() {
+                    Ok(()) => {}
+                    Err(e) => {
+                        console::print("run exectest: ");
+                        console::println(e);
+                    }
+                }
+                return;
+            }
             match crate::syscalls::run_path(path) {
                 Ok(()) => {}
                 Err(e) => {
@@ -168,7 +188,7 @@ fn cmd_help() {
     console::println("  fault [ud2]     Trigger CPU exception");
     console::println("  panic           Rust panic");
     console::println("  user            Enter ring 3 hand-asm demo");
-    console::println("  run [path|echo|cat|ls]  user ELF tests");
+    console::println("  run [path|echo|cat|ls|fork|exec]  user ELF tests");
     console::println("  ls [path]       List directory");
     console::println("  cat <path>      Print file");
     console::println("  pwd / cd        Working directory");

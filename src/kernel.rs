@@ -15,6 +15,8 @@ pub mod drivers;
 pub mod elf;
 pub mod embedded_cat;
 pub mod embedded_echo;
+pub mod embedded_exectest;
+pub mod embedded_forktest;
 pub mod embedded_hello;
 pub mod embedded_ls;
 pub mod fd;

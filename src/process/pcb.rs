@@ -98,6 +98,13 @@ pub struct Process {
 
     pub ctx: CpuContext,
 
+    /// Saved user ring-3 context (U6 fork / cooperative schedule).
+    pub user_rip: u64,
+    pub user_rsp: u64,
+    pub user_rflags: u64,
+    /// rax on (re)entry — 0 for child after fork
+    pub user_rax: u64,
+
     /// Pending signals (queue), delivered on next CPU tick
     pub sig_queue: [u32; PROC_SIG_QUEUE],
     pub sig_head: usize,
@@ -127,6 +134,10 @@ impl Process {
             heap_size: 0,
             cwd_inode: 2, // ext2 root
             ctx: CpuContext::zero(),
+            user_rip: 0,
+            user_rsp: 0,
+            user_rflags: 0x202,
+            user_rax: 0,
             sig_queue: [0; PROC_SIG_QUEUE],
             sig_head: 0,
             sig_tail: 0,

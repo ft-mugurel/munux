@@ -11,7 +11,7 @@ pub mod socket;
 pub mod sys;
 pub mod table;
 
-pub use fork::{fork, switch_to};
+pub use fork::{fork, fork_from_user, switch_to, take_ready_child, UserFrame};
 pub use memory::{proc_read_mem, proc_sbrk, proc_write_mem};
 pub use pcb::{Pid, Process, ProcessState, Uid, MAX_PROCESSES};
 pub use socket::{socket_close, socket_connect, socket_create, socket_recv, socket_send};
@@ -19,7 +19,7 @@ pub use sys::{
     begin_user_task, exit, exit_user, getpid, getppid, getuid, kill, reap_any_child, setuid,
     signal, wait, waitpid,
 };
-pub use table::{current_pid, for_each_process, process_count};
+pub use table::{current_pid, for_each_process, process_count, with_current};
 
 /// Per-process working directory (ext2 inode).
 pub fn get_cwd_inode() -> u32 {
