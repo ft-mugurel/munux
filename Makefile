@@ -268,41 +268,29 @@ iso-full: build
 #   index 1 = GRUB ISO (cdrom)
 # Do not put two drives on index 0 — QEMU errors: "drive with bus=0, unit=0 exists"
 # Primary master = ext2 disk; IDE index 1 = GRUB ISO (cdrom)
-# Keyboard / console:
-#   - Type in THIS terminal (-serial stdio) → guest COM1 (always works)
-#   - Or click the QEMU VGA window → PS/2 keyboard
-# Do NOT use -monitor stdio: that steals the terminal from the guest.
 run-iso: iso disk
 	$(call require_tool,$(QEMU_SYSTEM),qemu-system-x86_64)
-	@echo -e "$(BOLD)$(YELLOW)[i] Type in THIS terminal (serial console).$(RESET)"
-	@echo -e "$(BOLD)$(YELLOW)[i] VGA window (if shown): click it to use PS/2 keyboard.$(RESET)"
-	@echo -e "$(BOLD)$(YELLOW)[i] Quit: Ctrl-A X  (serial) or close the VGA window$(RESET)"
 	@${QEMU_SYSTEM} -m 512M \
 		-drive format=raw,file=${DISK_IMG},if=ide,index=0,media=disk \
 		-drive format=raw,file=${ISO_OUT},if=ide,index=1,media=cdrom \
 		-boot order=d \
-		-serial stdio
+		-monitor stdio
 	@echo -e "\n$(BOLD)$(CYAN)[✓] KERNEL EXIT DONE$(RESET)"
 
 run-iso-full: iso-full disk
 	$(call require_tool,$(QEMU_SYSTEM),qemu-system-x86_64)
-	@echo -e "$(BOLD)$(YELLOW)[i] Type in THIS terminal (serial). Quit: Ctrl-A X$(RESET)"
 	@${QEMU_SYSTEM} -m 4G \
 		-drive format=raw,file=${DISK_IMG},if=ide,index=0,media=disk \
 		-drive format=raw,file=${ISO_FULL_OUT},if=ide,index=1,media=cdrom \
-		-boot order=d \
-		-serial stdio
+		-boot order=d
 	@echo -e "\n$(BOLD)$(CYAN)[✓] KERNEL EXIT DONE$(RESET)"
 
-# Headless: serial only (type in this terminal). Ctrl-A X to quit.
 run-iso-term: iso disk
 	$(call require_tool,$(QEMU_SYSTEM),qemu-system-x86_64)
-	@echo -e "$(BOLD)$(YELLOW)[i] -nographic: type here. Quit: Ctrl-A X$(RESET)"
-	@${QEMU_SYSTEM} -m 512M \
+	@${QEMU_SYSTEM} -m 4G \
 		-drive format=raw,file=${DISK_IMG},if=ide,index=0,media=disk \
 		-drive format=raw,file=${ISO_OUT},if=ide,index=1,media=cdrom \
-		-boot order=d \
-		-nographic
+		-boot order=d -nographic
 	@echo -e "\n$(BOLD)$(CYAN)[✓] KERNEL EXIT DONE$(RESET)"
 
 # --------------------------------------------------------------------------- #
