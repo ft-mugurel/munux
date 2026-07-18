@@ -22,8 +22,8 @@ pub mod num {
     pub const EXECVE: u64 = 59; // planned
     pub const EXIT: u64 = 60;
     pub const WAIT4: u64 = 61; // planned
-    pub const GETCWD: u64 = 79; // planned
-    pub const CHDIR: u64 = 80; // planned
+    pub const GETCWD: u64 = 79;
+    pub const CHDIR: u64 = 80;
     pub const EXIT_GROUP: u64 = 231; // musl/glibc often use this
     pub const OPENAT: u64 = 257; // planned (modern libc)
 }
@@ -35,12 +35,28 @@ mod errno {
     pub const ENOENT: i64 = 2;
     pub const EBADF: i64 = 9;
     pub const EFAULT: i64 = 14;
+    pub const EISDIR: i64 = 21;
     pub const EINVAL: i64 = 22;
+    pub const ENOTDIR: i64 = 20;
     pub const ENOSYS: i64 = 38;
+    pub const ENAMETOOLONG: i64 = 36;
+    pub const EMFILE: i64 = 24;
+    pub const ERANGE: i64 = 34;
 
     #[inline]
     pub fn neg(e: i64) -> u64 {
         (-e) as u64
+    }
+}
+
+fn map_fd_err(e: fd::FdError) -> u64 {
+    match e {
+        fd::FdError::BadFd => errno::neg(errno::EBADF),
+        fd::FdError::Fault => errno::neg(errno::EFAULT),
+        fd::FdError::NoEnt => errno::neg(errno::ENOENT),
+        fd::FdError::IsDir => errno::neg(errno::EISDIR),
+        fd::FdError::NoMem => errno::neg(errno::EMFILE),
+        fd::FdError::Inval => errno::neg(errno::EINVAL),
     }
 }
 
@@ -119,11 +135,12 @@ pub extern "C" fn syscall_dispatch(
     match num {
         num::READ => sys_read(a1, a2, a3),
         num::WRITE => sys_write(a1, a2, a3),
-        num::OPEN => errno::neg(errno::ENOSYS), // U3
+        num::OPEN => sys_open(a1, a2, a3),
         num::CLOSE => sys_close(a1),
         num::GETPID => 1,
+        num::GETCWD => sys_getcwd(a1, a2),
+        num::CHDIR => sys_chdir(a1),
         num::EXIT | num::EXIT_GROUP => {
-            // Jump back to kernel launcher; does not return here.
             let _status = a1;
             unsafe {
                 return_from_user();
@@ -156,8 +173,7 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> u64 {
     let slice = unsafe { core::slice::from_raw_parts(buf as *const u8, len as usize) };
     match fd::sys_write_slice(fd, slice) {
         Ok(n) => n as u64,
-        Err(fd::FdError::BadFd) => errno::neg(errno::EBADF),
-        Err(_) => errno::neg(errno::EFAULT),
+        Err(e) => map_fd_err(e),
     }
 }
 
@@ -172,8 +188,7 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
     let mut tmp = [0u8; 4096];
     let n = match fd::sys_read_into(fd, &mut tmp[..len]) {
         Ok(n) => n,
-        Err(fd::FdError::BadFd) => return errno::neg(errno::EBADF),
-        Err(_) => return errno::neg(errno::EFAULT),
+        Err(e) => return map_fd_err(e),
     };
     unsafe {
         core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, n);
@@ -184,8 +199,109 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
 fn sys_close(fd: u64) -> u64 {
     match fd::sys_close(fd) {
         Ok(()) => 0,
-        Err(_) => errno::neg(errno::EBADF),
+        Err(e) => map_fd_err(e),
     }
+}
+
+/// Linux open(path, flags, mode) — mode ignored; read-only files only.
+fn sys_open(path_ptr: u64, flags: u64, _mode: u64) -> u64 {
+    let mut path_buf = [0u8; 256];
+    let n = match copy_user_path(path_ptr, &mut path_buf) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let path = match core::str::from_utf8(&path_buf[..n]) {
+        Ok(s) => s,
+        Err(_) => return errno::neg(errno::ENOENT),
+    };
+    match fd::sys_open_path(path, flags) {
+        Ok(fd) => fd as u64,
+        Err(e) => map_fd_err(e),
+    }
+}
+
+/// Linux getcwd(buf, size) — returns length including NUL, or -ERANGE/-EFAULT.
+fn sys_getcwd(buf: u64, size: u64) -> u64 {
+    if size == 0 {
+        return errno::neg(errno::ERANGE);
+    }
+    if size > 4096 {
+        return errno::neg(errno::EINVAL);
+    }
+    if !user_ptr_ok(buf, size) {
+        return errno::neg(errno::EFAULT);
+    }
+    let mut tmp = [0u8; 512];
+    let n = crate::fs::path::getcwd_pretty(&mut tmp);
+    // getcwd_pretty returns length without requiring trailing NUL in count;
+    // ensure NUL and include it in returned length (Linux includes NUL).
+    let mut len = n;
+    if len >= tmp.len() {
+        len = tmp.len() - 1;
+    }
+    tmp[len] = 0;
+    let need = len + 1;
+    if need as u64 > size {
+        return errno::neg(errno::ERANGE);
+    }
+    unsafe {
+        core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, need);
+    }
+    need as u64
+}
+
+/// Linux chdir(path) — 0 or -errno.
+fn sys_chdir(path_ptr: u64) -> u64 {
+    let mut path_buf = [0u8; 256];
+    let n = match copy_user_path(path_ptr, &mut path_buf) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let path = match core::str::from_utf8(&path_buf[..n]) {
+        Ok(s) => s,
+        Err(_) => return errno::neg(errno::ENOENT),
+    };
+    match crate::fs::path::chdir(path) {
+        Ok(()) => 0,
+        Err("not a directory") => errno::neg(errno::ENOTDIR),
+        Err(_) => errno::neg(errno::ENOENT),
+    }
+}
+
+// ENOTDIR used above
+// add to errno module - I used ENOTDIR without defining it
+fn copy_user_path(path_ptr: u64, out: &mut [u8]) -> Result<usize, u64> {
+    if path_ptr == 0 {
+        return Err(errno::neg(errno::EFAULT));
+    }
+    // Copy until NUL or out full (leave room for safety)
+    let max = out.len().saturating_sub(1);
+    let mut n = 0usize;
+    while n < max {
+        if !user_ptr_ok(path_ptr + n as u64, 1) {
+            return Err(errno::neg(errno::EFAULT));
+        }
+        let b = unsafe { core::ptr::read_volatile((path_ptr as usize + n) as *const u8) };
+        if b == 0 {
+            break;
+        }
+        out[n] = b;
+        n += 1;
+    }
+    if n == 0 {
+        return Err(errno::neg(errno::ENOENT));
+    }
+    // If we filled max without NUL, path too long
+    if n == max {
+        let next_ok = user_ptr_ok(path_ptr + n as u64, 1);
+        if next_ok {
+            let b = unsafe { core::ptr::read_volatile((path_ptr as usize + n) as *const u8) };
+            if b != 0 {
+                return Err(errno::neg(errno::ENAMETOOLONG));
+            }
+        }
+    }
+    Ok(n)
 }
 
 /// Ensure a user-accessible page at `virt`.
@@ -325,6 +441,11 @@ pub fn run_embedded_hello() -> Result<(), &'static str> {
 /// Run embedded `echo` (READ stdin + WRITE stdout) — U2 test.
 pub fn run_embedded_echo() -> Result<(), &'static str> {
     exec_elf_bytes(crate::embedded_echo::ECHO_ELF, "echo")
+}
+
+/// Run embedded `cat` (OPEN/READ file + WRITE) — U3 test (expects hello.txt on FS).
+pub fn run_embedded_cat() -> Result<(), &'static str> {
+    exec_elf_bytes(crate::embedded_cat::CAT_ELF, "cat")
 }
 
 /// Load ELF64 from ext2 path (or embedded `hello` if path empty / "hello").

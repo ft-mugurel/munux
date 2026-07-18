@@ -1,14 +1,14 @@
-//! File descriptors and open-file objects (U1–U2).
+//! File descriptors and open-file objects (U1–U3).
 //!
-//! v0.1: one global FD table (becomes per-process in U5).
-//! WRITE/READ go through this table.
+//! v0.2: global FD table; console + read-only ext2 files.
 
 use core::arch::asm;
 
 use crate::console;
+use crate::fs;
+use crate::fs::ext2;
 use crate::interrupts::keyboard::init as kbd;
 
-/// Maximum open FDs per table.
 pub const FD_MAX: usize = 32;
 
 pub const STDIN_FILENO: usize = 0;
@@ -18,8 +18,10 @@ pub const STDERR_FILENO: usize = 2;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FileKind {
     None,
-    /// VGA text console (write) + keyboard (read in U2).
+    /// VGA console (write) + keyboard (read).
     Console,
+    /// Read-only ext2 regular file.
+    Ext2File { ino: u32 },
 }
 
 #[derive(Clone, Copy)]
@@ -55,6 +57,15 @@ impl File {
             offset: 0,
             readable: false,
             writable: true,
+        }
+    }
+
+    pub fn ext2_ro(ino: u32) -> Self {
+        Self {
+            kind: FileKind::Ext2File { ino },
+            offset: 0,
+            readable: true,
+            writable: false,
         }
     }
 }
@@ -103,6 +114,22 @@ impl FdTable {
         }
     }
 
+    fn alloc_slot(&mut self) -> Option<usize> {
+        for i in 0..FD_MAX {
+            if self.entries[i].kind == FileKind::None {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Install a new open file; returns FD number.
+    pub fn install(&mut self, file: File) -> Result<usize, FdError> {
+        let i = self.alloc_slot().ok_or(FdError::NoMem)?;
+        self.entries[i] = file;
+        Ok(i)
+    }
+
     pub fn close(&mut self, fd: usize) -> bool {
         if fd >= FD_MAX || self.entries[fd].kind == FileKind::None {
             return false;
@@ -128,20 +155,32 @@ impl FdTable {
         }
         match file.kind {
             FileKind::Console => Ok(console_write(data)),
+            FileKind::Ext2File { .. } => Err(FdError::BadFd), // read-only for now
             FileKind::None => Err(FdError::BadFd),
         }
     }
 
-    /// Read up to `buf.len()` bytes. Console: block until ≥1 byte, then drain available.
     pub fn read(&mut self, fd: usize, buf: &mut [u8]) -> Result<usize, FdError> {
-        let file = self.get_mut(fd).ok_or(FdError::BadFd)?;
-        if !file.readable {
-            return Err(FdError::BadFd);
+        // Split borrow: take kind/offset, then mutate offset after read.
+        let (kind, offset, readable) = {
+            let file = self.get(fd).ok_or(FdError::BadFd)?;
+            if !file.readable {
+                return Err(FdError::BadFd);
+            }
+            (file.kind, file.offset, file.readable)
+        };
+        let _ = readable;
+
+        let n = match kind {
+            FileKind::Console => console_read(buf),
+            FileKind::Ext2File { ino } => ext2_read(ino, offset, buf)?,
+            FileKind::None => return Err(FdError::BadFd),
+        };
+
+        if let Some(file) = self.get_mut(fd) {
+            file.offset = file.offset.saturating_add(n as u64);
         }
-        match file.kind {
-            FileKind::Console => Ok(console_read(buf)),
-            FileKind::None => Err(FdError::BadFd),
-        }
+        Ok(n)
     }
 }
 
@@ -149,6 +188,10 @@ impl FdTable {
 pub enum FdError {
     BadFd,
     Fault,
+    NoEnt,
+    IsDir,
+    NoMem,
+    Inval,
 }
 
 static mut CURRENT: FdTable = FdTable::new();
@@ -191,17 +234,10 @@ fn console_write(data: &[u8]) -> usize {
     n
 }
 
-/// Blocking console read: wait for keyboard data, then copy what is available.
-///
-/// Policy (docs/ABI.md v0.1 / U2):
-/// - If the ring buffer is empty, `sti; hlt` until an IRQ delivers bytes.
-/// - Then copy `min(available, buf.len())` without waiting for a full line.
-/// Line buffering is left to userspace (future `/bin/sh`).
 fn console_read(buf: &mut [u8]) -> usize {
     if buf.is_empty() {
         return 0;
     }
-    // Wait for at least one byte (interrupts must be on — syscall clears IF via FMASK).
     while kbd::buffered_len() == 0 {
         unsafe {
             asm!("sti; hlt", options(nomem, nostack));
@@ -220,23 +256,64 @@ fn console_read(buf: &mut [u8]) -> usize {
     n
 }
 
+fn ext2_read(ino: u32, offset: u64, buf: &mut [u8]) -> Result<usize, FdError> {
+    if !fs::is_ready() {
+        return Err(FdError::NoEnt);
+    }
+    if offset > u32::MAX as u64 {
+        return Ok(0);
+    }
+    match ext2::read_file(ino, offset as u32, buf) {
+        Ok(n) => Ok(n),
+        Err(_) => Err(FdError::Fault),
+    }
+}
+
+/// Open path relative to cwd (absolute if starts with '/'). Read-only.
+/// Linux O_RDONLY = 0; we reject write-only/rdwr for now.
+pub fn open_path(path: &str, flags: u64) -> Result<usize, FdError> {
+    if !is_ready() {
+        return Err(FdError::BadFd);
+    }
+    if !fs::is_ready() {
+        return Err(FdError::NoEnt);
+    }
+    // O_ACCMODE = 3; only allow O_RDONLY (0)
+    let acc = flags & 3;
+    if acc != 0 {
+        // no write support yet
+        return Err(FdError::Inval);
+    }
+    if path.is_empty() {
+        return Err(FdError::NoEnt);
+    }
+
+    let cwd = fs::path::cwd_inode();
+    let ino = fs::ext2::resolve_path(cwd, path).map_err(|_| FdError::NoEnt)?;
+    if fs::ext2::inode_is_dir(ino) {
+        // directories need getdents (U4)
+        return Err(FdError::IsDir);
+    }
+
+    with_current(|t| t.install(File::ext2_ro(ino)))
+}
+
 pub fn sys_write_slice(fd: u64, data: &[u8]) -> Result<usize, FdError> {
-    if !is_ready() || fd > (FD_MAX as u64) {
+    if !is_ready() || fd >= FD_MAX as u64 {
         return Err(FdError::BadFd);
     }
     with_current(|t| t.write(fd as usize, data))
 }
 
-/// Read into a kernel-side temporary buffer; caller copies out to user.
 pub fn sys_read_into(fd: u64, buf: &mut [u8]) -> Result<usize, FdError> {
-    if !is_ready() || fd > (FD_MAX as u64) {
+    if !is_ready() || fd >= FD_MAX as u64 {
         return Err(FdError::BadFd);
     }
     with_current(|t| t.read(fd as usize, buf))
 }
 
 pub fn sys_close(fd: u64) -> Result<(), FdError> {
-    if !is_ready() || fd > (FD_MAX as u64) {
+    if !is_ready() || fd >= FD_MAX as u64 {
         return Err(FdError::BadFd);
     }
     if with_current(|t| t.close(fd as usize)) {
@@ -244,4 +321,8 @@ pub fn sys_close(fd: u64) -> Result<(), FdError> {
     } else {
         Err(FdError::BadFd)
     }
+}
+
+pub fn sys_open_path(path: &str, flags: u64) -> Result<usize, FdError> {
+    open_path(path, flags)
 }

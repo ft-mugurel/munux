@@ -13,6 +13,7 @@
 pub mod console;
 pub mod drivers;
 pub mod elf;
+pub mod embedded_cat;
 pub mod embedded_echo;
 pub mod embedded_hello;
 pub mod fd;

@@ -103,11 +103,21 @@ pub fn dispatch(line: &str) {
                 return;
             }
             if path == "echoi" {
-                // Interactive: blocks on READ until you type (then Enter).
                 match crate::syscalls::run_embedded_echo() {
                     Ok(()) => {}
                     Err(e) => {
                         console::print("run echoi: ");
+                        console::println(e);
+                    }
+                }
+                return;
+            }
+            if path == "cat" {
+                // Userland cat hello.txt via open/read/write/close
+                match crate::syscalls::run_embedded_cat() {
+                    Ok(()) => {}
+                    Err(e) => {
+                        console::print("run cat: ");
                         console::println(e);
                     }
                 }
@@ -148,7 +158,7 @@ fn cmd_help() {
     console::println("  fault [ud2]     Trigger CPU exception");
     console::println("  panic           Rust panic");
     console::println("  user            Enter ring 3 hand-asm demo");
-    console::println("  run [path|echo] ELF64; echo tests READ(0)");
+    console::println("  run [path|echo|cat]  ELF64; cat=open/read file");
     console::println("  ls [path]       List directory");
     console::println("  cat <path>      Print file");
     console::println("  pwd / cd        Working directory");

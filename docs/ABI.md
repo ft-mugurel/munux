@@ -30,17 +30,17 @@ Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.
 
 | # | Linux name | munux status |
 |---|------------|--------------|
-| 0 | `read` | **done** (stdin console) |
+| 0 | `read` | **done** (stdin or open file FD) |
 | 1 | `write` | **done** (stdout/stderr console) |
-| 2 | `open` | planned U3 (`-ENOSYS`) |
+| 2 | `open` | **done** (read-only ext2 files; dirs → `-EISDIR`) |
 | 3 | `close` | **done** |
 | 39 | `getpid` | **done** (returns 1 for now) |
 | 57 | `fork` | planned U6 |
 | 59 | `execve` | planned U6 |
 | 60 | `exit` | **done** |
 | 61 | `wait4` | planned U5 |
-| 79 | `getcwd` | planned U3 |
-| 80 | `chdir` | planned U3 |
+| 79 | `getcwd` | **done** |
+| 80 | `chdir` | **done** |
 | 231 | `exit_group` | **done** (same as `exit` for now) |
 | 257 | `openat` | planned (modern libc) |
 
@@ -114,3 +114,4 @@ But using **wrong numbers guarantees** Linux binaries will never work — so mun
 |-----|--------|
 | 0.1 | Custom numbers (EXIT=0, WRITE=1, …) |
 | **0.2** | **Linux x86_64 numbers** + `-errno` returns |
+| 0.2+U3 | `open` / file `read` / `chdir` / `getcwd` |
