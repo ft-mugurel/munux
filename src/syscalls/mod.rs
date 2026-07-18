@@ -527,42 +527,37 @@ static mut USER_IMAGE_SNAP_LEN: usize = 0;
 
 fn snapshot_user_image() {
     // Copy present pages in [0x400000, 0x400000+64K)
+    // Use addr_of_mut! so we never form a Rust reference to the mutable static.
     let mut len = 0usize;
     unsafe {
+        let snap = core::ptr::addr_of_mut!(USER_IMAGE_SNAP).cast::<u8>();
         for off in (0..USER_IMAGE_MAX).step_by(FRAME_SIZE) {
             let v = USER_IMAGE_BASE + off as u64;
             if paging::virt_to_phys(v).is_none() {
                 break;
             }
             let n = (USER_IMAGE_MAX - off).min(FRAME_SIZE);
-            core::ptr::copy_nonoverlapping(
-                v as *const u8,
-                USER_IMAGE_SNAP.as_mut_ptr().add(off),
-                n,
-            );
+            core::ptr::copy_nonoverlapping(v as *const u8, snap.add(off), n);
             len = off + n;
         }
-        USER_IMAGE_SNAP_LEN = len;
+        core::ptr::write(core::ptr::addr_of_mut!(USER_IMAGE_SNAP_LEN), len);
     }
 }
 
 fn restore_user_image() {
     unsafe {
-        let len = USER_IMAGE_SNAP_LEN;
+        let len = core::ptr::read(core::ptr::addr_of!(USER_IMAGE_SNAP_LEN));
         if len == 0 {
             return;
         }
+        let snap = core::ptr::addr_of!(USER_IMAGE_SNAP).cast::<u8>();
         // Ensure pages exist and are user-writable, then restore bytes.
         let mut off = 0usize;
         while off < len {
             let v = USER_IMAGE_BASE + off as u64;
             let _ = map_user_page(v);
             let n = (len - off).min(FRAME_SIZE);
-            core::ptr::copy_nonoverlapping(
-                USER_IMAGE_SNAP.as_ptr().add(off),
-                v as *mut u8,
-                n,
-            );
+            core::ptr::copy_nonoverlapping(snap.add(off), v as *mut u8, n);
             off += n;
         }
     }
