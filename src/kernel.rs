@@ -5,6 +5,7 @@
 //! PR6: syscall + ring-3 user demo
 //! PR7: ELF64 loader + embedded hello
 //! PR8: IDE + ext2 (read) + shell FS commands
+//! U1: FD table + WRITE via FDs (`docs/ABI.md`)
 
 #![no_std]
 #![no_main]
@@ -13,6 +14,7 @@ pub mod console;
 pub mod drivers;
 pub mod elf;
 pub mod embedded_hello;
+pub mod fd;
 pub mod fs;
 pub mod gdt;
 pub mod interrupts;
@@ -115,6 +117,12 @@ pub extern "C" fn kmain() -> ! {
     enable_interrupts();
     console::print("IRQs ON  IDT gates=");
     console::write_u64(present_gate_count() as u64);
+    console::println("");
+
+    // --- U1: file descriptors (stdio 0/1/2) ---
+    fd::init();
+    console::print("fd: stdio installed open=");
+    console::write_u64(fd::open_count() as u64);
     console::println("");
 
     // --- PR6: syscalls ---

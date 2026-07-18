@@ -11,6 +11,8 @@ Started as a **42 KFS** learning kernel; the project now continues independently
 
 Repository: [github.com/ft-mugurel/munux](https://github.com/ft-mugurel/munux)
 
+**ABI:** syscall numbers, FDs, and init policy are documented in [`docs/ABI.md`](docs/ABI.md) (v0.1).
+
 ---
 
 ## Current capabilities (i686 baseline on `32bit` / shared tree)

@@ -3,16 +3,24 @@
 use core::arch::asm;
 
 use crate::console;
+use crate::fd;
 use crate::gdt::{self, STAR_KERNEL_CS, STAR_USER_BASE, USER_CODE_SELECTOR, USER_DATA_SELECTOR};
 use crate::gdt::tss;
 use crate::memory::paging::{self, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
 use crate::memory::pmm::{self, FRAME_SIZE, PhysAddr};
 
 pub mod num {
+    /// See `docs/ABI.md` — munux v0.1 numbers (not Linux yet).
     pub const EXIT: u64 = 0;
     pub const WRITE: u64 = 1;
+    pub const READ: u64 = 2;
+    pub const OPEN: u64 = 3;
+    pub const CLOSE: u64 = 4;
     pub const GETPID: u64 = 5;
 }
+
+/// Error return per ABI v0.1 (`docs/ABI.md`).
+const RET_ERR: u64 = u64::MAX;
 
 /// User demo load addresses (outside 1 GiB identity map → mapped with U/S=1).
 const DEMO_CODE: u64 = 0x0000_0000_4000_0000;
@@ -94,8 +102,11 @@ pub extern "C" fn syscall_dispatch(
             }
         }
         num::WRITE => sys_write(a1, a2, a3),
+        num::READ => RET_ERR, // U2
+        num::OPEN => RET_ERR, // U3
+        num::CLOSE => sys_close(a1),
         num::GETPID => 1,
-        _ => u64::MAX,
+        _ => RET_ERR,
     }
 }
 
@@ -112,22 +123,23 @@ fn user_ptr_ok(buf: u64, len: u64) -> bool {
 }
 
 fn sys_write(fd: u64, buf: u64, len: u64) -> u64 {
-    if fd != 1 && fd != 2 {
-        return u64::MAX;
-    }
     let len = len.min(4096);
     if !user_ptr_ok(buf, len) {
-        return u64::MAX;
+        return RET_ERR;
     }
     let slice = unsafe { core::slice::from_raw_parts(buf as *const u8, len as usize) };
-    for &b in slice {
-        if b == b'\n' {
-            console::put_char(b'\n');
-        } else if (32..127).contains(&b) || b == b'\t' {
-            console::put_char(b);
-        }
+    // Route through FD table (stdout/stderr → console ops).
+    match fd::sys_write_slice(fd, slice) {
+        Ok(n) => n as u64,
+        Err(_) => RET_ERR,
     }
-    len
+}
+
+fn sys_close(fd: u64) -> u64 {
+    match fd::sys_close(fd) {
+        Ok(()) => 0,
+        Err(_) => RET_ERR,
+    }
 }
 
 /// Ensure a user-accessible page at `virt`.

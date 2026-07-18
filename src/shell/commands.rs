@@ -132,8 +132,10 @@ fn cmd_help() {
 
 fn cmd_about() {
     console::println("munux — freestanding x86_64 kernel (Rust + NASM)");
-    console::println("PR1 long mode | PR2 GDT/IDT | PR3 PMM/paging");
-    console::println("PR4 IRQs | PR5 heap + shell");
+    console::println("PR1-8 boot..FS | U1 FD table (see docs/ABI.md)");
+    console::print("FDs open=");
+    console::write_u64(crate::fd::open_count() as u64);
+    console::println(" (0=in 1=out 2=err)");
     console::print("PMM total=");
     console::write_u64(total_frames() as u64);
     console::print(" free=");
