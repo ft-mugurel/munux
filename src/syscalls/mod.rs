@@ -598,9 +598,9 @@ fn sys_fork() -> u64 {
     child_pid as u64
 }
 
-/// Linux execve(path, argv, envp) — argv/envp ignored (argv0 = path basename).
+/// Linux execve(path, argv, envp) — envp ignored; argv up to 3 user strings.
 /// On success does not return to the old image (nested enter + exit chain).
-fn sys_execve(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
+fn sys_execve(path_ptr: u64, argv_ptr: u64, _envp: u64) -> u64 {
     let mut path_buf = [0u8; 256];
     let n = match copy_user_path(path_ptr, &mut path_buf) {
         Ok(n) => n,
@@ -611,8 +611,52 @@ fn sys_execve(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
         Err(_) => return errno::neg(errno::ENOENT),
     };
 
-    let argv0 = path.rsplit('/').next().unwrap_or(path);
-    let image = match load_exec_image(path, argv0) {
+    // Collect argv strings (max 3) into kernel buffers.
+    let mut a0 = [0u8; 64];
+    let mut a1 = [0u8; 64];
+    let mut a2 = [0u8; 64];
+    let mut arg_lens = [0usize; 3];
+
+    let argv0_default = path.rsplit('/').next().unwrap_or(path);
+    // Default argv[0] from path basename (overwritten if user argv provided)
+    let dlen = core::cmp::min(argv0_default.len(), 63);
+    a0[..dlen].copy_from_slice(argv0_default.as_bytes());
+    arg_lens[0] = dlen;
+    let mut argc = 1usize;
+
+    if argv_ptr != 0 && user_ptr_ok(argv_ptr, 8) {
+        // argv is char**; read pointers until NULL (max 3)
+        let mut n = 0usize;
+        for i in 0..3u64 {
+            let p = unsafe { core::ptr::read_volatile((argv_ptr + i * 8) as *const u64) };
+            if p == 0 {
+                break;
+            }
+            let slot = match i as usize {
+                0 => &mut a0[..],
+                1 => &mut a1[..],
+                _ => &mut a2[..],
+            };
+            match copy_user_path(p, slot) {
+                Ok(len) => {
+                    arg_lens[i as usize] = core::cmp::min(len, 63);
+                    n = i as usize + 1;
+                }
+                Err(_) => break,
+            }
+        }
+        if n > 0 {
+            argc = n;
+        }
+    }
+
+    let s0 = core::str::from_utf8(&a0[..arg_lens[0]]).unwrap_or("?");
+    let s1 = core::str::from_utf8(&a1[..arg_lens[1]]).unwrap_or("");
+    let s2 = core::str::from_utf8(&a2[..arg_lens[2]]).unwrap_or("");
+    let argv_refs: [&str; 3] = [s0, s1, s2];
+    let argv_slice = &argv_refs[..argc];
+
+    let image = match load_exec_image(path, argv_slice) {
         Ok(img) => img,
         Err("no filesystem") | Err("not found") | Err("ENOENT") => {
             return errno::neg(errno::ENOENT);
@@ -623,7 +667,7 @@ fn sys_execve(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
     };
 
     let _ = crate::process::with_current(|p| {
-        p.set_name(argv0);
+        p.set_name(s0);
         p.user_rip = image.entry;
         p.user_rsp = image.stack_top;
         p.user_rax = 0;
@@ -638,10 +682,11 @@ fn sys_execve(path_ptr: u64, _argv: u64, _envp: u64) -> u64 {
     }
 }
 
-fn load_exec_image(path: &str, argv0: &str) -> Result<crate::elf::LoadedImage, &'static str> {
+fn load_exec_image(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage, &'static str> {
+    let argv0 = if argv.is_empty() { "?" } else { argv[0] };
     // Prefer filesystem; fall back to embedded known binaries.
     if crate::fs::is_ready() {
-        if let Ok(img) = load_elf_from_fs(path, argv0) {
+        if let Ok(img) = load_elf_from_fs(path, argv) {
             return Ok(img);
         }
         // try absolute /bin/*
@@ -653,7 +698,7 @@ fn load_exec_image(path: &str, argv0: &str) -> Result<crate::elf::LoadedImage, &
                 abs[prefix.len()..prefix.len() + path.len()]
                     .copy_from_slice(path.as_bytes());
                 if let Ok(s) = core::str::from_utf8(&abs[..prefix.len() + path.len()]) {
-                    if let Ok(img) = load_elf_from_fs(s, argv0) {
+                    if let Ok(img) = load_elf_from_fs(s, argv) {
                         return Ok(img);
                     }
                 }
@@ -661,35 +706,37 @@ fn load_exec_image(path: &str, argv0: &str) -> Result<crate::elf::LoadedImage, &
         }
     }
     // Embedded fallbacks
+    let load = |bytes: &'static [u8]| crate::elf::load_bytes_argv(bytes, argv);
     if path == "hello"
         || path == "/bin/hello"
         || path == "bin/hello"
         || path.ends_with("/hello")
     {
-        return crate::elf::load_bytes(crate::embedded_hello::HELLO_ELF, argv0);
+        return load(crate::embedded_hello::HELLO_ELF);
     }
     if path == "echo" || path == "/bin/echo" || path.ends_with("/echo") {
-        return crate::elf::load_bytes(crate::embedded_echo::ECHO_ELF, argv0);
+        return load(crate::embedded_echo::ECHO_ELF);
     }
     if path == "cat" || path == "/bin/cat" || path.ends_with("/cat") {
-        return crate::elf::load_bytes(crate::embedded_cat::CAT_ELF, argv0);
+        return load(crate::embedded_cat::CAT_ELF);
     }
     if path == "ls" || path == "/bin/ls" || path.ends_with("/ls") {
-        return crate::elf::load_bytes(crate::embedded_ls::LS_ELF, argv0);
+        return load(crate::embedded_ls::LS_ELF);
     }
     if path == "forktest" || path == "/bin/forktest" || path.ends_with("/forktest") {
-        return crate::elf::load_bytes(crate::embedded_forktest::FORKTEST_ELF, argv0);
+        return load(crate::embedded_forktest::FORKTEST_ELF);
     }
     if path == "exectest" || path == "/bin/exectest" || path.ends_with("/exectest") {
-        return crate::elf::load_bytes(crate::embedded_exectest::EXECTEST_ELF, argv0);
+        return load(crate::embedded_exectest::EXECTEST_ELF);
     }
     if path == "sh" || path == "/bin/sh" || path == "bin/sh" || path.ends_with("/sh") {
-        return crate::elf::load_bytes(crate::embedded_sh::SH_ELF, argv0);
+        return load(crate::embedded_sh::SH_ELF);
     }
+    let _ = argv0;
     Err("ENOENT")
 }
 
-fn load_elf_from_fs(path: &str, argv0: &str) -> Result<crate::elf::LoadedImage, &'static str> {
+fn load_elf_from_fs(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage, &'static str> {
     if !crate::fs::is_ready() {
         return Err("no filesystem");
     }
@@ -708,7 +755,7 @@ fn load_elf_from_fs(path: &str, argv0: &str) -> Result<crate::elf::LoadedImage, 
     }
     let mut buf = [0u8; CAP];
     let n = crate::fs::ext2::read_file(ino, 0, &mut buf[..size])?;
-    crate::elf::load_bytes(&buf[..n], argv0)
+    crate::elf::load_bytes_argv(&buf[..n], argv)
 }
 
 /// Linux wait4(pid, status, options, rusage) — rusage ignored.

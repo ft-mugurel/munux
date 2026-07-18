@@ -61,20 +61,43 @@ _start:
 	test rax, rax
 	jnz .main_loop			; cd handled (ok or error printed)
 
-	; external command: build path, fork/exec/wait
+	; external: first word = command, rest = arg (optional)
+	; r14 = cmd len, r15 = arg ptr (0 if none)
 	lea rdi, [rel linebuf]
 	mov rsi, r12
-	call build_exec_path		; pathbuf NUL-terminated
+	call split_cmd_arg		; rcx=cmd_len, rdx=arg_ptr or 0
+	mov r14, rcx
+	mov r15, rdx
 
-	; fork
+	lea rdi, [rel linebuf]
+	mov rsi, r14
+	call build_exec_path		; pathbuf from first word only
+
+	; build argv array: [arg0_ptr, arg1_ptr or 0, 0]
+	; arg0 = basename in argv0buf, arg1 = rest of line if any
+	lea rdi, [rel linebuf]
+	mov rsi, r14
+	call copy_argv0			; → argv0buf
+	lea rax, [rel argv0buf]
+	mov [rel argv_ptrs], rax
+	test r15, r15
+	jz .no_arg1
+	mov [rel argv_ptrs+8], r15
+	mov qword [rel argv_ptrs+16], 0
+	jmp .do_fork
+.no_arg1:
+	; argv = [arg0, NULL]
+	mov qword [rel argv_ptrs+8], 0
+	mov qword [rel argv_ptrs+16], 0
+
+.do_fork:
 	mov rax, 57
 	syscall
 	test rax, rax
 	js .fork_fail
 	jz .child
 
-	; parent: wait4(-1, &status, 0, 0)
-	mov r13, rax			; child pid (informational)
+	; parent: wait4
 	mov rax, 61
 	mov rdi, -1
 	lea rsi, [rel wait_status]
@@ -84,17 +107,39 @@ _start:
 	jmp .main_loop
 
 .child:
-	; execve(pathbuf, NULL, NULL)
+	; execve(pathbuf, argv_ptrs, NULL)
 	mov rax, 59
 	lea rdi, [rel pathbuf]
-	xor rsi, rsi
+	lea rsi, [rel argv_ptrs]
 	xor rdx, rdx
 	syscall
-	; failed
+	; failed — print path so user sees what we tried
 	mov rax, 1
 	mov rdi, 2
 	lea rsi, [rel msg_exec_fail]
 	mov rdx, msg_exec_fail_len
+	syscall
+	mov rax, 1
+	mov rdi, 2
+	lea rsi, [rel pathbuf]
+	; strlen pathbuf
+	xor rcx, rcx
+.elen:
+	cmp byte [rsi+rcx], 0
+	je .eprint
+	inc rcx
+	cmp rcx, 80
+	jb .elen
+.eprint:
+	mov rdx, rcx
+	mov rax, 1
+	mov rdi, 2
+	lea rsi, [rel pathbuf]
+	syscall
+	mov rax, 1
+	mov rdi, 2
+	lea rsi, [rel msg_nl]
+	mov rdx, 1
 	syscall
 	mov rax, 60
 	mov rdi, 127
@@ -355,8 +400,74 @@ try_cd:
 	xor rax, rax
 	ret
 
+; split_cmd_arg(rdi=line, rsi=len)
+; → rcx = length of first word, rdx = ptr to rest (or 0)
+split_cmd_arg:
+	xor rcx, rcx
+.sc_scan:
+	cmp rcx, rsi
+	jae .sc_only
+	cmp byte [rdi+rcx], ' '
+	je .sc_space
+	inc rcx
+	jmp .sc_scan
+.sc_only:
+	xor rdx, rdx
+	ret
+.sc_space:
+	; rcx = cmd length; find first non-space after it
+	lea rdx, [rdi+rcx]
+	lea rax, [rdi+rsi]		; end of line
+.sc_sk:
+	cmp rdx, rax
+	jae .sc_noarg
+	cmp byte [rdx], ' '
+	jne .sc_arg
+	inc rdx
+	jmp .sc_sk
+.sc_noarg:
+	xor rdx, rdx
+	ret
+.sc_arg:
+	ret
+
+; copy_argv0(rdi=cmd, rsi=len) → argv0buf NUL-terminated (basename if path)
+copy_argv0:
+	push rbx
+	mov rbx, rdi			; cmd base
+	mov rcx, rsi			; len
+	xor rax, rax			; basename start index
+	xor rdx, rdx
+.ca_scan:
+	cmp rdx, rcx
+	jae .ca_copy
+	cmp byte [rbx+rdx], '/'
+	jne .ca_n
+	lea rax, [rdx+1]
+.ca_n:
+	inc rdx
+	jmp .ca_scan
+.ca_copy:
+	lea rsi, [rbx+rax]		; src = basename
+	mov rdx, rcx
+	sub rdx, rax			; basename len
+	cmp rdx, 63
+	jbe .ca_ok
+	mov rdx, 63
+.ca_ok:
+	; memcpy clobbers rdx — keep length in r8 for NUL placement
+	mov r8, rdx
+	lea rdi, [rel argv0buf]
+	call memcpy
+	lea rdi, [rel argv0buf]
+	add rdi, r8
+	mov byte [rdi], 0
+	pop rbx
+	ret
+
 ; build_exec_path(rdi=cmd, rsi=len) -> pathbuf
 ; If cmd contains '/', copy as-is; else "/bin/" + cmd
+; len is first-word length only
 build_exec_path:
 	push rbx
 	mov rbx, rdi			; cmd
@@ -424,7 +535,7 @@ msg_help_len equ $ - msg_help
 msg_nl:		db 10
 msg_bs:		db 8, 32, 8
 msg_ff:		db 12
-msg_exec_fail:	db "sh: exec failed", 10
+msg_exec_fail:	db "sh: exec failed: ", 
 msg_exec_fail_len equ $ - msg_exec_fail
 msg_fork_fail:	db "sh: fork failed", 10
 msg_fork_fail_len equ $ - msg_fork_fail
@@ -439,6 +550,8 @@ section .bss
 align 16
 linebuf:	resb 128
 pathbuf:	resb 160
+argv0buf:	resb 64
+argv_ptrs:	resq 3			; [arg0, arg1, NULL]
 cwd_buf:	resb 256
 onebyte:	resb 1
 wait_status:	resd 1

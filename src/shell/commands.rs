@@ -165,8 +165,9 @@ pub fn dispatch(line: &str) {
             }
             if path == "shtest" || path == "shdemo" {
                 // Preload a short script into the keyboard ring (no sendkey races).
+                // Includes cat with/without args to smoke-test first-word path + argv.
                 match crate::syscalls::run_embedded_sh_script(
-                    b"help\nclear\nhello\nls\npwd\nexit\n",
+                    b"help\nhello\ncat\ncat hello.txt\ncat docs/readme.txt\ncat /no/such\nls\npwd\nexit\n",
                 ) {
                     Ok(()) => {}
                     Err(e) => {

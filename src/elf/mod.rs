@@ -204,32 +204,59 @@ fn load_segment(file: &[u8], ph: &Phdr) -> Result<u64, &'static str> {
     Ok(ph.p_memsz)
 }
 
-fn setup_stack(argv0: &str) -> Result<u64, &'static str> {
+/// Build a Linux-like initial stack: argc, argv[], NULL, envp NULL.
+/// `argv` strings are copied onto the stack (max 4 args, 64 bytes each).
+pub fn setup_stack(argv: &[&str]) -> Result<u64, &'static str> {
     let stack_base = USER_STACK_TOP - USER_STACK_PAGES * FRAME_SIZE as u64;
     map_user_range(stack_base, USER_STACK_TOP)?;
     for i in 0..USER_STACK_PAGES {
         zero_user(stack_base + i * FRAME_SIZE as u64, FRAME_SIZE as u64)?;
     }
 
-    // Minimal Linux-style stack: argc, argv[0], NULL, env NULL
-    let name = argv0.as_bytes();
-    let name_len = core::cmp::min(name.len(), 64);
-    let mut str_addr = USER_STACK_TOP - (name_len as u64 + 1);
-    str_addr &= !7;
-    write_user(str_addr, &name[..name_len])?;
-    write_user(str_addr + name_len as u64, &[0u8])?;
-
-    let mut sp = str_addr - 32;
-    sp &= !0xF;
-    let words: [u64; 4] = [1, str_addr, 0, 0];
-    for (i, w) in words.iter().enumerate() {
-        write_user(sp + (i as u64) * 8, &w.to_le_bytes())?;
+    let narg = core::cmp::min(argv.len(), 4);
+    if narg == 0 {
+        return Err("elf: empty argv");
     }
+
+    // Place argument strings just below USER_STACK_TOP
+    let mut str_ptrs = [0u64; 4];
+    let mut top = USER_STACK_TOP;
+    for i in 0..narg {
+        let bytes = argv[i].as_bytes();
+        let len = core::cmp::min(bytes.len(), 64);
+        top -= (len as u64) + 1;
+        top &= !7; // 8-byte align
+        write_user(top, &bytes[..len])?;
+        write_user(top + len as u64, &[0u8])?;
+        str_ptrs[i] = top;
+    }
+
+    // Pointer vector + argc: [argc][argv0]...[argvN][NULL][env NULL]
+    // (narg + 3) qwords: argc, narg pointers, NULL, env NULL
+    let words = narg + 3;
+    let mut sp = top - (words as u64) * 8;
+    sp &= !0xF;
+
+    // argc
+    write_user(sp, &(narg as u64).to_le_bytes())?;
+    for i in 0..narg {
+        write_user(sp + 8 * (i as u64 + 1), &str_ptrs[i].to_le_bytes())?;
+    }
+    // argv NULL terminator
+    write_user(sp + 8 * (narg as u64 + 1), &0u64.to_le_bytes())?;
+    // envp NULL
+    write_user(sp + 8 * (narg as u64 + 2), &0u64.to_le_bytes())?;
+
     Ok(sp)
 }
 
-/// Load ELF64 bytes into user memory and prepare stack.
+/// Load ELF64 bytes into user memory and prepare stack with argv0 only.
 pub fn load_bytes(file: &[u8], argv0: &str) -> Result<LoadedImage, &'static str> {
+    load_bytes_argv(file, &[argv0])
+}
+
+/// Load ELF64 and set up stack with full argv.
+pub fn load_bytes_argv(file: &[u8], argv: &[&str]) -> Result<LoadedImage, &'static str> {
     if file.len() > MAX_FILE_SIZE {
         return Err("elf: file too large");
     }
@@ -251,7 +278,7 @@ pub fn load_bytes(file: &[u8], argv0: &str) -> Result<LoadedImage, &'static str>
         return Err("elf: no PT_LOAD segments");
     }
 
-    let stack_top = setup_stack(argv0)?;
+    let stack_top = setup_stack(argv)?;
     Ok(LoadedImage {
         entry: ehdr.e_entry,
         stack_top,
