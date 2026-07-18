@@ -127,6 +127,10 @@ fn handle_key_press(event: KeyEvent, modifiers: Modifiers) -> bool {
         return true;
     }
     match event.key {
+        // Delete key → DEL (shells treat like backspace). Ctrl+Alt+Del still above.
+        KeyCode::Delete if !modifiers.ctrl() && !modifiers.alt() => {
+            buf_push_from_irq(0x7F);
+        }
         KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::ArrowLeft | KeyCode::ArrowRight => {}
         KeyCode::F1 | KeyCode::F2 | KeyCode::F3 | KeyCode::F4 | KeyCode::F5 | KeyCode::F6 => {}
         _ => {

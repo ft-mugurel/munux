@@ -34,7 +34,7 @@ pub fn poll() {
 fn on_byte(b: u8) {
     match b {
         b'\n' | b'\r' => submit(),
-        0x08 => backspace(),
+        0x08 | 0x7F => backspace(),
         b'\t' => {
             for _ in 0..4 {
                 push(b' ');

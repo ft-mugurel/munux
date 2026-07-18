@@ -22,6 +22,7 @@ pub fn dispatch(line: &str) {
         "help" | "?" => cmd_help(),
         "clear" | "cls" => {
             console::clear();
+            // prompt is re-drawn by submit() after dispatch returns
         }
         "about" | "version" => cmd_about(),
         "pmm" | "frames" => cmd_pmm(rest),
@@ -165,7 +166,7 @@ pub fn dispatch(line: &str) {
             if path == "shtest" || path == "shdemo" {
                 // Preload a short script into the keyboard ring (no sendkey races).
                 match crate::syscalls::run_embedded_sh_script(
-                    b"help\nhello\nls\npwd\nexit\n",
+                    b"help\nclear\nhello\nls\npwd\nexit\n",
                 ) {
                     Ok(()) => {}
                     Err(e) => {
@@ -198,9 +199,9 @@ pub fn dispatch(line: &str) {
 
 fn cmd_help() {
     console::println("munux shell commands:");
-    console::println("  help            This list");
+    console::println("  help / ?        This list");
     console::println("  about           Kernel summary");
-    console::println("  clear           Clear screen");
+    console::println("  clear / cls     Clear screen");
     console::println("  echo <text>     Print text");
     console::println("  pmm [test]      Physical frames");
     console::println("  heap [test]     Kernel heap / kmalloc");
@@ -215,7 +216,8 @@ fn cmd_help() {
     console::println("  ls [path]       List directory");
     console::println("  cat <path>      Print file");
     console::println("  pwd / cd        Working directory");
-    console::println("  ps              Process table (U5)");
+    console::println("  ps              Process table");
+    console::println("Editing: Backspace/Del erase previous character");
 }
 
 fn cmd_ps() {

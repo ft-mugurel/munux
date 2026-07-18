@@ -286,10 +286,17 @@ pub fn open_count() -> usize {
 fn console_write(data: &[u8]) -> usize {
     let mut n = 0usize;
     for &b in data {
-        if b == b'\n' {
-            console::put_char(b'\n');
+        // Shells need BS/DEL for line edit and FF for clear.
+        if b == b'\n' || b == b'\t' {
+            console::put_char(b);
             n += 1;
-        } else if (32..127).contains(&b) || b == b'\t' {
+        } else if b == 0x08 || b == 0x7F {
+            console::put_char(0x08);
+            n += 1;
+        } else if b == 0x0C {
+            console::clear();
+            n += 1;
+        } else if (32..127).contains(&b) {
             console::put_char(b);
             n += 1;
         }

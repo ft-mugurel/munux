@@ -45,6 +45,12 @@ _start:
 
 	lea rdi, [rel linebuf]
 	mov rsi, r12
+	call is_clear
+	test rax, rax
+	jnz .do_clear
+
+	lea rdi, [rel linebuf]
+	mov rsi, r12
 	call is_pwd
 	test rax, rax
 	jnz .do_pwd
@@ -112,6 +118,15 @@ _start:
 	mov rdi, 1
 	lea rsi, [rel msg_help]
 	mov rdx, msg_help_len
+	syscall
+	jmp .main_loop
+
+.do_clear:
+	; write form-feed — kernel console_write maps 0x0C → clear()
+	mov rax, 1
+	mov rdi, 1
+	lea rsi, [rel msg_ff]
+	mov rdx, 1
 	syscall
 	jmp .main_loop
 
@@ -261,6 +276,37 @@ is_pwd:
 	xor rax, rax
 	ret
 
+; is_clear: "clear" or "cls"
+is_clear:
+	cmp rsi, 3
+	je .cls
+	cmp rsi, 5
+	jne .cno
+	cmp byte [rdi], 'c'
+	jne .cno
+	cmp byte [rdi+1], 'l'
+	jne .cno
+	cmp byte [rdi+2], 'e'
+	jne .cno
+	cmp byte [rdi+3], 'a'
+	jne .cno
+	cmp byte [rdi+4], 'r'
+	jne .cno
+	mov rax, 1
+	ret
+.cls:
+	cmp byte [rdi], 'c'
+	jne .cno
+	cmp byte [rdi+1], 'l'
+	jne .cno
+	cmp byte [rdi+2], 's'
+	jne .cno
+	mov rax, 1
+	ret
+.cno:
+	xor rax, rax
+	ret
+
 ; try_cd: if line is "cd" or "cd path", chdir. rax=1 if was cd, 0 otherwise
 try_cd:
 	cmp rsi, 2
@@ -372,14 +418,12 @@ msg_banner:	db "munux sh (U7). builtins: help exit cd pwd; else fork/exec /bin/<
 msg_banner_len equ $ - msg_banner
 msg_prompt:	db "$ "
 msg_prompt_len equ $ - msg_prompt
-msg_help:	db "help  this text", 10
-		db "exit  leave shell", 10
-		db "cd [path]  change directory (/ if omitted)", 10
-		db "pwd  print working directory", 10
-		db "cmd  run /bin/cmd via fork+execve+wait", 10
+msg_help:	db "help clear/cls exit cd pwd; other = /bin/cmd", 10
+		db "edit: Backspace/Del", 10
 msg_help_len equ $ - msg_help
 msg_nl:		db 10
 msg_bs:		db 8, 32, 8
+msg_ff:		db 12
 msg_exec_fail:	db "sh: exec failed", 10
 msg_exec_fail_len equ $ - msg_exec_fail
 msg_fork_fail:	db "sh: fork failed", 10
