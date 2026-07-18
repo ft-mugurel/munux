@@ -11,7 +11,7 @@ Started as a **42 KFS** learning kernel; the project now continues independently
 
 Repository: [github.com/ft-mugurel/munux](https://github.com/ft-mugurel/munux)
 
-**ABI:** syscall numbers, FDs, and init policy are documented in [`docs/ABI.md`](docs/ABI.md) (v0.1).
+**ABI:** Linux **x86_64** syscall numbers + FDs — see [`docs/ABI.md`](docs/ABI.md) (v0.2).
 
 ---
 
@@ -199,7 +199,7 @@ See **[SMOKE.md](SMOKE.md)** for a step-by-step manual checklist (boot, FS, `use
 - Single shared address space (no per-process page tables yet)
 - `read` / full file-descriptor table are stubs
 - No preemptive multi-process scheduling beyond cooperative PCBs
-- Custom syscall numbers (not Linux ABI yet)
+- Subset of Linux x86_64 syscalls only (missing calls return `-ENOSYS`); not a full Linux ABI yet
 - VGA only (no serial console yet)
 - US QWERTY only
 

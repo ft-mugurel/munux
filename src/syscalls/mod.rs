@@ -9,18 +9,40 @@ use crate::gdt::tss;
 use crate::memory::paging::{self, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
 use crate::memory::pmm::{self, FRAME_SIZE, PhysAddr};
 
+/// Linux **x86_64** syscall numbers (see `arch/x86/entry/syscalls/syscall_64.tbl`).
+/// Using Linux numbers is required so static Linux binaries can target munux later.
 pub mod num {
-    /// See `docs/ABI.md` — munux v0.1 numbers (not Linux yet).
-    pub const EXIT: u64 = 0;
+    // Implemented / reserved with Linux numbers:
+    pub const READ: u64 = 0;
     pub const WRITE: u64 = 1;
-    pub const READ: u64 = 2;
-    pub const OPEN: u64 = 3;
-    pub const CLOSE: u64 = 4;
-    pub const GETPID: u64 = 5;
+    pub const OPEN: u64 = 2;
+    pub const CLOSE: u64 = 3;
+    pub const GETPID: u64 = 39;
+    pub const FORK: u64 = 57; // planned
+    pub const EXECVE: u64 = 59; // planned
+    pub const EXIT: u64 = 60;
+    pub const WAIT4: u64 = 61; // planned
+    pub const GETCWD: u64 = 79; // planned
+    pub const CHDIR: u64 = 80; // planned
+    pub const EXIT_GROUP: u64 = 231; // musl/glibc often use this
+    pub const OPENAT: u64 = 257; // planned (modern libc)
 }
 
-/// Error return per ABI v0.1 (`docs/ABI.md`).
-const RET_ERR: u64 = u64::MAX;
+/// Linux-style: return `-errno` as `u64` bit pattern (negative i64).
+#[allow(dead_code)]
+mod errno {
+    pub const EPERM: i64 = 1;
+    pub const ENOENT: i64 = 2;
+    pub const EBADF: i64 = 9;
+    pub const EFAULT: i64 = 14;
+    pub const EINVAL: i64 = 22;
+    pub const ENOSYS: i64 = 38;
+
+    #[inline]
+    pub fn neg(e: i64) -> u64 {
+        (-e) as u64
+    }
+}
 
 /// User demo load addresses (outside 1 GiB identity map → mapped with U/S=1).
 const DEMO_CODE: u64 = 0x0000_0000_4000_0000;
@@ -81,7 +103,7 @@ pub fn init_syscalls() {
         wrmsr(IA32_EFER, efer);
     }
     let _ = (USER_CODE_SELECTOR, USER_DATA_SELECTOR);
-    console::println("syscall: STAR/LSTAR armed (SCE)");
+    console::println("syscall: Linux x86_64 numbers + STAR/LSTAR (SCE)");
 }
 
 /// C ABI from assembly.
@@ -95,18 +117,19 @@ pub extern "C" fn syscall_dispatch(
     _a5: u64,
 ) -> u64 {
     match num {
-        num::EXIT => {
-            // Jump back to shell; does not return here.
+        num::READ => sys_read(a1, a2, a3),
+        num::WRITE => sys_write(a1, a2, a3),
+        num::OPEN => errno::neg(errno::ENOSYS), // U3
+        num::CLOSE => sys_close(a1),
+        num::GETPID => 1,
+        num::EXIT | num::EXIT_GROUP => {
+            // Jump back to kernel launcher; does not return here.
+            let _status = a1;
             unsafe {
                 return_from_user();
             }
         }
-        num::WRITE => sys_write(a1, a2, a3),
-        num::READ => sys_read(a1, a2, a3),
-        num::OPEN => RET_ERR, // U3
-        num::CLOSE => sys_close(a1),
-        num::GETPID => 1,
-        _ => RET_ERR,
+        _ => errno::neg(errno::ENOSYS),
     }
 }
 
@@ -128,12 +151,13 @@ fn user_ptr_ok(buf: u64, len: u64) -> bool {
 fn sys_write(fd: u64, buf: u64, len: u64) -> u64 {
     let len = len.min(4096);
     if !user_ptr_ok(buf, len) {
-        return RET_ERR;
+        return errno::neg(errno::EFAULT);
     }
     let slice = unsafe { core::slice::from_raw_parts(buf as *const u8, len as usize) };
     match fd::sys_write_slice(fd, slice) {
         Ok(n) => n as u64,
-        Err(_) => RET_ERR,
+        Err(fd::FdError::BadFd) => errno::neg(errno::EBADF),
+        Err(_) => errno::neg(errno::EFAULT),
     }
 }
 
@@ -143,13 +167,13 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
         return 0;
     }
     if !user_ptr_ok(buf, len as u64) {
-        return RET_ERR;
+        return errno::neg(errno::EFAULT);
     }
-    // Kernel bounce buffer (avoid holding user mapping issues while blocking).
     let mut tmp = [0u8; 4096];
     let n = match fd::sys_read_into(fd, &mut tmp[..len]) {
         Ok(n) => n,
-        Err(_) => return RET_ERR,
+        Err(fd::FdError::BadFd) => return errno::neg(errno::EBADF),
+        Err(_) => return errno::neg(errno::EFAULT),
     };
     unsafe {
         core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, n);
@@ -160,7 +184,7 @@ fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
 fn sys_close(fd: u64) -> u64 {
     match fd::sys_close(fd) {
         Ok(()) => 0,
-        Err(_) => RET_ERR,
+        Err(_) => errno::neg(errno::EBADF),
     }
 }
 
@@ -203,7 +227,7 @@ fn user_demo_bytes() -> [u8; 256] {
     let msg_len = msg.len() as u32;
 
     let mut i = 0usize;
-    // mov rax, 1  (WRITE)
+    // mov rax, 1  (Linux write)
     out[i] = 0x48;
     out[i + 1] = 0xC7;
     out[i + 2] = 0xC0;
@@ -230,11 +254,11 @@ fn user_demo_bytes() -> [u8; 256] {
     out[i] = 0x0F;
     out[i + 1] = 0x05;
     i += 2;
-    // mov rax, 0 (EXIT)
+    // mov rax, 60 (Linux exit)
     out[i] = 0x48;
     out[i + 1] = 0xC7;
     out[i + 2] = 0xC0;
-    out[i + 3..i + 7].copy_from_slice(&0u32.to_le_bytes());
+    out[i + 3..i + 7].copy_from_slice(&60u32.to_le_bytes());
     i += 7;
     // xor rdi, rdi
     out[i] = 0x48;
