@@ -34,13 +34,14 @@ Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.
 | 1 | `write` | **done** (stdout/stderr console) |
 | 2 | `open` | **done** (files + directories; dirs for getdents) |
 | 3 | `close` | **done** |
-| 39 | `getpid` | **done** (returns 1 for now) |
+| 39 | `getpid` | **done** (real PCB pid) |
 | 57 | `fork` | planned U6 |
 | 59 | `execve` | planned U6 |
-| 60 | `exit` | **done** |
-| 61 | `wait4` | planned U5 |
-| 79 | `getcwd` | **done** |
-| 80 | `chdir` | **done** |
+| 60 | `exit` | **done** (zombie + return to parent) |
+| 61 | `wait4` | **done** (reap zombie; non-blocking) |
+| 79 | `getcwd` | **done** (per-process cwd) |
+| 80 | `chdir` | **done** (per-process cwd) |
+| 110 | `getppid` | **done** |
 | 231 | `exit_group` | **done** (same as `exit` for now) |
 | 217 | `getdents64` | **done** (directory listing) |
 | 257 | `openat` | planned (modern libc) |
@@ -62,6 +63,7 @@ Common errno values we use:
 | EPERM | 1 | Operation not permitted |
 | ENOENT | 2 | No such file |
 | EBADF | 9 | Bad file descriptor |
+| ECHILD | 10 | No child processes |
 | EFAULT | 14 | Bad address |
 | EINVAL | 22 | Invalid argument |
 | ENOSYS | 38 | Not implemented |
@@ -77,7 +79,7 @@ Common errno values we use:
 | 2 | stderr | VGA console (`write`) |
 
 - Max FDs per table: **32**.
-- v0.2: one global FD table; per-process in U5.
+- Still **one global FD table** (shared). True per-process FD tables come with full `fork` (U6). Stdio works for cooperative single-user tasks.
 
 ### `read` on stdin
 
@@ -86,13 +88,19 @@ Common errno values we use:
 
 ---
 
-## 4. Process model (sketch)
+## 4. Process model (U5)
 
-| Item | Today |
-|------|--------|
-| `getpid` | returns `1` |
-| `exit` / `exit_group` | return to kernel launcher (`user` / `run`) |
-| Future init | `execve("/bin/sh")` as pid 1 |
+| Item | Behavior |
+|------|----------|
+| Boot | `init` = pid **1** (kernel shell) |
+| `run` / `user` | spawn child PCB, switch current → child, enter ring 3 |
+| `getpid` | current process pid |
+| `getppid` | parent pid (`0` if none) |
+| `exit` / `exit_group` | mark **zombie**, switch current → parent, return to launcher |
+| `wait4` | reap a zombie child; Linux status `((code & 0xff) << 8)`; **non-blocking** (no scheduler sleep yet): returns `0` if children exist but none zombie, `-ECHILD` if no children |
+| cwd | **per-process** (`chdir` / `getcwd` use current PCB) |
+
+Future init: `execve("/bin/sh")` as pid 1 (U7–U8).
 
 ---
 
@@ -104,6 +112,7 @@ Numbers alone are **not** enough. Also needed over time:
 - Full pointer validation and signal/`rt_sigreturn` paths
 - ELF aux vector completeness for dynamic linker (later)
 - Correct `errno` coverage for each call
+- `fork` + `execve` and per-process FD tables
 
 But using **wrong numbers guarantees** Linux binaries will never work — so munux uses Linux numbers from this version forward.
 
@@ -117,3 +126,4 @@ But using **wrong numbers guarantees** Linux binaries will never work — so mun
 | **0.2** | **Linux x86_64 numbers** + `-errno` returns |
 | 0.2+U3 | `open` / file `read` / `chdir` / `getcwd` |
 | 0.2+U4 | `getdents64` + open directory FDs |
+| 0.2+U5 | PCB, real pid/ppid, zombie exit, wait4, per-process cwd |

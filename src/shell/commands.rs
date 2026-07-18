@@ -144,6 +144,7 @@ pub fn dispatch(line: &str) {
         "cat" => cmd_cat(rest),
         "pwd" => cmd_pwd(),
         "cd" => cmd_cd(rest),
+        "ps" => cmd_ps(),
         other => {
             console::print("unknown command: `");
             console::print(other);
@@ -171,14 +172,47 @@ fn cmd_help() {
     console::println("  ls [path]       List directory");
     console::println("  cat <path>      Print file");
     console::println("  pwd / cd        Working directory");
+    console::println("  ps              Process table (U5)");
+}
+
+fn cmd_ps() {
+    console::println("  PID  PPID  STATE    NAME");
+    crate::process::for_each_process(|_i, p| {
+        console::print("  ");
+        console::write_u64(p.pid as u64);
+        console::print("    ");
+        if p.parent < 0 {
+            console::print("-");
+        } else {
+            console::write_u64(p.parent as u64);
+        }
+        console::print("    ");
+        console::print(p.state.as_str());
+        // pad roughly
+        let st = p.state.as_str().len();
+        for _ in st..8 {
+            console::print(" ");
+        }
+        console::println(p.name_str());
+    });
+    console::print("processes=");
+    console::write_u64(crate::process::process_count() as u64);
+    console::print(" current=");
+    console::write_u64(crate::process::current_pid() as u64);
+    console::println("");
 }
 
 fn cmd_about() {
     console::println("munux — freestanding x86_64 kernel (Rust + NASM)");
-    console::println("PR1-8 boot..FS | U1 FD table (see docs/ABI.md)");
+    console::println("PR1-8 boot..FS | U1-U5 FD+FS+processes (docs/ABI.md)");
     console::print("FDs open=");
     console::write_u64(crate::fd::open_count() as u64);
     console::println(" (0=in 1=out 2=err)");
+    console::print("pid=");
+    console::write_u64(crate::process::current_pid() as u64);
+    console::print(" processes=");
+    console::write_u64(crate::process::process_count() as u64);
+    console::println("");
     console::print("PMM total=");
     console::write_u64(total_frames() as u64);
     console::print(" free=");

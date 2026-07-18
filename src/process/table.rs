@@ -122,10 +122,10 @@ pub fn init_child_slot(
     child_idx: usize,
     parent_pid: Pid,
     uid: Uid,
-    stack_base: u32,
-    stack_size: u32,
-    heap_base: u32,
-    heap_size: u32,
+    stack_base: u64,
+    stack_size: u64,
+    heap_base: u64,
+    heap_size: u64,
     is_thread: bool,
     out_pid: &mut Pid,
 ) {
@@ -143,13 +143,9 @@ pub fn init_child_slot(
         p.stack_size = stack_size;
         p.heap_base = heap_base;
         p.heap_size = heap_size;
-        // Inherit parent's cwd (fork semantics)
-        p.cwd_inode = {
-            // parent cwd copied by caller fields — set from parent below if needed
-            2
-        };
-        p.ctx.esp = stack_base.wrapping_add(stack_size);
-        p.ctx.ebp = p.ctx.esp;
+        p.cwd_inode = 2;
+        p.ctx.rsp = stack_base.wrapping_add(stack_size);
+        p.ctx.rbp = p.ctx.rsp;
         p.set_name("child");
     }
 }

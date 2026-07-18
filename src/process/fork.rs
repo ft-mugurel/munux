@@ -1,4 +1,4 @@
-//! fork — copy process (Unix-like teaching implementation).
+//! fork — copy process (Unix-like teaching implementation; full fork is U6).
 
 use super::memory::alloc_process_stack;
 use super::pcb::ProcessState;
@@ -6,7 +6,7 @@ use super::table;
 
 /// Fork current process. Parent returns child PID (>0); -1 on error.
 ///
-/// Child PCB is a copy of parent metadata with a new stack and Ready/Thread state.
+/// Child PCB is a copy of parent metadata with a new stack and Ready state.
 /// Shares the kernel address space (no separate page directory yet).
 pub fn fork() -> i32 {
     let parent_idx = table::current_index();
@@ -40,10 +40,9 @@ pub fn fork() -> i32 {
         stack_size,
         heap_base,
         heap_size,
-        true,
+        false,
         &mut child_pid,
     );
-    // Unix: child inherits working directory
     let _ = table::with_pid(child_pid, |p| {
         p.cwd_inode = cwd;
     });

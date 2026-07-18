@@ -18,12 +18,13 @@ pub mod num {
     pub const OPEN: u64 = 2;
     pub const CLOSE: u64 = 3;
     pub const GETPID: u64 = 39;
-    pub const FORK: u64 = 57; // planned
-    pub const EXECVE: u64 = 59; // planned
+    pub const FORK: u64 = 57; // planned U6
+    pub const EXECVE: u64 = 59; // planned U6
     pub const EXIT: u64 = 60;
-    pub const WAIT4: u64 = 61; // planned
+    pub const WAIT4: u64 = 61;
     pub const GETCWD: u64 = 79;
     pub const CHDIR: u64 = 80;
+    pub const GETPPID: u64 = 110;
     pub const EXIT_GROUP: u64 = 231; // musl/glibc often use this
     pub const GETDENTS64: u64 = 217;
     pub const OPENAT: u64 = 257; // planned (modern libc)
@@ -35,6 +36,7 @@ mod errno {
     pub const EPERM: i64 = 1;
     pub const ENOENT: i64 = 2;
     pub const EBADF: i64 = 9;
+    pub const ECHILD: i64 = 10;
     pub const EFAULT: i64 = 14;
     pub const EISDIR: i64 = 21;
     pub const EINVAL: i64 = 22;
@@ -139,12 +141,22 @@ pub extern "C" fn syscall_dispatch(
         num::WRITE => sys_write(a1, a2, a3),
         num::OPEN => sys_open(a1, a2, a3),
         num::CLOSE => sys_close(a1),
-        num::GETPID => 1,
+        num::GETPID => crate::process::getpid() as u64,
+        num::GETPPID => {
+            let pp = crate::process::getppid();
+            if pp < 0 {
+                0
+            } else {
+                pp as u64
+            }
+        }
+        num::WAIT4 => sys_wait4(a1, a2, a3),
         num::GETCWD => sys_getcwd(a1, a2),
         num::CHDIR => sys_chdir(a1),
         num::GETDENTS64 => sys_getdents64(a1, a2, a3),
         num::EXIT | num::EXIT_GROUP => {
-            let _status = a1;
+            let status = a1 as i32;
+            crate::process::exit_user(status);
             unsafe {
                 return_from_user();
             }
@@ -411,13 +423,52 @@ fn user_demo_bytes() -> [u8; 256] {
     out
 }
 
+/// Linux wait4(pid, status, options, rusage) — rusage ignored.
+/// options: bit0 = WNOHANG.
+fn sys_wait4(pid: u64, status_ptr: u64, options: u64) -> u64 {
+    const WNOHANG: u64 = 1;
+    let wait_for = pid as i32;
+    let nohang = (options & WNOHANG) != 0;
+
+    let mut status = 0i32;
+    let got = crate::process::waitpid(wait_for, Some(&mut status), nohang);
+
+    if got == 0 {
+        // WNOHANG, no zombie yet
+        return 0;
+    }
+    if got < 0 {
+        return errno::neg(errno::ECHILD);
+    }
+    if status_ptr != 0 {
+        if !user_ptr_ok(status_ptr, 4) {
+            return errno::neg(errno::EFAULT);
+        }
+        unsafe {
+            core::ptr::write_volatile(status_ptr as *mut i32, status);
+        }
+    }
+    got as u64
+}
+
 fn enter_and_wait(entry: u64, stack_top: u64, label: &str) {
+    // U5: run as a child of init (shell) so getpid/exit/wait are real
+    let child = match crate::process::begin_user_task(label) {
+        Ok(p) => p,
+        Err(_) => {
+            console::println("user: process table full");
+            return;
+        }
+    };
+
     tss::set_kernel_stack(tss::kernel_stack_top());
     unsafe {
         set_syscall_kstack(tss::kernel_stack_top());
     }
 
     console::print(label);
+    console::print(" pid=");
+    console::write_u64(child as u64);
     console::print(" entry=");
     console::write_hex64(entry);
     console::print(" stack=");
@@ -439,7 +490,17 @@ fn enter_and_wait(entry: u64, stack_top: u64, label: &str) {
             options(nostack)
         );
     }
-    console::println("user: returned to kernel (exit)");
+
+    // exit_user already switched current back to parent; reap zombie
+    if let Some((pid, code)) = crate::process::reap_any_child() {
+        console::print("user: exited pid=");
+        console::write_u64(pid as u64);
+        console::print(" status=");
+        console::write_u64(code as u64);
+        console::println("");
+    } else {
+        console::println("user: returned to kernel (no zombie?)");
+    }
 }
 
 /// Run the built-in hand-assembled ring-3 demo until exit.

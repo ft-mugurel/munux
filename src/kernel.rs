@@ -22,6 +22,7 @@ pub mod fs;
 pub mod gdt;
 pub mod interrupts;
 pub mod memory;
+pub mod process;
 pub mod shell;
 pub mod syscalls;
 pub mod vga_print;
@@ -127,6 +128,9 @@ pub extern "C" fn kmain() -> ! {
     console::print("fd: stdio installed open=");
     console::write_u64(fd::open_count() as u64);
     console::println("");
+
+    // --- U5: process table (init = pid 1 = shell) ---
+    process::init_processes();
 
     // --- PR6: syscalls ---
     init_syscalls();

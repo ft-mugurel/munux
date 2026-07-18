@@ -10,13 +10,13 @@ pub const MAX_CHILDREN: usize = 8;
 pub const PROC_SIG_QUEUE: usize = 16;
 pub const MAX_SIGNALS: usize = 32;
 
-/// Process status (subject: Run, zombie, thread + helpers).
+/// Process status.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum ProcessState {
     /// Slot free
     Unused = 0,
-    /// Runnable / currently selected ("Run")
+    /// Runnable / currently selected
     Running = 1,
     /// Waiting for CPU
     Ready = 2,
@@ -41,62 +41,61 @@ impl ProcessState {
     }
 }
 
-/// Saved CPU context for kernel-mode switching.
+/// Saved CPU context for future kernel-mode switching (not used for ring-3 yet).
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct CpuContext {
-    pub edi: u32,
-    pub esi: u32,
-    pub ebx: u32,
-    pub ebp: u32,
-    pub eip: u32,
-    pub eflags: u32,
-    pub esp: u32,
+    pub r15: u64,
+    pub r14: u64,
+    pub r13: u64,
+    pub r12: u64,
+    pub rbx: u64,
+    pub rbp: u64,
+    pub rip: u64,
+    pub rflags: u64,
+    pub rsp: u64,
 }
 
 impl CpuContext {
     pub const fn zero() -> Self {
         Self {
-            edi: 0,
-            esi: 0,
-            ebx: 0,
-            ebp: 0,
-            eip: 0,
-            eflags: 0x202, // IF set
-            esp: 0,
+            r15: 0,
+            r14: 0,
+            r13: 0,
+            r12: 0,
+            rbx: 0,
+            rbp: 0,
+            rip: 0,
+            rflags: 0x202, // IF set
+            rsp: 0,
         }
     }
 }
 
-/// Full process structure required by the subject.
+/// Full process structure.
 #[derive(Clone, Copy)]
 pub struct Process {
     pub used: bool,
-    /// PID
     pub pid: Pid,
-    /// Status (Run/ready, zombie, thread, …)
     pub state: ProcessState,
     /// Parent PID (−1 if none)
     pub parent: Pid,
-    /// Children PIDs
     pub children: [Pid; MAX_CHILDREN],
     pub nchildren: usize,
-    /// Owner user id
     pub uid: Uid,
-    /// Exit status (for zombies / wait)
+    /// Exit status (for zombies / wait) — raw code from exit(status)
     pub exit_code: i32,
 
-    /// Stack region (virtual)
-    pub stack_base: u32,
-    pub stack_size: u32,
+    /// Stack region (virtual) — reserved for future per-process stacks
+    pub stack_base: u64,
+    pub stack_size: u64,
     /// Heap region (virtual)
-    pub heap_base: u32,
-    pub heap_size: u32,
+    pub heap_base: u64,
+    pub heap_size: u64,
 
     /// Current working directory (ext2 inode). Each process has its own pwd.
     pub cwd_inode: u32,
 
-    /// Saved context when not on CPU
     pub ctx: CpuContext,
 
     /// Pending signals (queue), delivered on next CPU tick
@@ -104,12 +103,10 @@ pub struct Process {
     pub sig_head: usize,
     pub sig_tail: usize,
     pub sig_len: usize,
-    /// Per-signal dispositions: 0 = default, 1 = ignore, other = handler id/token
-    /// We store optional function pointers as usize for no_std simplicity.
     pub sig_handlers: [usize; MAX_SIGNALS],
     pub sig_ignore: [bool; MAX_SIGNALS],
 
-    /// Name for debugging (not Unix, but useful)
+    /// Name for debugging
     pub name: [u8; 16],
 }
 

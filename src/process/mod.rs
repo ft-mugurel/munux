@@ -1,7 +1,7 @@
-//! Process management — PCBs, fork/exit/wait, signals, sockets, memory.
+//! Process management — PCBs, spawn/exit/wait, signals, sockets, memory.
 //!
-//! Also requires a **timer tick** (PIT) so queued process signals deliver
-//! on the next CPU tick.
+//! U5: real PIDs, zombie exit, wait4, getpid/getppid, cwd per process.
+//! User tasks launched by shell (`run`/`user`) become children of init (pid 1).
 
 pub mod fork;
 pub mod memory;
@@ -15,7 +15,10 @@ pub use fork::{fork, switch_to};
 pub use memory::{proc_read_mem, proc_sbrk, proc_write_mem};
 pub use pcb::{Pid, Process, ProcessState, Uid, MAX_PROCESSES};
 pub use socket::{socket_close, socket_connect, socket_create, socket_recv, socket_send};
-pub use sys::{exit, getuid, kill, setuid, signal, wait, waitpid};
+pub use sys::{
+    begin_user_task, exit, exit_user, getpid, getppid, getuid, kill, reap_any_child, setuid,
+    signal, wait, waitpid,
+};
 pub use table::{current_pid, for_each_process, process_count};
 
 /// Per-process working directory (ext2 inode).
@@ -32,7 +35,11 @@ pub fn set_cwd_inode(ino: u32) {
 /// Boot: create process table with init (pid 1).
 pub fn init_processes() {
     table::init_table();
-    crate::println!("process: init pid={} uid={}", current_pid(), getuid());
+    crate::console::print("process: init pid=");
+    crate::console::write_u64(current_pid() as u64);
+    crate::console::print(" uid=");
+    crate::console::write_u64(getuid() as u64);
+    crate::console::println("");
 }
 
 /// Called from timer IRQ each tick — deliver per-process signal queues.

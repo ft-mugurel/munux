@@ -1,14 +1,24 @@
-//! Working directory and path helpers (global cwd until multi-process returns).
+//! Working directory and path helpers (per-process cwd via process table).
 
 use crate::fs::ext2;
+use crate::process;
 
+/// Fallback when process table is not yet initialized.
 static mut CWD_INODE: u32 = 2;
 
 pub fn cwd_inode() -> u32 {
-    unsafe { CWD_INODE }
+    // Prefer current process cwd (U5+).
+    if process::process_count() > 0 {
+        process::get_cwd_inode()
+    } else {
+        unsafe { CWD_INODE }
+    }
 }
 
 pub fn set_cwd_inode(ino: u32) {
+    if process::process_count() > 0 {
+        process::set_cwd_inode(ino);
+    }
     unsafe {
         CWD_INODE = ino;
     }
