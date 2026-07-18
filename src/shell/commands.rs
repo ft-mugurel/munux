@@ -153,8 +153,9 @@ pub fn dispatch(line: &str) {
                 }
                 return;
             }
-            if path == "sh" || path == "/bin/sh" {
-                match crate::syscalls::run_embedded_sh() {
+            if path == "sh" || path == "/bin/sh" || path == "init" {
+                // Re-enter userspace init (same path as U8 boot handoff).
+                match crate::syscalls::run_init_sh() {
                     Ok(()) => {}
                     Err(e) => {
                         console::print("run sh: ");
@@ -213,7 +214,8 @@ fn cmd_help() {
     console::println("  fault [ud2]     Trigger CPU exception");
     console::println("  panic           Rust panic");
     console::println("  user            Enter ring 3 hand-asm demo");
-    console::println("  run [path|echo|cat|ls|fork|exec|sh|shtest]  user ELF / shell");
+    console::println("  run [path|echo|cat|ls|fork|exec|sh|init|shtest]  user ELF / shell");
+    console::println("  run sh / run init   Re-enter U8 userspace /bin/sh");
     console::println("  ls [path]       List directory");
     console::println("  cat <path>      Print file");
     console::println("  pwd / cd        Working directory");
@@ -250,7 +252,7 @@ fn cmd_ps() {
 
 fn cmd_about() {
     console::println("munux — freestanding x86_64 kernel (Rust + NASM)");
-    console::println("PR1-8 boot..FS | U1-U5 FD+FS+processes (docs/ABI.md)");
+    console::println("PR1-8 boot..FS | U1-U8 ABI+sh init (docs/ABI.md)");
     console::print("FDs open=");
     console::write_u64(crate::fd::open_count() as u64);
     console::println(" (0=in 1=out 2=err)");

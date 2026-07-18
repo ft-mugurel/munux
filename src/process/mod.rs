@@ -1,7 +1,7 @@
 //! Process management — PCBs, spawn/exit/wait, signals, sockets, memory.
 //!
 //! U5: real PIDs, zombie exit, wait4, getpid/getppid, cwd per process.
-//! User tasks launched by shell (`run`/`user`) become children of init (pid 1).
+//! User tasks (`/bin/sh` at U8 boot, or `run`/`user`) are children of kinit (pid 1).
 
 pub mod fork;
 pub mod memory;
@@ -35,7 +35,7 @@ pub fn set_cwd_inode(ino: u32) {
 /// Boot: create process table with init (pid 1).
 pub fn init_processes() {
     table::init_table();
-    crate::console::print("process: init pid=");
+    crate::console::print("process: kinit pid=");
     crate::console::write_u64(current_pid() as u64);
     crate::console::print(" uid=");
     crate::console::write_u64(getuid() as u64);

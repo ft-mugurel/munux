@@ -6,6 +6,7 @@
 //! PR7: ELF64 loader + embedded hello
 //! PR8: IDE + ext2 (read) + shell FS commands
 //! U1: FD table + WRITE via FDs (`docs/ABI.md`)
+//! U8: boot handoff to userspace `/bin/sh` (kernel shell is debug fallback)
 
 #![no_std]
 #![no_main]
@@ -141,7 +142,27 @@ pub extern "C" fn kmain() -> ! {
     // --- PR8: filesystem ---
     fs::init();
 
-    // --- PR5: shell ---
+    // --- U8: userspace init (/bin/sh) ---
+    // Kernel process table still has pid 1 = kinit (this idle context).
+    // /bin/sh runs as a child until exit, then we fall back to munux> for debug.
+    console::set_color(0x0E);
+    console::println("U8: handoff → /bin/sh  (type exit for kernel shell)");
+    console::set_color(0x07);
+    match syscalls::run_init_sh() {
+        Ok(()) => {
+            console::set_color(0x0A);
+            console::println("U8: /bin/sh exited — kernel debug shell");
+            console::set_color(0x07);
+        }
+        Err(e) => {
+            console::set_color(0x0C);
+            console::print("U8: init failed: ");
+            console::println(e);
+            console::set_color(0x07);
+        }
+    }
+
+    // --- PR5 / debug: kernel shell (also fallback when userspace init exits) ---
     shell::init();
 
     loop {

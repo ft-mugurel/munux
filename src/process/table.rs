@@ -25,7 +25,8 @@ pub fn init_table() {
         p.heap_base = crate::memory::KERNEL_HEAP_START;
         p.heap_size = 0;
         p.cwd_inode = 2; // ext2 root inode
-        p.set_name("init");
+        // Kernel-side init (pid 1). Userspace /bin/sh is a child (U8 handoff).
+        p.set_name("kinit");
         CURRENT = 0;
         NEXT_PID.store(2, Ordering::Relaxed);
     }

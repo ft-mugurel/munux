@@ -1,61 +1,36 @@
-# KFS smoke checklist
+# munux smoke checklist (x86_64)
 
-Quick manual checks after `make build` / `make run` (or `make run-iso`).
+Quick checks after `make run` / `make run-iso` (builds ISO + `build/disk.img`).
 
-## Boot
+## Boot (U8)
 
 - [ ] QEMU starts without "drive with bus=0, unit=0 exists"
-- [ ] VGA shows boot banner (`KFS i686 kernel`)
-- [ ] Lines mention: IDT gates, PMM frames, paging ON, heap, process init, ext2 mount (if disk present), `syscall: int 0x80 armed`
-- [ ] Shell prompt `kfs> ` appears
+- [ ] VGA: `munux x86_64`, long mode, PMM, paging, heap, IRQs, FDs, process, FS
+- [ ] Line: `U8: handoff → /bin/sh`
+- [ ] Userspace prompt `$` (not `munux>` first)
+- [ ] Banner: `munux sh (U7)...`
 
-## Core commands
+## Userspace `/bin/sh`
 
-- [ ] `help` — list includes `user`, fs, pmm, heap
-- [ ] `about` — GDT 8 entries, TSS selector `0x38`, paging/heap stats
-- [ ] `gdt` — 8 rows; index 7 is `tss` with access `0x89` (TSS-32)
-- [ ] `idt` — present gates include exceptions + IRQ0 + IRQ1 + 0x80
-- [ ] `pmm` / `vmm` / `heap` — info and optional `test` subcommands pass
-- [ ] `ps` — at least init (pid 1)
+- [ ] `help` — builtins + edit note
+- [ ] `hello` — ELF message
+- [ ] `cat` / `cat hello.txt` / `cat docs/readme.txt`
+- [ ] `cat /no/such` → `cat: cannot open file` (not `sh: exec failed`)
+- [ ] `ls` / `pwd` / `cd docs` / `pwd`
+- [ ] Backspace / `clear`
+- [ ] `exit` → `U8: /bin/sh exited` then `munux>` kernel shell
 
-## Filesystem (needs `build/disk.img` via `make disk` / `make run`)
+## Kernel debug shell (after exit)
 
-- [ ] `ls` — shows `hello.txt`, `docs/`
-- [ ] `cat hello.txt` — "Hello from KFS ext2!"
-- [ ] `pwd` / `cd docs` / `pwd` / `cd ..`
-- [ ] `mkdir testdir` then `ls` shows it
-- [ ] `touch foo.txt` then `rm foo.txt`
-- [ ] `rmdir testdir`
+- [ ] `ps` — at least `kinit` (pid 1)
+- [ ] `run sh` or `run init` — re-enter userspace shell
+- [ ] `run shtest` — scripted smoke (cat/ls/pwd/exit)
+- [ ] `ls` / `cat hello.txt` (kernel FS commands)
+- [ ] `help` / `about`
 
-## User mode / syscalls
-
-- [ ] `user` (or `usermode`) prints:
-  - `user: entering ring 3 @ 0x400000 …`
-  - `Hello from ring 3 user mode via int 0x80!`
-  - `user: returned to kernel (exit)`
-- [ ] Shell still accepts input after `user` (keyboard IRQs still work)
-
-## Size (soft subject limit ~10 MiB)
+## Optional
 
 ```sh
 make size
+make debug   # GDB stub + gdb/kfs.gdb
 ```
-
-- [ ] `build/kernel.bin` is well under 10 MiB (typically a few hundred KiB–low MiB with debug)
-- [ ] Scrollback BSS is modest (48 lines × 6 screens — see Makefile note)
-
-## Optional debug
-
-```sh
-make debug
-# (gdb) break kmain
-# (gdb) continue
-```
-
-- [ ] GDB attaches without auto-load safe-path spam (`-nx -x gdb/kfs.gdb`)
-
-## ELF exec
-
-- [ ] `ls /bin` or `ls bin` shows `hello` (depends on path form)
-- [ ] `run /bin/hello` prints `Hello from ELF userland!` and returns to `kfs>`
-- [ ] `user` still runs the built-in demo

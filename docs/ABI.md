@@ -36,7 +36,7 @@ Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.
 | 3 | `close` | **done** |
 | 39 | `getpid` | **done** (real PCB pid) |
 | 57 | `fork` | **done** (PCB + Ready child; shared AS) |
-| 59 | `execve` | **done** (load ELF; argv/envp ignored) |
+| 59 | `execve` | **done** (load ELF; argv up to 3 strings; envp ignored) |
 | 60 | `exit` | **done** (zombie + return to parent) |
 | 61 | `wait4` | **done** (reap; schedules Ready children) |
 | 79 | `getcwd` | **done** (per-process cwd) |
@@ -92,7 +92,7 @@ Common errno values we use:
 
 | Item | Behavior |
 |------|----------|
-| Boot | `init` = pid **1** (kernel shell) |
+| Boot | `kinit` = pid **1** (kernel idle). U8 hands off to userspace `/bin/sh` as a child |
 | `run` / `user` | spawn child PCB, switch current → child, enter ring 3 |
 | `getpid` | current process pid |
 | `getppid` | parent pid (`0` if none) |
@@ -104,9 +104,9 @@ Common errno values we use:
 
 Cooperative model (no preemptive multi-process scheduler, no private page tables yet). Nested kernel stacks for wait/exec.
 
-**U7:** freestanding `/bin/sh` in userspace (`run sh`). Builtins: `help`, `exit`, `cd`, `pwd`. Other words → `fork` + `execve("/bin/<cmd>")` + `wait4`.
+**U7:** freestanding `/bin/sh` in userspace. Builtins: `help`, `exit`, `cd`, `pwd`, `clear`. Other words → `fork` + `execve("/bin/<cmd>")` + `wait4` (argv passed).
 
-Future (U8): boot directly into `/bin/sh` as init (hand off from kernel shell).
+**U8:** after boot, kernel loads `/bin/sh` (ext2 or embedded) and enters it as the interactive userspace init. Kernel pid 1 remains `kinit` (parent). When sh `exit`s, control returns to the **kernel debug shell** (`munux>`). Re-enter with `run sh` / `run init`.
 
 ---
 
@@ -135,3 +135,4 @@ But using **wrong numbers guarantees** Linux binaries will never work — so mun
 | 0.2+U5 | PCB, real pid/ppid, zombie exit, wait4, per-process cwd |
 | 0.2+U6 | `fork` + `execve`; wait schedules Ready children; nested enter |
 | 0.2+U7 | Freestanding `/bin/sh` (prompt, builtins, fork/exec/wait) |
+| 0.2+U8 | Boot handoff to `/bin/sh`; kernel shell is debug fallback |

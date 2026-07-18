@@ -13,7 +13,7 @@ static mut LINE_LEN: usize = 0;
 
 pub fn init() {
     console::set_color(0x0F);
-    console::println("munux shell ready. Type `help`.");
+    console::println("munux kernel shell (debug). Type `help` — `run sh` re-enters U8 init.");
     console::set_color(0x07);
     print_prompt();
 }

@@ -907,6 +907,55 @@ pub fn run_embedded_sh_script(script: &[u8]) -> Result<(), &'static str> {
     exec_elf_bytes(crate::embedded_sh::SH_ELF, "sh")
 }
 
+/// U8: boot handoff — start userspace `/bin/sh` as the first interactive program.
+///
+/// Prefer ext2 `/bin/sh`, fall back to the embedded ELF. Runs as a child of
+/// kernel init (pid 1 = `kinit`). When the shell `exit`s, control returns here
+/// so the caller can drop into the kernel debug shell.
+pub fn run_init_sh() -> Result<(), &'static str> {
+    let image = load_sh_image()?;
+    enter_and_wait(image.entry, image.stack_top, "init: /bin/sh");
+    Ok(())
+}
+
+/// Load `/bin/sh` from the rootfs, or the embedded image if the disk path fails.
+fn load_sh_image() -> Result<crate::elf::LoadedImage, &'static str> {
+    if crate::fs::is_ready() {
+        if let Ok(img) = load_elf_image_from_fs("/bin/sh", "sh") {
+            return Ok(img);
+        }
+        if let Ok(img) = load_elf_image_from_fs("bin/sh", "sh") {
+            return Ok(img);
+        }
+    }
+    crate::elf::load_bytes(crate::embedded_sh::SH_ELF, "sh")
+}
+
+fn load_elf_image_from_fs(
+    path: &str,
+    argv0: &str,
+) -> Result<crate::elf::LoadedImage, &'static str> {
+    if !crate::fs::is_ready() {
+        return Err("no filesystem");
+    }
+    let cwd = crate::fs::path::cwd_inode();
+    let ino = crate::fs::ext2::resolve_path(cwd, path)?;
+    if crate::fs::ext2::inode_is_dir(ino) {
+        return Err("is a directory");
+    }
+    let size = crate::fs::ext2::inode_file_size(ino) as usize;
+    if size == 0 || size > 512 * 1024 {
+        return Err("bad file size");
+    }
+    const CAP: usize = 64 * 1024;
+    if size > CAP {
+        return Err("ELF too large (max 64KiB)");
+    }
+    let mut buf = [0u8; CAP];
+    let n = crate::fs::ext2::read_file(ino, 0, &mut buf[..size])?;
+    crate::elf::load_bytes(&buf[..n], argv0)
+}
+
 /// Load ELF64 from ext2 path (or embedded `hello` if path empty / "hello").
 pub fn run_path(path: &str) -> Result<(), &'static str> {
     let path = path.trim();
