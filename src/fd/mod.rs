@@ -1,7 +1,5 @@
 //! File descriptors (U1–U4): console, files, directories + getdents64.
 
-use core::arch::asm;
-
 use crate::console;
 use crate::fs;
 use crate::fs::ext2;
@@ -303,11 +301,8 @@ fn console_read(buf: &mut [u8]) -> usize {
     if buf.is_empty() {
         return 0;
     }
-    while kbd::buffered_len() == 0 {
-        unsafe {
-            asm!("sti; hlt", options(nomem, nostack));
-        }
-    }
+    // IRQ-safe wait: re-checks buffer after every hlt wake (see keyboard::wait_for_input).
+    kbd::wait_for_input();
     let mut n = 0usize;
     while n < buf.len() {
         match kbd::pop_char() {
