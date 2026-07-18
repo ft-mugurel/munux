@@ -31,8 +31,8 @@ Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.
 | # | Linux name | munux status |
 |---|------------|--------------|
 | 0 | `read` | **done** (stdin or open file FD) |
-| 1 | `write` | **done** (stdout/stderr console) |
-| 2 | `open` | **done** (files + directories; dirs for getdents) |
+| 1 | `write` | **done** (console + ext2 file FDs) |
+| 2 | `open` | **done** (files + dirs; `O_CREAT`/`O_TRUNC`/`O_WRONLY`/`O_RDWR`) |
 | 3 | `close` | **done** |
 | 39 | `getpid` | **done** (real PCB pid) |
 | 57 | `fork` | **done** (PCB + Ready child; shared AS) |

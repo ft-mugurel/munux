@@ -164,6 +164,19 @@ pub fn dispatch(line: &str) {
                 }
                 return;
             }
+            if path == "vitest" {
+                // Mini-vi smoke: edit hello.txt, insert 'Z', write+quit, cat result.
+                match crate::syscalls::run_embedded_sh_script(
+                    b"vi hello.txt\niZ\x1b:wq\ncat hello.txt\nexit\n",
+                ) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        console::print("run vitest: ");
+                        console::println(e);
+                    }
+                }
+                return;
+            }
             if path == "shtest" || path == "shdemo" {
                 // Preload a short script into the keyboard ring (no sendkey races).
                 // Includes cat with/without args to smoke-test first-word path + argv.

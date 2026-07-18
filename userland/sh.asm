@@ -530,7 +530,7 @@ msg_banner_len equ $ - msg_banner
 msg_prompt:	db "$ "
 msg_prompt_len equ $ - msg_prompt
 msg_help:	db "help clear/cls exit cd pwd; other = /bin/cmd", 10
-		db "edit: Backspace/Del", 10
+		db "edit: Backspace/Del; vi <file> = mini editor", 10
 msg_help_len equ $ - msg_help
 msg_nl:		db 10
 msg_bs:		db 8, 32, 8

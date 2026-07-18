@@ -1,6 +1,7 @@
-//! Filesystem: IDE probe + ext2 (read) + path helpers.
+//! Filesystem: IDE probe + ext2 (read/write) + path helpers.
 
 pub mod ext2;
+pub mod ext2_write;
 pub mod path;
 pub mod vfs;
 

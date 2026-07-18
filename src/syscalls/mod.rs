@@ -732,6 +732,10 @@ fn load_exec_image(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage,
     if path == "sh" || path == "/bin/sh" || path == "bin/sh" || path.ends_with("/sh") {
         return load(crate::embedded_sh::SH_ELF);
     }
+    if path == "vi" || path == "/bin/vi" || path == "vim" || path.ends_with("/vi") || path.ends_with("/vim")
+    {
+        return load(crate::embedded_vi::VI_ELF);
+    }
     let _ = argv0;
     Err("ENOENT")
 }

@@ -131,7 +131,15 @@ fn handle_key_press(event: KeyEvent, modifiers: Modifiers) -> bool {
         KeyCode::Delete if !modifiers.ctrl() && !modifiers.alt() => {
             buf_push_from_irq(0x7F);
         }
-        KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::ArrowLeft | KeyCode::ArrowRight => {}
+        // Esc for vi/normal-mode apps (ASCII ESC).
+        KeyCode::Escape => {
+            buf_push_from_irq(0x1B);
+        }
+        // Arrow keys: private single-byte codes (not CSI — Esc is mode switch).
+        KeyCode::ArrowUp => buf_push_from_irq(0x80),
+        KeyCode::ArrowDown => buf_push_from_irq(0x81),
+        KeyCode::ArrowRight => buf_push_from_irq(0x82),
+        KeyCode::ArrowLeft => buf_push_from_irq(0x83),
         KeyCode::F1 | KeyCode::F2 | KeyCode::F3 | KeyCode::F4 | KeyCode::F5 | KeyCode::F6 => {}
         _ => {
             if !modifiers.has_text_blocking_modifier() {

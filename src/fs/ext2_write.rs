@@ -14,6 +14,14 @@ const EXT2_FT_DIR: u8 = 2;
 
 const MAX_GROUPS: usize = 32;
 
+/// Shared 4 KiB scratch for block I/O — avoid large stack frames on the 16 KiB
+/// syscall stack (nested open/trunc/write was overflowing → #UD).
+static mut BLOCK_SCRATCH: [u8; 4096] = [0; 4096];
+
+fn scratch() -> &'static mut [u8; 4096] {
+    unsafe { &mut *core::ptr::addr_of_mut!(BLOCK_SCRATCH) }
+}
+
 // Re-access mount state through helpers in ext2 module — we use public read/write
 // and duplicate minimal FS state access via re-exported internals.
 
@@ -132,18 +140,18 @@ fn group_first_block(group: u32) -> u32 {
 pub fn alloc_block() -> Result<u32, &'static str> {
     let bpg = fs_blocks_per_group();
     let groups = fs_groups_count().min(MAX_GROUPS as u32);
-    let mut bm = [0u8; 4096];
+    let bm = scratch();
 
     for g in 0..groups {
         let bmp_block = unsafe {
             core::ptr::addr_of!((*crate::fs::ext2::fs_group_ptr(g as usize)).bg_block_bitmap)
                 .read_unaligned()
         };
-        read_fs_block(bmp_block, &mut bm)?;
+        read_fs_block(bmp_block, bm)?;
         for bit in 0..bpg {
-            if !bitmap_test(&bm, bit) {
-                bitmap_set(&mut bm, bit, true);
-                write_fs_block(bmp_block, &bm)?;
+            if !bitmap_test(bm, bit) {
+                bitmap_set(bm, bit, true);
+                write_fs_block(bmp_block, bm)?;
                 // update group free count
                 unsafe {
                     let gd = crate::fs::ext2::fs_group_ptr(g as usize);
@@ -164,9 +172,10 @@ pub fn alloc_block() -> Result<u32, &'static str> {
                 write_group_desc(g)?;
                 write_superblock()?;
                 let blk = group_first_block(g) + bit;
-                // zero the new block
-                let z = [0u8; 4096];
-                write_fs_block(blk, &z)?;
+                // zero the new block (scratch was bitmap; re-zero after write)
+                let z = scratch();
+                z.fill(0);
+                write_fs_block(blk, z)?;
                 return Ok(blk);
             }
         }
@@ -185,17 +194,17 @@ fn free_block(block: u32) -> Result<(), &'static str> {
     if g as usize >= MAX_GROUPS {
         return Err("group OOB");
     }
-    let mut bm = [0u8; 4096];
+    let bm = scratch();
     let bmp_block = unsafe {
         core::ptr::addr_of!((*crate::fs::ext2::fs_group_ptr(g as usize)).bg_block_bitmap)
             .read_unaligned()
     };
-    read_fs_block(bmp_block, &mut bm)?;
-    if !bitmap_test(&bm, bit) {
+    read_fs_block(bmp_block, bm)?;
+    if !bitmap_test(bm, bit) {
         return Ok(()); // already free
     }
-    bitmap_set(&mut bm, bit, false);
-    write_fs_block(bmp_block, &bm)?;
+    bitmap_set(bm, bit, false);
+    write_fs_block(bmp_block, bm)?;
     unsafe {
         let gd = crate::fs::ext2::fs_group_ptr(g as usize);
         let free = core::ptr::addr_of!((*gd).bg_free_blocks_count).read_unaligned();
@@ -770,5 +779,104 @@ pub fn rmdir(cwd: u32, path: &str) -> Result<(), &'static str> {
     inode_set_times(&mut pino, now());
     write_inode(parent, &pino)?;
     Ok(())
+}
+
+/// Truncate a regular file to zero length (free direct + single-indirect blocks).
+pub fn truncate_file(ino: u32) -> Result<(), &'static str> {
+    if !ext2::is_mounted() {
+        return Err("not mounted");
+    }
+    let mut inode = read_inode(ino)?;
+    if inode_get_mode(&inode) & S_IFMT == S_IFDIR {
+        return Err("is a directory");
+    }
+    for i in 0..12 {
+        let b = inode_get_block(&inode, i);
+        if b != 0 {
+            free_block(b)?;
+            inode_set_block(&mut inode, i, 0);
+        }
+    }
+    let ind = inode_get_block(&inode, 12);
+    if ind != 0 {
+        let bbuf = scratch();
+        read_fs_block(ind, bbuf)?;
+        let per = fs_block_size() as usize / 4;
+        // Copy block numbers out first — free_block reuses scratch/bitmap buffers.
+        let mut ptrs = [0u32; 1024];
+        let n = per.min(1024);
+        for i in 0..n {
+            ptrs[i] = read_u32_le(bbuf, i * 4);
+        }
+        for i in 0..n {
+            if ptrs[i] != 0 {
+                free_block(ptrs[i])?;
+            }
+        }
+        free_block(ind)?;
+        inode_set_block(&mut inode, 12, 0);
+    }
+    inode_set_size(&mut inode, 0);
+    inode_set_blocks(&mut inode, 0);
+    inode_set_times(&mut inode, now());
+    write_inode(ino, &inode)
+}
+
+/// Write `data` into a regular file at `offset` (extends size as needed).
+/// Uses direct blocks only (max 12 * block_size). Returns bytes written.
+pub fn write_file_at(ino: u32, offset: u32, data: &[u8]) -> Result<usize, &'static str> {
+    if !ext2::is_mounted() {
+        return Err("not mounted");
+    }
+    if data.is_empty() {
+        return Ok(0);
+    }
+    let mut inode = read_inode(ino)?;
+    if inode_get_mode(&inode) & S_IFMT == S_IFDIR {
+        return Err("is a directory");
+    }
+    let bs = fs_block_size();
+    let max = 12u32.saturating_mul(bs);
+    let end = offset.saturating_add(data.len() as u32);
+    if end > max {
+        return Err("file too large");
+    }
+
+    let mut done = 0usize;
+    while done < data.len() {
+        let pos = offset + done as u32;
+        let lb = (pos / bs) as usize;
+        if lb >= 12 {
+            break;
+        }
+        let boff = (pos % bs) as usize;
+        let mut block = inode_get_block(&inode, lb);
+        if block == 0 {
+            block = alloc_block()?;
+            // re-read inode — alloc_block may have mutated superblock only, but
+            // keep our in-memory i_block updates on `inode`.
+            inode_set_block(&mut inode, lb, block);
+        }
+        let bbuf = scratch();
+        read_fs_block(block, bbuf)?;
+        let chunk = core::cmp::min(data.len() - done, bs as usize - boff);
+        bbuf[boff..boff + chunk].copy_from_slice(&data[done..done + chunk]);
+        write_fs_block(block, bbuf)?;
+        done += chunk;
+    }
+
+    let cur = inode_get_size(&inode);
+    let new_size = core::cmp::max(cur, offset + done as u32);
+    inode_set_size(&mut inode, new_size);
+    let mut nsec = 0u32;
+    for i in 0..12 {
+        if inode_get_block(&inode, i) != 0 {
+            nsec += bs / 512;
+        }
+    }
+    inode_set_blocks(&mut inode, nsec);
+    inode_set_times(&mut inode, now());
+    write_inode(ino, &inode)?;
+    Ok(done)
 }
 

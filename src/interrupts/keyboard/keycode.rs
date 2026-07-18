@@ -64,6 +64,7 @@ pub enum KeyCode {
     ArrowDown,
     ArrowLeft,
     ArrowRight,
+    Escape,
     Delete,
     F1,
     F2,
@@ -173,6 +174,7 @@ pub fn decode_set1_scancode(scancode: u8, extended: bool) -> Option<KeyEvent> {
         }
     } else {
         match key {
+            0x01 => KeyCode::Escape,
             0x0E => KeyCode::Backspace,
             0x0F => KeyCode::Tab,
             0x1C => KeyCode::Enter,

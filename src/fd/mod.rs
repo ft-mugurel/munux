@@ -11,6 +11,12 @@ pub const STDIN_FILENO: usize = 0;
 pub const STDOUT_FILENO: usize = 1;
 pub const STDERR_FILENO: usize = 2;
 
+/// Linux open flags (subset).
+pub const O_RDONLY: u64 = 0;
+pub const O_WRONLY: u64 = 1;
+pub const O_RDWR: u64 = 2;
+pub const O_CREAT: u64 = 0o100;
+pub const O_TRUNC: u64 = 0o1000;
 /// Linux open flag O_DIRECTORY.
 pub const O_DIRECTORY: u64 = 0o200000;
 /// Linux O_ACCMODE
@@ -61,12 +67,12 @@ impl File {
         }
     }
 
-    pub fn ext2_file(ino: u32) -> Self {
+    pub fn ext2_file(ino: u32, readable: bool, writable: bool) -> Self {
         Self {
             kind: FileKind::Ext2File { ino },
             offset: 0,
-            readable: true,
-            writable: false,
+            readable,
+            writable,
         }
     }
 
@@ -152,14 +158,33 @@ impl FdTable {
     }
 
     pub fn write(&mut self, fd: usize, data: &[u8]) -> Result<usize, FdError> {
-        let file = self.get_mut(fd).ok_or(FdError::BadFd)?;
-        if !file.writable {
-            return Err(FdError::BadFd);
+        let (kind, offset) = {
+            let file = self.get(fd).ok_or(FdError::BadFd)?;
+            if !file.writable {
+                return Err(FdError::BadFd);
+            }
+            (file.kind, file.offset)
+        };
+        let n = match kind {
+            FileKind::Console => console_write(data),
+            FileKind::Ext2File { ino } => {
+                if offset > u32::MAX as u64 {
+                    return Ok(0);
+                }
+                match crate::fs::ext2_write::write_file_at(ino, offset as u32, data) {
+                    Ok(n) => n,
+                    Err("file too large") => return Err(FdError::Inval),
+                    Err("is a directory") => return Err(FdError::IsDir),
+                    Err(_) => return Err(FdError::Fault),
+                }
+            }
+            FileKind::Ext2Dir { .. } => return Err(FdError::IsDir),
+            FileKind::None => return Err(FdError::BadFd),
+        };
+        if let Some(file) = self.get_mut(fd) {
+            file.offset = file.offset.saturating_add(n as u64);
         }
-        match file.kind {
-            FileKind::Console => Ok(console_write(data)),
-            _ => Err(FdError::BadFd),
-        }
+        Ok(n)
     }
 
     pub fn read(&mut self, fd: usize, buf: &mut [u8]) -> Result<usize, FdError> {
@@ -337,6 +362,7 @@ fn ext2_file_read(ino: u32, offset: u64, buf: &mut [u8]) -> Result<usize, FdErro
 }
 
 /// Open path. Files → Ext2File; directories → Ext2Dir (for getdents64).
+/// Supports O_RDONLY / O_WRONLY / O_RDWR, O_CREAT, O_TRUNC, O_DIRECTORY.
 pub fn open_path(path: &str, flags: u64) -> Result<usize, FdError> {
     if !is_ready() {
         return Err(FdError::BadFd);
@@ -345,25 +371,44 @@ pub fn open_path(path: &str, flags: u64) -> Result<usize, FdError> {
         return Err(FdError::NoEnt);
     }
     let acc = flags & O_ACCMODE;
-    if acc != 0 {
+    if acc > O_RDWR {
         return Err(FdError::Inval);
     }
     if path.is_empty() {
         return Err(FdError::NoEnt);
     }
 
+    let readable = acc == O_RDONLY || acc == O_RDWR;
+    let writable = acc == O_WRONLY || acc == O_RDWR;
+
     let cwd = fs::path::cwd_inode();
-    let ino = fs::ext2::resolve_path(cwd, path).map_err(|_| FdError::NoEnt)?;
+    let ino = match fs::ext2::resolve_path(cwd, path) {
+        Ok(i) => i,
+        Err(_) => {
+            if flags & O_CREAT == 0 {
+                return Err(FdError::NoEnt);
+            }
+            // Create empty file then re-resolve.
+            fs::ext2_write::touch(cwd, path).map_err(|_| FdError::NoEnt)?
+        }
+    };
     let is_dir = fs::ext2::inode_is_dir(ino);
 
     if flags & O_DIRECTORY != 0 && !is_dir {
         return Err(FdError::NotDir);
     }
+    if is_dir && writable {
+        return Err(FdError::IsDir);
+    }
+
+    if !is_dir && (flags & O_TRUNC) != 0 && writable {
+        let _ = fs::ext2_write::truncate_file(ino);
+    }
 
     let file = if is_dir {
         File::ext2_dir(ino)
     } else {
-        File::ext2_file(ino)
+        File::ext2_file(ino, readable, writable)
     };
     with_current(|t| t.install(file))
 }
