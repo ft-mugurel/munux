@@ -70,7 +70,7 @@ pub extern "C" fn kmain() -> ! {
     let magic = unsafe { core::ptr::addr_of!(multiboot_magic_value).read_unaligned() };
     let mbi = unsafe { core::ptr::addr_of!(multiboot_info_addr).read_unaligned() };
 
-    console::clear();
+    console::clear(); // enables hardware cursor
     console::set_color(0x0F);
     console::println("munux x86_64");
     console::set_color(0x0A);

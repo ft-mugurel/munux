@@ -827,89 +827,110 @@ redraw:
 .st_done:
 	ret
 
-; print one view line starting at r11; highlight cursor; advance r11 past NL
-print_view_line:
-	push r12
-	push r13
-	mov r12d, [rel buflen]
-	mov r13d, [rel cursor]
-	lea rsi, [rel buffer]
-	xor ecx, ecx			; col
-.pl:
-	cmp r11d, r12d
-	jae .eol_pad
-	cmp r11d, r13d
-	jne .ch
-	; draw cursor marker before char
+; write_inv_char: al = char (or space). Uses inverse video (0x0E … 0x0F).
+write_inv_char:
 	push rax
-	push rsi
-	push rcx
-	push r11
+	mov [rel onebyte], al
 	mov rax, SYS_WRITE
 	mov rdi, 1
-	lea rsi, [rel cursor_ch]
+	lea rsi, [rel inv_on]
 	mov rdx, 1
 	syscall
-	pop r11
-	pop rcx
-	pop rsi
-	pop rax
-.ch:
-	mov al, [rsi+r11]
-	inc r11d
-	cmp al, 10
-	je .eol
-	cmp ecx, COLS-1
-	jae .pl				; skip overflow cols
-	; write one char
-	mov [rel onebyte], al
-	push rsi
-	push rcx
-	push r11
 	mov rax, SYS_WRITE
 	mov rdi, 1
 	lea rsi, [rel onebyte]
 	mov rdx, 1
 	syscall
-	pop r11
-	pop rcx
-	pop rsi
-	inc ecx
-	jmp .pl
-.eol_pad:
-	; cursor at EOF on this empty end
-	cmp r11d, r13d
-	jne .nl
-	push r11
 	mov rax, SYS_WRITE
 	mov rdi, 1
-	lea rsi, [rel cursor_ch]
+	lea rsi, [rel inv_off]
 	mov rdx, 1
 	syscall
+	pop rax
+	ret
+
+; write_plain: al = char
+write_plain:
+	mov [rel onebyte], al
+	mov rax, SYS_WRITE
+	mov rdi, 1
+	lea rsi, [rel onebyte]
+	mov rdx, 1
+	syscall
+	ret
+
+; print one view line starting at r11; highlight cursor; advance r11 past NL
+print_view_line:
+	push r12
+	push r13
+	push rbx
+	mov r12d, [rel buflen]
+	mov r13d, [rel cursor]
+	lea rbx, [rel buffer]
+	xor ecx, ecx			; col
+.pl:
+	cmp r11d, r12d
+	jae .eol_pad
+	mov al, [rbx+r11]
+	cmp al, 10
+	je .at_nl
+	cmp ecx, COLS-1
+	ja .skip_overflow
+	; if this index is the cursor, inverse
+	cmp r11d, r13d
+	jne .plain
+	push rcx
+	push r11
+	call write_inv_char
 	pop r11
-.nl:
+	pop rcx
+	jmp .adv
+.plain:
+	push rcx
+	push r11
+	call write_plain
+	pop r11
+	pop rcx
+.adv:
+	inc ecx
+.skip_overflow:
+	inc r11d
+	jmp .pl
+.at_nl:
+	; cursor sitting on NL → show inverse space at end of line
+	cmp r11d, r13d
+	jne .nl_out
+	cmp ecx, COLS-1
+	ja .nl_skip
+	push rcx
+	push r11
+	mov al, ' '
+	call write_inv_char
+	pop r11
+	pop rcx
+.nl_skip:
+	inc r11d				; consume NL
+	jmp .nl_out
+.eol_pad:
+	; EOF / end of buffer on this line
+	cmp r11d, r13d
+	jne .nl_out
+	cmp ecx, COLS-1
+	ja .nl_out
+	push rcx
+	mov al, ' '
+	call write_inv_char
+	pop rcx
+.nl_out:
 	mov rax, SYS_WRITE
 	mov rdi, 1
 	lea rsi, [rel msg_nl]
 	mov rdx, 1
 	syscall
+	pop rbx
 	pop r13
 	pop r12
 	ret
-.eol:
-	; NL consumed; if cursor was on this NL position show cursor
-	mov eax, r11d
-	dec eax
-	cmp eax, r13d
-	jne .nl
-	push r11
-	mov rax, SYS_WRITE
-	mov rdi, 1
-	lea rsi, [rel cursor_ch]
-	mov rdx, 1
-	syscall
-	pop r11
-	jmp .nl
 
 ; r8 = line number of cursor, r9 = col
 cursor_line_col:
@@ -997,8 +1018,9 @@ form_feed:	db 12
 msg_nl:		db 10
 tilde_nl:	db '~', 10
 colon:		db ':'
-cursor_ch:	db 0xDB			; block cursor glyph
-st_normal:	db "NORMAL  ", 
+inv_on:		db 0x0E			; console: inverse on
+inv_off:	db 0x0F			; console: inverse off
+st_normal:	db "NORMAL  ",
 st_normal_len equ $ - st_normal
 st_insert:	db "-- INSERT --  ", 
 st_insert_len equ $ - st_insert

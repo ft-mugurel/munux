@@ -312,6 +312,7 @@ fn console_write(data: &[u8]) -> usize {
     let mut n = 0usize;
     for &b in data {
         // Shells need BS/DEL for line edit and FF for clear.
+        // 0x0E / 0x0F = inverse video on/off (for vi cursor highlight).
         if b == b'\n' || b == b'\t' {
             console::put_char(b);
             n += 1;
@@ -321,7 +322,13 @@ fn console_write(data: &[u8]) -> usize {
         } else if b == 0x0C {
             console::clear();
             n += 1;
-        } else if (32..127).contains(&b) {
+        } else if b == 0x0E {
+            console::set_inverse(true);
+            n += 1;
+        } else if b == 0x0F {
+            console::set_inverse(false);
+            n += 1;
+        } else if (0x20..=0xFF).contains(&b) && b != 0x7F {
             console::put_char(b);
             n += 1;
         }
