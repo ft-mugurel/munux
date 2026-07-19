@@ -53,6 +53,7 @@ _start:
 	mov dword [rel dirty], 0
 	mov dword [rel cursor], 0
 	mov dword [rel row0], 0
+	mov dword [rel pref_col], 0
 
 .main:
 	call redraw
@@ -135,13 +136,26 @@ handle_normal:
 	mov byte [rel mode], MODE_INSERT
 	ret
 .kapp:
-	call cur_right
+	; append after current char (if not at EOL NL)
+	mov eax, [rel cursor]
+	mov ecx, [rel buflen]
+	cmp eax, ecx
+	jae .a_ins
+	lea rsi, [rel buffer]
+	cmp byte [rsi+rax], 10
+	je .a_ins
+	inc eax
+	mov [rel cursor], eax
+.a_ins:
 	mov byte [rel mode], MODE_INSERT
 	ret
 .kopen:
-	call cur_line_end
+	; vim `o`: new line below current, enter insert
+	mov edi, [rel cursor]
+	call line_end_of			; index of NL or buflen
+	mov [rel cursor], eax
 	mov al, 10
-	call buf_insert
+	call buf_insert			; insert NL at EOL → blank line below
 	mov byte [rel mode], MODE_INSERT
 	ret
 .kdel:
@@ -361,7 +375,11 @@ buf_insert:
 	inc edx
 	mov [rel cursor], edx
 	mov dword [rel dirty], 1
-	call ensure_nl_end
+	; update preferred column after insert
+	push rax
+	call col_at_cursor
+	mov [rel pref_col], eax
+	pop rax
 .full:
 	ret
 
@@ -415,21 +433,86 @@ delete_line:
 	mov dword [rel dirty], 1
 	ret
 
-ensure_nl_end:
-	; optional: ensure buffer ends with content only
+; ---- cursor ----
+; pref_col: column remembered for j/k (vim-style)
+; col_at_cursor: eax = column (0-based) of current cursor
+col_at_cursor:
+	push rbx
+	mov eax, [rel cursor]
+	lea rsi, [rel buffer]
+	xor ebx, ebx			; col
+.lp:
+	test eax, eax
+	jz .done
+	cmp byte [rsi+rax-1], 10
+	je .done
+	dec eax
+	inc ebx
+	jmp .lp
+.done:
+	mov eax, ebx
+	pop rbx
 	ret
 
-; ---- cursor ----
+; line_start_of: edi = pos → eax = start of that line
+line_start_of:
+	mov eax, edi
+	lea rsi, [rel buffer]
+.lp:
+	test eax, eax
+	jz .d
+	cmp byte [rsi+rax-1], 10
+	je .d
+	dec eax
+	jmp .lp
+.d:	ret
+
+; line_end_of: edi = pos → eax = index of NL or buflen (not past end)
+line_end_of:
+	mov eax, edi
+	mov ecx, [rel buflen]
+	lea rsi, [rel buffer]
+.lp:
+	cmp eax, ecx
+	jae .d
+	cmp byte [rsi+rax], 10
+	je .d
+	inc eax
+	jmp .lp
+.d:	ret
+
+; goto_col: line starts at edi, want column pref_col → set cursor
+goto_col_on_line:
+	mov eax, edi			; start
+	mov ecx, [rel buflen]
+	mov edx, [rel pref_col]
+	lea rsi, [rel buffer]
+	xor ebx, ebx			; col
+.lp:
+	cmp eax, ecx
+	jae .set
+	cmp byte [rsi+rax], 10
+	je .set				; stop at NL (cursor on NL like vim $ behavior for short lines)
+	cmp ebx, edx
+	jae .set
+	inc eax
+	inc ebx
+	jmp .lp
+.set:
+	mov [rel cursor], eax
+	ret
+
 cur_left:
 	mov eax, [rel cursor]
 	test eax, eax
 	jz .r
 	dec eax
 	mov [rel cursor], eax
+	call col_at_cursor
+	mov [rel pref_col], eax
 .r:	ret
 
 cur_left_if:
-	; for backspace: move left then delete that char — caller does delete after
 	mov eax, [rel cursor]
 	test eax, eax
 	jz .r
@@ -442,62 +525,78 @@ cur_right:
 	mov ecx, [rel buflen]
 	cmp eax, ecx
 	jae .r
+	; don't skip past end; allow landing on NL then past it
 	inc eax
 	mov [rel cursor], eax
+	call col_at_cursor
+	mov [rel pref_col], eax
 .r:	ret
 
 cur_line_start:
-	mov eax, [rel cursor]
-	lea rsi, [rel buffer]
-.lp:
-	test eax, eax
-	jz .done
-	cmp byte [rsi+rax-1], 10
-	je .done
-	dec eax
-	jmp .lp
-.done:
+	mov edi, [rel cursor]
+	call line_start_of
 	mov [rel cursor], eax
+	mov dword [rel pref_col], 0
 	ret
 
 cur_line_end:
-	mov eax, [rel cursor]
+	mov edi, [rel cursor]
+	call line_end_of
+	; sit on last char of line (or on empty line start); if line has content ending before NL, end is NL index
+	; vim $ goes to last non-NL char
 	mov ecx, [rel buflen]
-	lea rsi, [rel buffer]
-.lp:
 	cmp eax, ecx
-	jae .done
+	jae .set
+	lea rsi, [rel buffer]
 	cmp byte [rsi+rax], 10
-	je .done
-	inc eax
-	jmp .lp
-.done:
+	jne .set
+	; eax points at NL — if not at line start, step back one
+	mov edi, [rel cursor]
+	push rax
+	call line_start_of
+	pop rdx			; NL index
+	cmp eax, edx
+	je .use_nl		; empty line: stay on NL/start
+	lea eax, [rdx-1]
+	jmp .set
+.use_nl:
+	mov eax, edx
+.set:
 	mov [rel cursor], eax
+	call col_at_cursor
+	mov [rel pref_col], eax
 	ret
 
-cur_up:
-	call cur_line_start
-	mov eax, [rel cursor]
-	test eax, eax
-	jz .r
-	; go to prev line start
-	dec eax
-	mov [rel cursor], eax
-	call cur_line_start
-.r:	ret
-
+; j / down-arrow: next line, same preferred column
 cur_down:
-	call cur_line_end
-	mov eax, [rel cursor]
+	mov edi, [rel cursor]
+	call line_end_of		; eax = NL or buflen
 	mov ecx, [rel buflen]
 	cmp eax, ecx
-	jae .r
-	; skip NL if present
+	jae .r				; no newline → no next line
+	; must be on NL
 	lea rsi, [rel buffer]
 	cmp byte [rsi+rax], 10
 	jne .r
-	inc eax
-	mov [rel cursor], eax
+	inc eax				; first byte of next line (may be == buflen)
+	cmp eax, ecx
+	ja .r
+	mov edi, eax			; start of next line
+	; refresh pref_col from current if never set mid-line move — keep pref_col
+	call goto_col_on_line
+.r:	ret
+
+; k / up-arrow: previous line, same preferred column
+cur_up:
+	mov edi, [rel cursor]
+	call line_start_of
+	test eax, eax
+	jz .r				; already first line
+	dec eax				; last char of previous line (or NL)
+	mov edi, eax
+	call line_start_of
+	mov edi, eax
+	call goto_col_on_line
 .r:	ret
 
 ; ---- file I/O ----
@@ -924,6 +1023,7 @@ status_msg:	resb 80
 buflen:		resd 1
 cursor:		resd 1
 row0:		resd 1
+pref_col:	resd 1
 cmdlen:		resd 1
 dirty:		resd 1
 mode:		resb 1

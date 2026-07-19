@@ -143,21 +143,32 @@ pub extern "C" fn kmain() -> ! {
     // --- PR8: filesystem ---
     fs::init();
 
+    console::set_color(0x0A);
+    console::println("boot OK");
+    console::set_color(0x07);
+
+    // Diagnostics are done — clear for a clean userspace screen.
+    console::clear();
+    console::set_color(0x0F);
+    console::println("munux");
+    console::set_color(0x08);
+    console::println("type exit in sh for kernel debug shell");
+    console::set_color(0x07);
+    console::println("");
+
     // --- U8: userspace init (/bin/sh) ---
     // Kernel process table still has pid 1 = kinit (this idle context).
     // /bin/sh runs as a child until exit, then we fall back to munux> for debug.
-    console::set_color(0x0E);
-    console::println("U8: handoff → /bin/sh  (type exit for kernel shell)");
-    console::set_color(0x07);
     match syscalls::run_init_sh() {
         Ok(()) => {
+            console::clear();
             console::set_color(0x0A);
-            console::println("U8: /bin/sh exited — kernel debug shell");
+            console::println("userspace exited — kernel debug shell");
             console::set_color(0x07);
         }
         Err(e) => {
             console::set_color(0x0C);
-            console::print("U8: init failed: ");
+            console::print("init failed: ");
             console::println(e);
             console::set_color(0x07);
         }

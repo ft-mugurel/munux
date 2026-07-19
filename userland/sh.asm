@@ -525,7 +525,7 @@ memcpy:
 	ret
 
 section .rodata
-msg_banner:	db "munux sh (U7). builtins: help exit cd pwd; else fork/exec /bin/<cmd>", 10
+msg_banner:	db "munux sh  |  help  exit  cd  pwd  vi  |  fork/exec /bin/<cmd>", 10
 msg_banner_len equ $ - msg_banner
 msg_prompt:	db "$ "
 msg_prompt_len equ $ - msg_prompt

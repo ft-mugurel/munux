@@ -802,6 +802,11 @@ fn sys_wait4(pid: u64, status_ptr: u64, options: u64) -> u64 {
 }
 
 fn enter_and_wait(entry: u64, stack_top: u64, label: &str) {
+    enter_and_wait_opts(entry, stack_top, label, false);
+}
+
+/// `quiet`: suppress pid/entry chatter (used for clean U8 boot handoff).
+fn enter_and_wait_opts(entry: u64, stack_top: u64, label: &str, quiet: bool) {
     // U5/U6: run as a child of init (shell) so getpid/exit/wait/fork are real
     let child = match crate::process::begin_user_task(label) {
         Ok(p) => p,
@@ -819,14 +824,16 @@ fn enter_and_wait(entry: u64, stack_top: u64, label: &str) {
     }
     ensure_kstack_base();
 
-    console::print(label);
-    console::print(" pid=");
-    console::write_u64(child as u64);
-    console::print(" entry=");
-    console::write_hex64(entry);
-    console::print(" stack=");
-    console::write_hex64(stack_top);
-    console::println("");
+    if !quiet {
+        console::print(label);
+        console::print(" pid=");
+        console::write_u64(child as u64);
+        console::print(" entry=");
+        console::write_hex64(entry);
+        console::print(" stack=");
+        console::write_hex64(stack_top);
+        console::println("");
+    }
 
     unsafe {
         enter_user_mode(entry, stack_top, 0);
@@ -846,12 +853,14 @@ fn enter_and_wait(entry: u64, stack_top: u64, label: &str) {
 
     // exit_user already switched current back to parent; reap zombie
     if let Some((pid, code)) = crate::process::reap_any_child() {
-        console::print("user: exited pid=");
-        console::write_u64(pid as u64);
-        console::print(" status=");
-        console::write_u64(code as u64);
-        console::println("");
-    } else {
+        if !quiet {
+            console::print("user: exited pid=");
+            console::write_u64(pid as u64);
+            console::print(" status=");
+            console::write_u64(code as u64);
+            console::println("");
+        }
+    } else if !quiet {
         console::println("user: returned to kernel (no zombie?)");
     }
 }
@@ -918,7 +927,7 @@ pub fn run_embedded_sh_script(script: &[u8]) -> Result<(), &'static str> {
 /// so the caller can drop into the kernel debug shell.
 pub fn run_init_sh() -> Result<(), &'static str> {
     let image = load_sh_image()?;
-    enter_and_wait(image.entry, image.stack_top, "init: /bin/sh");
+    enter_and_wait_opts(image.entry, image.stack_top, "sh", true);
     Ok(())
 }
 
