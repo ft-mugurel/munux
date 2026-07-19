@@ -78,8 +78,23 @@ const PAGE_USER_RW: u64 = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
 
 /// Nested syscall stacks so wait4/execve → child does not clobber the outer
 /// syscall frame (all would otherwise share one `syscall_kstack` top).
-const NEST_KSTACK_BYTES: usize = 16384;
+///
+/// Must be large enough for normal syscall depth. ELF file bytes must **not**
+/// live on these stacks (see `ELF_LOAD_BUF`) — a 64 KiB stack buffer on a 16 KiB
+/// nest stack used to overflow into kernel `.data` and zero `console::COLOR`
+/// (invisible black-on-black text after the first `execve`).
+const NEST_KSTACK_BYTES: usize = 32 * 1024;
 const NEST_KSTACK_MAX: usize = 6;
+
+/// Scratch for loading small ELFs from ext2. Static so execve does not allocate
+/// tens of KiB on the nest kernel stack. Cooperative kernel: one load at a time.
+const ELF_LOAD_CAP: usize = 64 * 1024;
+static mut ELF_LOAD_BUF: [u8; ELF_LOAD_CAP] = [0; ELF_LOAD_CAP];
+
+fn elf_load_buf() -> &'static mut [u8; ELF_LOAD_CAP] {
+    // SAFETY: only called from the single-threaded syscall path; no concurrent load.
+    unsafe { &mut *core::ptr::addr_of_mut!(ELF_LOAD_BUF) }
+}
 
 #[repr(align(16))]
 struct NestKStack {
@@ -890,11 +905,10 @@ fn load_elf_from_fs(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage
     if size == 0 || size > 512 * 1024 {
         return Err("bad file size");
     }
-    const CAP: usize = 64 * 1024;
-    if size > CAP {
+    if size > ELF_LOAD_CAP {
         return Err("ELF too large");
     }
-    let mut buf = [0u8; CAP];
+    let buf = elf_load_buf();
     let n = crate::fs::ext2::read_file(ino, 0, &mut buf[..size])?;
     crate::elf::load_bytes_argv(&buf[..n], argv)
 }
@@ -1103,11 +1117,10 @@ fn load_elf_image_from_fs(
     if size == 0 || size > 512 * 1024 {
         return Err("bad file size");
     }
-    const CAP: usize = 64 * 1024;
-    if size > CAP {
+    if size > ELF_LOAD_CAP {
         return Err("ELF too large (max 64KiB)");
     }
-    let mut buf = [0u8; CAP];
+    let buf = elf_load_buf();
     let n = crate::fs::ext2::read_file(ino, 0, &mut buf[..size])?;
     crate::elf::load_bytes(&buf[..n], argv0)
 }
@@ -1143,12 +1156,10 @@ fn run_elf_from_fs(path: &str) -> Result<(), &'static str> {
     if size == 0 || size > 512 * 1024 {
         return Err("bad file size");
     }
-    // Stack buffer for small ELFs (hello is tiny). Cap 64 KiB.
-    const CAP: usize = 64 * 1024;
-    if size > CAP {
+    if size > ELF_LOAD_CAP {
         return Err("ELF too large (max 64KiB)");
     }
-    let mut buf = [0u8; CAP];
+    let buf = elf_load_buf();
     let n = crate::fs::ext2::read_file(ino, 0, &mut buf[..size])?;
     exec_elf_bytes(&buf[..n], path)
 }
