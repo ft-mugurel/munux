@@ -207,9 +207,38 @@ fn load_segment(file: &[u8], ph: &Phdr) -> Result<u64, &'static str> {
     Ok(ph.p_memsz)
 }
 
-/// Build a Linux-like initial stack: argc, argv[], NULL, envp NULL.
+/// Minimal ELF info for the initial auxiliary vector (Linux process startup).
+#[derive(Clone, Copy)]
+pub struct AuxInfo {
+    pub entry: u64,
+    /// Virtual address of the program header table in the loaded image (0 if unknown).
+    pub phdr: u64,
+    pub phent: u64,
+    pub phnum: u64,
+}
+
+// Linux uapi/linux/auxvec.h
+const AT_NULL: u64 = 0;
+const AT_PHDR: u64 = 3;
+const AT_PHENT: u64 = 4;
+const AT_PHNUM: u64 = 5;
+const AT_PAGESZ: u64 = 6;
+const AT_BASE: u64 = 7;
+const AT_FLAGS: u64 = 8;
+const AT_ENTRY: u64 = 9;
+const AT_UID: u64 = 11;
+const AT_EUID: u64 = 12;
+const AT_GID: u64 = 13;
+const AT_EGID: u64 = 14;
+const AT_SECURE: u64 = 23;
+const AT_RANDOM: u64 = 25;
+
+/// Build a Linux-like initial stack:
+/// `[argc][argv…][NULL][envp NULL][auxv… AT_NULL][strings][16B random]`
+///
 /// `argv` strings are copied onto the stack (max 4 args, 64 bytes each).
-pub fn setup_stack(argv: &[&str]) -> Result<u64, &'static str> {
+/// Auxv is required by musl's `__init_libc` (it walks pairs until `AT_NULL`).
+pub fn setup_stack(argv: &[&str], aux: &AuxInfo) -> Result<u64, &'static str> {
     let stack_base = USER_STACK_TOP - USER_STACK_PAGES * FRAME_SIZE as u64;
     map_user_range(stack_base, USER_STACK_TOP)?;
     for i in 0..USER_STACK_PAGES {
@@ -221,9 +250,19 @@ pub fn setup_stack(argv: &[&str]) -> Result<u64, &'static str> {
         return Err("elf: empty argv");
     }
 
-    // Place argument strings just below USER_STACK_TOP
-    let mut str_ptrs = [0u64; 4];
+    // High end: 16 bytes for AT_RANDOM, then argv strings.
     let mut top = USER_STACK_TOP;
+    top -= 16;
+    top &= !0xF;
+    let random_ptr = top;
+    // Pseudo-random enough for stack canaries / musl (not crypto).
+    let rnd: [u8; 16] = [
+        0x6d, 0x75, 0x6e, 0x75, 0x78, 0xa5, 0x5a, 0xc3, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde,
+        0xf0,
+    ];
+    write_user(random_ptr, &rnd)?;
+
+    let mut str_ptrs = [0u64; 4];
     for i in 0..narg {
         let bytes = argv[i].as_bytes();
         let len = core::cmp::min(bytes.len(), 64);
@@ -234,21 +273,58 @@ pub fn setup_stack(argv: &[&str]) -> Result<u64, &'static str> {
         str_ptrs[i] = top;
     }
 
-    // Pointer vector + argc: [argc][argv0]...[argvN][NULL][env NULL]
-    // (narg + 3) qwords: argc, narg pointers, NULL, env NULL
-    let words = narg + 3;
+    // Aux vector entries: (type, value) pairs, terminated by (AT_NULL, 0).
+    // Count pairs including AT_NULL.
+    let mut aux_pairs: [(u64, u64); 16] = [(0, 0); 16];
+    let mut naux = 0usize;
+    let push_aux = |pairs: &mut [(u64, u64); 16], n: &mut usize, t: u64, v: u64| {
+        if *n < pairs.len() {
+            pairs[*n] = (t, v);
+            *n += 1;
+        }
+    };
+    push_aux(&mut aux_pairs, &mut naux, AT_PAGESZ, FRAME_SIZE as u64);
+    if aux.phdr != 0 {
+        push_aux(&mut aux_pairs, &mut naux, AT_PHDR, aux.phdr);
+        push_aux(&mut aux_pairs, &mut naux, AT_PHENT, aux.phent);
+        push_aux(&mut aux_pairs, &mut naux, AT_PHNUM, aux.phnum);
+    }
+    push_aux(&mut aux_pairs, &mut naux, AT_BASE, 0); // static ET_EXEC
+    push_aux(&mut aux_pairs, &mut naux, AT_FLAGS, 0);
+    push_aux(&mut aux_pairs, &mut naux, AT_ENTRY, aux.entry);
+    push_aux(&mut aux_pairs, &mut naux, AT_UID, 0);
+    push_aux(&mut aux_pairs, &mut naux, AT_EUID, 0);
+    push_aux(&mut aux_pairs, &mut naux, AT_GID, 0);
+    push_aux(&mut aux_pairs, &mut naux, AT_EGID, 0);
+    push_aux(&mut aux_pairs, &mut naux, AT_SECURE, 0);
+    push_aux(&mut aux_pairs, &mut naux, AT_RANDOM, random_ptr);
+    push_aux(&mut aux_pairs, &mut naux, AT_NULL, 0);
+
+    // Words below strings:
+    // argc + narg argv ptrs + argv NULL + env NULL + naux*(type,value)
+    let words = 1 + narg + 1 + 1 + naux * 2;
     let mut sp = top - (words as u64) * 8;
     sp &= !0xF;
 
-    // argc
-    write_user(sp, &(narg as u64).to_le_bytes())?;
+    let mut off = 0u64;
+    write_user(sp + off, &(narg as u64).to_le_bytes())?;
+    off += 8;
     for i in 0..narg {
-        write_user(sp + 8 * (i as u64 + 1), &str_ptrs[i].to_le_bytes())?;
+        write_user(sp + off, &str_ptrs[i].to_le_bytes())?;
+        off += 8;
     }
-    // argv NULL terminator
-    write_user(sp + 8 * (narg as u64 + 1), &0u64.to_le_bytes())?;
-    // envp NULL
-    write_user(sp + 8 * (narg as u64 + 2), &0u64.to_le_bytes())?;
+    write_user(sp + off, &0u64.to_le_bytes())?; // argv NULL
+    off += 8;
+    write_user(sp + off, &0u64.to_le_bytes())?; // envp NULL
+    off += 8;
+    for i in 0..naux {
+        let (t, v) = aux_pairs[i];
+        write_user(sp + off, &t.to_le_bytes())?;
+        off += 8;
+        write_user(sp + off, &v.to_le_bytes())?;
+        off += 8;
+    }
+    let _ = off;
 
     Ok(sp)
 }
@@ -268,6 +344,8 @@ pub fn load_bytes_argv(file: &[u8], argv: &[&str]) -> Result<LoadedImage, &'stat
 
     let mut total = 0u64;
     let mut image_end = 0u64;
+    // VA of program headers once loaded (segment that contains e_phoff).
+    let mut phdr_va = 0u64;
     for i in 0..ehdr.e_phnum {
         let ph = read_phdr(file, ehdr.e_phoff, i)?;
         if ph.p_type != PT_LOAD {
@@ -281,6 +359,16 @@ pub fn load_bytes_argv(file: &[u8], argv: &[&str]) -> Result<LoadedImage, &'stat
         if vend > image_end {
             image_end = vend;
         }
+        // If this LOAD covers the file offset of the phdr table, compute its VA.
+        let ph_end = ehdr.e_phoff.saturating_add(
+            (ehdr.e_phnum as u64).saturating_mul(ehdr.e_phentsize as u64),
+        );
+        if phdr_va == 0
+            && ehdr.e_phoff >= ph.p_offset
+            && ph_end <= ph.p_offset.saturating_add(ph.p_filesz)
+        {
+            phdr_va = ph.p_vaddr.saturating_add(ehdr.e_phoff - ph.p_offset);
+        }
     }
     if total == 0 {
         return Err("elf: no PT_LOAD segments");
@@ -292,7 +380,13 @@ pub fn load_bytes_argv(file: &[u8], argv: &[&str]) -> Result<LoadedImage, &'stat
         return Err("elf: bad brk start");
     }
 
-    let stack_top = setup_stack(argv)?;
+    let aux = AuxInfo {
+        entry: ehdr.e_entry,
+        phdr: phdr_va,
+        phent: ehdr.e_phentsize as u64,
+        phnum: ehdr.e_phnum as u64,
+    };
+    let stack_top = setup_stack(argv, &aux)?;
     Ok(LoadedImage {
         entry: ehdr.e_entry,
         stack_top,

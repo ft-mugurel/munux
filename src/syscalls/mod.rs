@@ -32,6 +32,7 @@ pub mod num {
     pub const BRK: u64 = 12;
     pub const MMAP: u64 = 9;
     pub const MUNMAP: u64 = 11;
+    pub const SET_TID_ADDRESS: u64 = 218; // musl crt TLS/thread exit hook
     pub const OPENAT: u64 = 257; // planned (modern libc)
 }
 
@@ -282,6 +283,7 @@ pub extern "C" fn syscall_dispatch(
         // our entry stub; anonymous maps require offset 0 (passed as 0 here).
         num::MMAP => sys_mmap(a1, a2, a3, a4, a5, 0),
         num::MUNMAP => sys_munmap(a1, a2),
+        num::SET_TID_ADDRESS => sys_set_tid_address(a1),
         num::EXIT | num::EXIT_GROUP => {
             let status = a1 as i32;
             // Clear dying process TLS before switching to parent.
@@ -364,6 +366,16 @@ fn sys_munmap(addr: u64, length: u64) -> u64 {
         Ok(()) => 0,
         Err(e) => errno::neg(e),
     }
+}
+
+/// Linux set_tid_address(2) — record clear_child_tid pointer; return tid.
+///
+/// Musl calls this during crt init. We do not yet clear `*tidptr` on exit
+/// (no robust futex waiters); returning the process id is enough for single-
+/// threaded static binaries.
+fn sys_set_tid_address(_tidptr: u64) -> u64 {
+    // Optionally validate user pointer later; musl always passes a valid TLS slot.
+    crate::process::getpid() as u64
 }
 
 // Linux arch/x86/include/uapi/asm/prctl.h

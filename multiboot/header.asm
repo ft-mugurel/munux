@@ -136,6 +136,17 @@ long_mode_start:
 	mov fs, ax
 	mov gs, ax
 
+	; Enable SSE (musl/crt uses movq xmm / movaps). Without this, userland
+	; hits #UD on the first SSE insn during libc TLS init.
+	; CR0: clear EM (bit2), set MP (bit1). CR4: OSFXSR|OSXMMEXCPT (bits 9–10).
+	mov rax, cr0
+	and ax, 0xFFFB
+	or ax, 0x2
+	mov cr0, rax
+	mov rax, cr4
+	or rax, (1 << 9) | (1 << 10)
+	mov cr4, rax
+
 	mov rsp, KLOAD + (kstack_top - $$)
 	xor rbp, rbp
 

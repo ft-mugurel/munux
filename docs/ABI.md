@@ -44,6 +44,7 @@ Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.
 | 11 | `munmap` | **done** (exact whole-region unmap) |
 | 12 | `brk` | **done** (program break / heap grow; per-process; Linux return = break addr) |
 | 158 | `arch_prctl` | **done** (`ARCH_SET/GET_FS`, `ARCH_SET/GET_GS`; per-process + CPU MSRs) |
+| 218 | `set_tid_address` | **done** (return pid; clear_child_tid on exit not yet) |
 | 79 | `getcwd` | **done** (per-process cwd) |
 | 80 | `chdir` | **done** (per-process cwd) |
 | 110 | `getppid` | **done** |
