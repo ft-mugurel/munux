@@ -40,6 +40,8 @@ Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.
 | 60 | `exit` | **done** (zombie + return to parent) |
 | 61 | `wait4` | **done** (reap; schedules Ready children) |
 | 63 | `uname` | **done** (struct utsname; sysname=munux, machine=x86_64) |
+| 9 | `mmap` | **done** (anonymous `MAP_PRIVATE` only; kernel VA in `0x5000_0000..0x6000_0000`) |
+| 11 | `munmap` | **done** (exact whole-region unmap) |
 | 12 | `brk` | **done** (program break / heap grow; per-process; Linux return = break addr) |
 | 158 | `arch_prctl` | **done** (`ARCH_SET/GET_FS`, `ARCH_SET/GET_GS`; per-process + CPU MSRs) |
 | 79 | `getcwd` | **done** (per-process cwd) |
@@ -117,7 +119,7 @@ Cooperative model (no preemptive multi-process scheduler, no private page tables
 
 Numbers alone are **not** enough. Also needed over time:
 
-- Many more syscalls (`mmap`/`munmap`, `set_tid_address`, …)
+- Many more syscalls (`mprotect`, file-backed `mmap`, `set_tid_address`, …)
 - Full pointer validation and signal/`rt_sigreturn` paths
 - ELF aux vector completeness for dynamic linker (later)
 - Correct `errno` coverage for each call

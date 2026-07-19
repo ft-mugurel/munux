@@ -30,6 +30,8 @@ pub mod num {
     pub const GETDENTS64: u64 = 217;
     pub const ARCH_PRCTL: u64 = 158; // planned (musl TLS)
     pub const BRK: u64 = 12;
+    pub const MMAP: u64 = 9;
+    pub const MUNMAP: u64 = 11;
     pub const OPENAT: u64 = 257; // planned (modern libc)
 }
 
@@ -245,8 +247,8 @@ pub extern "C" fn syscall_dispatch(
     a1: u64,
     a2: u64,
     a3: u64,
-    _a4: u64,
-    _a5: u64,
+    a4: u64,
+    a5: u64,
 ) -> u64 {
     // Never run kernel code with a user TLS base in FS/GS. User SET_FS stays
     // only on the PCB until we restore it for sysret (see end of this fn).
@@ -276,6 +278,10 @@ pub extern "C" fn syscall_dispatch(
         num::UNAME => sys_uname(a1),
         num::ARCH_PRCTL => sys_arch_prctl(a1, a2),
         num::BRK => sys_brk(a1),
+        // mmap(addr, len, prot, flags, fd) — offset (6th arg) not passed by
+        // our entry stub; anonymous maps require offset 0 (passed as 0 here).
+        num::MMAP => sys_mmap(a1, a2, a3, a4, a5, 0),
+        num::MUNMAP => sys_munmap(a1, a2),
         num::EXIT | num::EXIT_GROUP => {
             let status = a1 as i32;
             // Clear dying process TLS before switching to parent.
@@ -342,6 +348,22 @@ fn sys_uname(buf_ptr: u64) -> u64 {
 /// break (Linux rejects 0 as below `start_brk`).
 fn sys_brk(new_brk: u64) -> u64 {
     crate::process::proc_brk(new_brk)
+}
+
+/// Linux mmap(2) — anonymous private maps only for now.
+fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> u64 {
+    match crate::process::proc_mmap(addr, length, prot, flags, fd, offset) {
+        Ok(va) => va,
+        Err(e) => errno::neg(e),
+    }
+}
+
+/// Linux munmap(2) — unmap a whole region previously returned by mmap.
+fn sys_munmap(addr: u64, length: u64) -> u64 {
+    match crate::process::proc_munmap(addr, length) {
+        Ok(()) => 0,
+        Err(e) => errno::neg(e),
+    }
 }
 
 // Linux arch/x86/include/uapi/asm/prctl.h
@@ -813,6 +835,9 @@ fn sys_execve(path_ptr: u64, argv_ptr: u64, _envp: u64) -> u64 {
         Err(_) => return errno::neg(errno::ENOENT),
     };
 
+    // New image: drop old anonymous maps before replacing metadata.
+    crate::process::clear_mmaps();
+
     let _ = crate::process::with_current(|p| {
         p.set_name(s0);
         p.user_rip = image.entry;
@@ -906,6 +931,12 @@ fn load_exec_image(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage,
     {
         return load(crate::embedded_brktest::BRKTEST_ELF);
     }
+    if path == "mmaptest"
+        || path == "/bin/mmaptest"
+        || path.ends_with("/mmaptest")
+    {
+        return load(crate::embedded_mmaptest::MMAPTEST_ELF);
+    }
     let _ = argv0;
     Err("ENOENT")
 }
@@ -994,6 +1025,7 @@ fn enter_and_wait_opts(entry: u64, stack_top: u64, brk_start: u64, label: &str, 
     ensure_kstack_base();
 
     // Program break for this image (heap starts empty at brk_start).
+    crate::process::clear_mmaps();
     crate::process::set_brk_start(brk_start);
 
     if !quiet {

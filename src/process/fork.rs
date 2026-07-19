@@ -28,19 +28,22 @@ pub fn fork_from_user(user_rip: u64, user_rsp: u64, user_rflags: u64) -> Result<
     let parent_idx = table::current_index();
     let parent_pid = table::current_pid();
 
-    let (uid, heap_base, heap_size, cwd, fs_base, gs_base) = match table::with_current(|p| {
-        (
-            p.uid,
-            p.heap_base,
-            p.heap_size,
-            p.cwd_inode,
-            p.fs_base,
-            p.gs_base,
-        )
-    }) {
-        Some(x) => x,
-        None => return Err(-1),
-    };
+    let (uid, heap_base, heap_size, cwd, fs_base, gs_base, mmaps, mmap_bump) =
+        match table::with_current(|p| {
+            (
+                p.uid,
+                p.heap_base,
+                p.heap_size,
+                p.cwd_inode,
+                p.fs_base,
+                p.gs_base,
+                p.mmaps,
+                p.mmap_bump,
+            )
+        }) {
+            Some(x) => x,
+            None => return Err(-1),
+        };
 
     let child_idx = match table::alloc_slot() {
         Some(i) => i,
@@ -85,6 +88,9 @@ pub fn fork_from_user(user_rip: u64, user_rsp: u64, user_rflags: u64) -> Result<
         p.user_rax = 0; // child sees fork return 0
         p.stack_base = stack_base;
         p.stack_size = stack_size;
+        // Shared AS: inherit mmap bookkeeping (pages already mapped).
+        p.mmaps = mmaps;
+        p.mmap_bump = mmap_bump;
         p.set_name("forked");
     });
 

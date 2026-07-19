@@ -9,6 +9,26 @@ pub const MAX_PROCESSES: usize = 16;
 pub const MAX_CHILDREN: usize = 8;
 pub const PROC_SIG_QUEUE: usize = 16;
 pub const MAX_SIGNALS: usize = 32;
+/// Max anonymous `mmap` regions tracked per process.
+pub const MAX_MMAPS: usize = 16;
+
+/// One anonymous mmap region (page-aligned addr/len).
+#[derive(Clone, Copy)]
+pub struct MmapRegion {
+    pub used: bool,
+    pub addr: u64,
+    pub len: u64,
+}
+
+impl MmapRegion {
+    pub const fn empty() -> Self {
+        Self {
+            used: false,
+            addr: 0,
+            len: 0,
+        }
+    }
+}
 
 /// Process status.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -93,6 +113,11 @@ pub struct Process {
     pub heap_base: u64,
     pub heap_size: u64,
 
+    /// Anonymous mmap regions (Linux mmap MAP_ANONYMOUS).
+    pub mmaps: [MmapRegion; MAX_MMAPS],
+    /// Next free VA for kernel-chosen mmap addresses (0 → default base).
+    pub mmap_bump: u64,
+
     /// Current working directory (ext2 inode). Each process has its own pwd.
     pub cwd_inode: u32,
 
@@ -136,6 +161,8 @@ impl Process {
             stack_size: 0,
             heap_base: 0,
             heap_size: 0,
+            mmaps: [MmapRegion::empty(); MAX_MMAPS],
+            mmap_bump: 0,
             cwd_inode: 2, // ext2 root
             fs_base: 0,
             gs_base: 0,
