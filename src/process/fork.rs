@@ -52,6 +52,9 @@ pub fn fork_from_user(user_rip: u64, user_rsp: u64, user_rflags: u64) -> Result<
         &mut child_pid,
     );
 
+    // Per-process FDs: child gets a copy of parent's open table.
+    crate::fd::clone_table(parent_idx, child_idx);
+
     // Copy user stack into a private VA range so parent/child do not clobber
     // each other under a shared address space.
     let (child_rsp, stack_base, stack_size) =

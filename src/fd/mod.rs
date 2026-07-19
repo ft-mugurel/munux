@@ -1,9 +1,13 @@
-//! File descriptors (U1–U4): console, files, directories + getdents64.
+//! File descriptors (U1–U4 + per-process tables).
+//!
+//! Each process slot has its own [`FdTable`]. `fork` / `begin_user_task` clone
+//! the parent's table; `open`/`close` affect only the current process.
 
 use crate::console;
 use crate::fs;
 use crate::fs::ext2;
 use crate::interrupts::keyboard::init as kbd;
+use crate::process::pcb::MAX_PROCESSES;
 
 pub const FD_MAX: usize = 32;
 
@@ -86,6 +90,7 @@ impl File {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct FdTable {
     entries: [File; FD_MAX],
 }
@@ -104,6 +109,18 @@ impl FdTable {
         for i in 3..FD_MAX {
             self.entries[i] = File::closed();
         }
+    }
+
+    /// Close every entry (process exit / slot free).
+    pub fn close_all(&mut self) {
+        for i in 0..FD_MAX {
+            self.entries[i] = File::closed();
+        }
+    }
+
+    /// Linux-like: copy open FDs (independent offsets after clone).
+    pub fn clone_from(&mut self, other: &FdTable) {
+        *self = *other;
     }
 
     pub fn get(&self, fd: usize) -> Option<&File> {
@@ -282,13 +299,17 @@ pub enum FdError {
     Inval,
 }
 
-static mut CURRENT: FdTable = FdTable::new();
+/// One FD table per process table slot (same index as PCB).
+static mut TABLES: [FdTable; MAX_PROCESSES] = [FdTable::new(); MAX_PROCESSES];
 static mut READY: bool = false;
 
 pub fn init() {
     unsafe {
-        let t = &mut *core::ptr::addr_of_mut!(CURRENT);
-        t.install_stdio();
+        for i in 0..MAX_PROCESSES {
+            TABLES[i] = FdTable::new();
+        }
+        // kinit (slot 0) gets stdio; children inherit via clone.
+        TABLES[0].install_stdio();
         READY = true;
     }
 }
@@ -297,11 +318,37 @@ pub fn is_ready() -> bool {
     unsafe { READY }
 }
 
+fn table_mut(slot: usize) -> &'static mut FdTable {
+    let i = if slot < MAX_PROCESSES { slot } else { 0 };
+    unsafe { &mut *core::ptr::addr_of_mut!(TABLES[i]) }
+}
+
+/// Operate on the current process's FD table.
 pub fn with_current<F, R>(f: F) -> R
 where
     F: FnOnce(&mut FdTable) -> R,
 {
-    unsafe { f(&mut *core::ptr::addr_of_mut!(CURRENT)) }
+    let idx = crate::process::current_index();
+    f(table_mut(idx))
+}
+
+/// Clone parent's open FDs into a new child process slot (after PCB alloc).
+pub fn clone_table(parent_idx: usize, child_idx: usize) {
+    if parent_idx >= MAX_PROCESSES || child_idx >= MAX_PROCESSES {
+        return;
+    }
+    unsafe {
+        let parent = *core::ptr::addr_of!(TABLES[parent_idx]);
+        TABLES[child_idx].clone_from(&parent);
+    }
+}
+
+/// Reset FD table when a process slot is freed.
+pub fn clear_table(slot: usize) {
+    if slot >= MAX_PROCESSES {
+        return;
+    }
+    table_mut(slot).close_all();
 }
 
 pub fn open_count() -> usize {

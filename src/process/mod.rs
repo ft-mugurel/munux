@@ -19,7 +19,9 @@ pub use sys::{
     begin_user_task, exit, exit_user, getpid, getppid, getuid, kill, reap_any_child, setuid,
     signal, wait, waitpid,
 };
-pub use table::{current_pid, for_each_process, process_count, with_current};
+pub use table::{
+    current_index, current_pid, for_each_process, process_count, with_current,
+};
 
 /// Per-process working directory (ext2 inode).
 pub fn get_cwd_inode() -> u32 {

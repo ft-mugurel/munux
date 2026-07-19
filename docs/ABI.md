@@ -79,7 +79,7 @@ Common errno values we use:
 | 2 | stderr | VGA console (`write`) |
 
 - Max FDs per table: **32**.
-- Still **one global FD table** (shared). True per-process FD tables come with full `fork` (U6). Stdio works for cooperative single-user tasks.
+- **Per-process FD tables**: each PCB slot has its own table. `fork` / user-task spawn **clone** the parent's open FDs (independent offsets afterward). Closing an FD in a child does not affect the parent.
 
 ### `read` on stdin
 
@@ -96,7 +96,7 @@ Common errno values we use:
 | `run` / `user` | spawn child PCB, switch current → child, enter ring 3 |
 | `getpid` | current process pid |
 | `getppid` | parent pid (`0` if none) |
-| `fork` | new PCB; child gets **private stack copy** and `rax=0`; parent stays current. Cooperative: child is run to completion **inside** `fork` before parent resumes (then child is a zombie for `wait4`) |
+| `fork` | new PCB; child gets **private stack copy**, **cloned FD table**, and `rax=0`; parent stays current. Cooperative: child runs to completion **inside** `fork` before parent resumes |
 | `execve` | load ELF into current process (path from FS or embedded); argv/envp ignored; on success never returns to old image. Kernel snapshots parent text/data so shared-AS `execve` does not destroy the waiting parent |
 | `exit` / `exit_group` | mark **zombie**, switch current → parent, `return_from_user` (nested enter stack) |
 | `wait4` | reap zombie; can also run leftover Ready children; `WNOHANG` skips schedule; `-ECHILD` if no children |
@@ -118,7 +118,7 @@ Numbers alone are **not** enough. Also needed over time:
 - Full pointer validation and signal/`rt_sigreturn` paths
 - ELF aux vector completeness for dynamic linker (later)
 - Correct `errno` coverage for each call
-- Per-process FD tables and real page-table isolation on fork
+- Real page-table isolation / COW on fork
 
 But using **wrong numbers guarantees** Linux binaries will never work — so munux uses Linux numbers from this version forward.
 
@@ -136,3 +136,4 @@ But using **wrong numbers guarantees** Linux binaries will never work — so mun
 | 0.2+U6 | `fork` + `execve`; wait schedules Ready children; nested enter |
 | 0.2+U7 | Freestanding `/bin/sh` (prompt, builtins, fork/exec/wait) |
 | 0.2+U8 | Boot handoff to `/bin/sh`; kernel shell is debug fallback |
+| 0.2+FD | Per-process FD tables (clone on fork/spawn) |

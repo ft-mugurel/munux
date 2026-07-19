@@ -114,6 +114,7 @@ pub fn free_index(i: usize) {
     if i >= MAX_PROCESSES {
         return;
     }
+    crate::fd::clear_table(i);
     unsafe {
         *slot_mut(i) = Process::empty();
     }

@@ -186,6 +186,9 @@ pub fn begin_user_task(name: &str) -> Result<Pid, i32> {
         &mut child_pid,
     );
 
+    // Inherit open FDs from the launcher (kinit / shell).
+    crate::fd::clone_table(parent_idx, child_idx);
+
     let _ = table::with_pid(child_pid, |p| {
         p.cwd_inode = cwd;
         p.state = ProcessState::Running;
