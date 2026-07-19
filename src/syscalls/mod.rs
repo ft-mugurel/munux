@@ -17,6 +17,8 @@ pub mod num {
     pub const WRITE: u64 = 1;
     pub const OPEN: u64 = 2;
     pub const CLOSE: u64 = 3;
+    pub const WRITEV: u64 = 20; // musl stdio (printf)
+    pub const IOCTL: u64 = 16; // musl TIOCGWINSZ probe
     pub const GETPID: u64 = 39;
     pub const FORK: u64 = 57;
     pub const EXECVE: u64 = 59;
@@ -31,6 +33,7 @@ pub mod num {
     pub const ARCH_PRCTL: u64 = 158; // planned (musl TLS)
     pub const BRK: u64 = 12;
     pub const MMAP: u64 = 9;
+    pub const MPROTECT: u64 = 10;
     pub const MUNMAP: u64 = 11;
     pub const SET_TID_ADDRESS: u64 = 218; // musl crt TLS/thread exit hook
     pub const OPENAT: u64 = 257; // planned (modern libc)
@@ -53,6 +56,7 @@ mod errno {
     pub const ENAMETOOLONG: i64 = 36;
     pub const EMFILE: i64 = 24;
     pub const ERANGE: i64 = 34;
+    pub const ENOTTY: i64 = 25;
 
     #[inline]
     pub fn neg(e: i64) -> u64 {
@@ -259,6 +263,8 @@ pub extern "C" fn syscall_dispatch(
     let ret = match num {
         num::READ => sys_read(a1, a2, a3),
         num::WRITE => sys_write(a1, a2, a3),
+        num::WRITEV => sys_writev(a1, a2, a3),
+        num::IOCTL => sys_ioctl(a1, a2, a3),
         num::OPEN => sys_open(a1, a2, a3),
         num::CLOSE => sys_close(a1),
         num::GETPID => crate::process::getpid() as u64,
@@ -282,6 +288,7 @@ pub extern "C" fn syscall_dispatch(
         // mmap(addr, len, prot, flags, fd) — offset (6th arg) not passed by
         // our entry stub; anonymous maps require offset 0 (passed as 0 here).
         num::MMAP => sys_mmap(a1, a2, a3, a4, a5, 0),
+        num::MPROTECT => sys_mprotect(a1, a2, a3),
         num::MUNMAP => sys_munmap(a1, a2),
         num::SET_TID_ADDRESS => sys_set_tid_address(a1),
         num::EXIT | num::EXIT_GROUP => {
@@ -356,6 +363,14 @@ fn sys_brk(new_brk: u64) -> u64 {
 fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> u64 {
     match crate::process::proc_mmap(addr, length, prot, flags, fd, offset) {
         Ok(va) => va,
+        Err(e) => errno::neg(e),
+    }
+}
+
+/// Linux mprotect(2) — change page protections on an existing mapping.
+fn sys_mprotect(addr: u64, length: u64, prot: u64) -> u64 {
+    match crate::process::proc_mprotect(addr, length, prot) {
+        Ok(()) => 0,
         Err(e) => errno::neg(e),
     }
 }
@@ -459,6 +474,9 @@ fn user_ptr_ok(buf: u64, len: u64) -> bool {
 
 fn sys_write(fd: u64, buf: u64, len: u64) -> u64 {
     let len = len.min(4096);
+    if len == 0 {
+        return 0;
+    }
     if !user_ptr_ok(buf, len) {
         return errno::neg(errno::EFAULT);
     }
@@ -467,6 +485,51 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> u64 {
         Ok(n) => n as u64,
         Err(e) => map_fd_err(e),
     }
+}
+
+/// Linux `struct iovec` — two u64 fields on x86_64.
+const IOV_SIZE: u64 = 16;
+const WRITEV_MAX: u64 = 16;
+
+/// Linux writev(2) — used by musl stdio (`printf`).
+fn sys_writev(fd: u64, iov_ptr: u64, iovcnt: u64) -> u64 {
+    if iovcnt == 0 {
+        return 0;
+    }
+    if iovcnt > WRITEV_MAX {
+        return errno::neg(errno::EINVAL);
+    }
+    let bytes = iovcnt.saturating_mul(IOV_SIZE);
+    if !user_ptr_ok(iov_ptr, bytes) {
+        return errno::neg(errno::EFAULT);
+    }
+    let mut total: u64 = 0;
+    for i in 0..iovcnt {
+        let base = unsafe {
+            core::ptr::read_volatile((iov_ptr + i * IOV_SIZE) as *const u64)
+        };
+        let len = unsafe {
+            core::ptr::read_volatile((iov_ptr + i * IOV_SIZE + 8) as *const u64)
+        };
+        if len == 0 {
+            continue;
+        }
+        let n = sys_write(fd, base, len);
+        // Negative errno?
+        if (n as i64) < 0 {
+            return if total == 0 { n } else { total };
+        }
+        total = total.saturating_add(n);
+        if n < len {
+            break; // short write
+        }
+    }
+    total
+}
+
+/// Linux ioctl(2) — stub: console is not a TTY; musl accepts ENOTTY for TIOCGWINSZ.
+fn sys_ioctl(_fd: u64, _cmd: u64, _arg: u64) -> u64 {
+    errno::neg(errno::ENOTTY)
 }
 
 fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {

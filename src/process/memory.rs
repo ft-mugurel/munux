@@ -36,13 +36,15 @@ fn page_ceil(a: u64) -> u64 {
     (a + FRAME_SIZE as u64 - 1) & !(FRAME_SIZE as u64 - 1)
 }
 
-fn prot_to_flags(prot: u64) -> u64 {
+fn prot_to_flags(prot: u64) -> Option<u64> {
     let r = prot & PROT_READ != 0;
     let w = prot & PROT_WRITE != 0;
     let x = prot & PROT_EXEC != 0;
-    match (r || x, w, x) {
+    if !r && !w && !x {
+        return None; // PROT_NONE — leave inaccessible
+    }
+    Some(match (r || x, w, x) {
         (_, true, _) => {
-            // Writable implies present+user+writable (+exec not distinct).
             if x {
                 PAGE_USER_RWX
             } else {
@@ -50,23 +52,19 @@ fn prot_to_flags(prot: u64) -> u64 {
             }
         }
         (true, false, true) => PAGE_USER_RX,
-        (true, false, false) => PAGE_USER_R,
-        // PROT_NONE or empty: still map present so faults stay rare; no write.
         _ => PAGE_USER_R,
-    }
+    })
 }
 
 fn map_anon_pages(start: u64, len: u64, page_flags: u64) -> Result<(), ()> {
     let mut v = start;
     let end = start.saturating_add(len);
     while v < end {
-        if let Some(phys) = paging::virt_to_phys(v) {
-            let page = phys & !0xFFF;
-            paging::map_page(v, pmm::PhysAddr::new(page), page_flags);
-        } else {
-            let frame = pmm::alloc_frame().ok_or(())?;
-            paging::map_page(v, frame, page_flags);
-        }
+        // Always allocate a fresh frame and install USER permissions.
+        // Reusing identity-map leaves can leave supervisor-only PTEs after a
+        // 2 MiB split (user write → #PF protection, error=0x7).
+        let frame = pmm::alloc_frame().ok_or(())?;
+        paging::map_page(v, frame, page_flags);
         unsafe {
             core::ptr::write_bytes(v as *mut u8, 0, FRAME_SIZE);
         }
@@ -152,7 +150,7 @@ pub fn proc_mmap(
     let _ = fd;
 
     let len = page_ceil(length);
-    let page_flags = prot_to_flags(prot);
+    let page_flags = prot_to_flags(prot); // None => PROT_NONE
 
     table::with_current(|p| {
         // Free slot?
@@ -173,15 +171,19 @@ pub fn proc_mmap(
             if addr == 0 || addr & (FRAME_SIZE as u64 - 1) != 0 {
                 return Err(22);
             }
-            if addr < MMAP_ARENA_BASE || addr.saturating_add(len) > MMAP_ARENA_END {
+            // Musl malloc places MAP_FIXED guards near brk (not only mmap arena).
+            let end = addr.saturating_add(len);
+            if addr < 0x1000 || end > USER_HEAP_MAX_VA {
                 return Err(12);
             }
-            // Overlap existing maps?
+            // Drop bookkeeping for any overlapping prior maps (Linux replaces).
             for i in 0..MAX_MMAPS {
                 if p.mmaps[i].used
                     && ranges_overlap(addr, len, p.mmaps[i].addr, p.mmaps[i].len)
                 {
-                    return Err(12);
+                    p.mmaps[i].used = false;
+                    p.mmaps[i].addr = 0;
+                    p.mmaps[i].len = 0;
                 }
             }
             addr
@@ -231,8 +233,28 @@ pub fn proc_mmap(
             bump
         };
 
-        if map_anon_pages(base, len, page_flags).is_err() {
-            return Err(12);
+        match page_flags {
+            Some(pf) => {
+                if map_anon_pages(base, len, pf).is_err() {
+                    return Err(12);
+                }
+            }
+            None => {
+                // PROT_NONE guard: keep the VA reserved in our table but do not
+                // tear down pages that may still be part of the brk heap.
+                // (True no-access guards can come later via mprotect.)
+                // Ensure the range exists as non-present so user faults cleanly
+                // only when it was never brk-backed; if already mapped, leave it.
+                let mut v = base;
+                let end = base.saturating_add(len);
+                while v < end {
+                    if paging::virt_to_phys(v).is_none() {
+                        // Reserve nothing — leave unmapped.
+                    }
+                    // If already mapped (brk), leave permissions as-is.
+                    v = v.wrapping_add(FRAME_SIZE as u64);
+                }
+            }
         }
 
         p.mmaps[slot].used = true;
@@ -249,7 +271,50 @@ pub fn proc_mmap(
     .unwrap_or(Err(12))
 }
 
-/// Linux `munmap` for the current process. Exact region match required (whole map).
+/// Linux `mprotect(2)` — update PTE flags for [addr, addr+len).
+pub fn proc_mprotect(addr: u64, length: u64, prot: u64) -> Result<(), i64> {
+    if addr & (FRAME_SIZE as u64 - 1) != 0 {
+        return Err(22);
+    }
+    if length == 0 {
+        return Ok(());
+    }
+    let len = page_ceil(length);
+    let end = addr.saturating_add(len);
+    if addr < 0x1000 || end > USER_HEAP_MAX_VA {
+        return Err(12);
+    }
+    match prot_to_flags(prot) {
+        None => {
+            // PROT_NONE
+            unmap_pages(addr, len);
+            Ok(())
+        }
+        Some(flags) => {
+            let mut v = addr;
+            while v < end {
+                // Remap with new flags; allocate if missing.
+                if let Some(phys) = paging::virt_to_phys(v) {
+                    let page = phys & !0xFFF;
+                    paging::map_page(v, pmm::PhysAddr::new(page), flags);
+                } else {
+                    let frame = pmm::alloc_frame().ok_or(12i64)?;
+                    paging::map_page(v, frame, flags);
+                    unsafe {
+                        core::ptr::write_bytes(v as *mut u8, 0, FRAME_SIZE);
+                    }
+                }
+                v = v.wrapping_add(FRAME_SIZE as u64);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Linux `munmap` for the current process.
+///
+/// Prefer exact tracked region; otherwise unmap the page range (Linux allows
+/// munmap of any mapped pages, including MAP_FIXED guards near brk).
 pub fn proc_munmap(addr: u64, length: u64) -> Result<(), i64> {
     if length == 0 {
         return Err(22);
@@ -269,8 +334,11 @@ pub fn proc_munmap(addr: u64, length: u64) -> Result<(), i64> {
                 return Ok(());
             }
         }
-        // Also allow munmap of a prefix/suffix later; for now exact only.
-        // Linux allows partial unmap — map partial as EINVAL for simplicity if no match.
+        // Best-effort: unmap requested pages even if not in our table.
+        if addr >= 0x1000 && addr.saturating_add(len) <= USER_HEAP_MAX_VA {
+            unmap_pages(addr, len);
+            return Ok(());
+        }
         Err(22)
     })
     .unwrap_or(Err(22))
@@ -312,15 +380,10 @@ pub fn proc_brk(new_brk: u64) -> u64 {
         if new_pg > old_pg {
             let mut v = old_pg;
             while v < new_pg {
-                // Prefer existing identity mapping; else allocate a fresh frame.
-                if let Some(phys) = paging::virt_to_phys(v) {
-                    let page = phys & !0xFFF;
-                    paging::map_page(v, pmm::PhysAddr::new(page), PAGE_USER_RW);
-                } else {
-                    match pmm::alloc_frame() {
-                        Some(frame) => paging::map_page(v, frame, PAGE_USER_RW),
-                        None => return old_brk, // OOM: no change
-                    }
+                // Fresh frames with USER|RW (avoid identity PTE without U bit).
+                match pmm::alloc_frame() {
+                    Some(frame) => paging::map_page(v, frame, PAGE_USER_RW),
+                    None => return old_brk, // OOM: no change
                 }
                 unsafe {
                     core::ptr::write_bytes(v as *mut u8, 0, FRAME_SIZE);

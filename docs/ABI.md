@@ -34,14 +34,17 @@ Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.
 | 1 | `write` | **done** (console + ext2 file FDs) |
 | 2 | `open` | **done** (files + dirs; `O_CREAT`/`O_TRUNC`/`O_WRONLY`/`O_RDWR`) |
 | 3 | `close` | **done** |
+| 16 | `ioctl` | **done** (stub: returns `-ENOTTY`; enough for musl TIOCGWINSZ probe) |
+| 20 | `writev` | **done** (musl stdio / `printf`) |
 | 39 | `getpid` | **done** (real PCB pid) |
 | 57 | `fork` | **done** (PCB + Ready child; shared AS) |
 | 59 | `execve` | **done** (load ELF; argv up to 3 strings; envp ignored) |
 | 60 | `exit` | **done** (zombie + return to parent) |
 | 61 | `wait4` | **done** (reap; schedules Ready children) |
 | 63 | `uname` | **done** (struct utsname; sysname=munux, machine=x86_64) |
-| 9 | `mmap` | **done** (anonymous `MAP_PRIVATE` only; kernel VA in `0x5000_0000..0x6000_0000`) |
-| 11 | `munmap` | **done** (exact whole-region unmap) |
+| 9 | `mmap` | **done** (anonymous `MAP_PRIVATE`; `MAP_FIXED` + `PROT_NONE` for musl guards) |
+| 10 | `mprotect` | **done** (update PTE flags / `PROT_NONE` unmap) |
+| 11 | `munmap` | **done** (tracked region or best-effort page unmap) |
 | 12 | `brk` | **done** (program break / heap grow; per-process; Linux return = break addr) |
 | 158 | `arch_prctl` | **done** (`ARCH_SET/GET_FS`, `ARCH_SET/GET_GS`; per-process + CPU MSRs) |
 | 218 | `set_tid_address` | **done** (return pid; clear_child_tid on exit not yet) |

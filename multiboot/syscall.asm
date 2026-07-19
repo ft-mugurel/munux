@@ -73,19 +73,37 @@ syscall_entry:
 	push rdi
 	push rax			; syscall number
 
-	; dispatch(num, a1, a2, a3, a4, a5)  — Linux-like regs
-	mov rdi, [rsp]			; num
-	mov rsi, [rsp + 8]		; rdi user
-	mov rdx, [rsp + 16]		; rsi user
-	mov rcx, [rsp + 24]		; rdx user
-	mov r8,  [rsp + 32]		; r10 user
-	mov r9,  [rsp + 40]		; r8 user
+	; Musl/C keep heap pointers in callee-saved regs across syscall (esp. rbp).
+	; Rust syscall_dispatch clobbers them — must save/restore.
+	push rbx
+	push rbp
+	push r12
+	push r13
+	push r14
+	push r15
+
+	; Stack layout (rsp → high):
+	; [0..40] r15..rbx, [48]=num, [56]=rdi, [64]=rsi, [72]=rdx,
+	; [80]=r10, [88]=r8, [96]=r9, [104]=rip, [112]=rflags
+	mov rdi, [rsp + 48]		; num
+	mov rsi, [rsp + 56]		; rdi user
+	mov rdx, [rsp + 64]		; rsi user
+	mov rcx, [rsp + 72]		; rdx user
+	mov r8,  [rsp + 80]		; r10 user
+	mov r9,  [rsp + 88]		; r8 user
 
 	mov rbp, rsp
 	and rsp, -16
 	call syscall_dispatch
 	mov rsp, rbp
 	; rax = return value
+
+	pop r15
+	pop r14
+	pop r13
+	pop r12
+	pop rbp
+	pop rbx
 
 	add rsp, 8			; pop num
 	pop rdi

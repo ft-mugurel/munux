@@ -13,8 +13,9 @@ pub mod table;
 
 pub use fork::{fork, fork_from_user, switch_to, take_ready_child, UserFrame};
 pub use memory::{
-    clear_mmaps, current_brk, proc_brk, proc_mmap, proc_munmap, proc_read_mem, proc_sbrk,
-    proc_write_mem, set_brk_start, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, PROT_READ, PROT_WRITE,
+    clear_mmaps, current_brk, proc_brk, proc_mmap, proc_mprotect, proc_munmap, proc_read_mem,
+    proc_sbrk, proc_write_mem, set_brk_start, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, PROT_READ,
+    PROT_WRITE,
 };
 pub use pcb::{Pid, Process, ProcessState, Uid, MAX_PROCESSES};
 pub use socket::{socket_close, socket_connect, socket_create, socket_recv, socket_send};
