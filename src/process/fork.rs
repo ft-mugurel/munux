@@ -28,11 +28,19 @@ pub fn fork_from_user(user_rip: u64, user_rsp: u64, user_rflags: u64) -> Result<
     let parent_idx = table::current_index();
     let parent_pid = table::current_pid();
 
-    let (uid, heap_base, heap_size, cwd) =
-        match table::with_current(|p| (p.uid, p.heap_base, p.heap_size, p.cwd_inode)) {
-            Some(x) => x,
-            None => return Err(-1),
-        };
+    let (uid, heap_base, heap_size, cwd, fs_base, gs_base) = match table::with_current(|p| {
+        (
+            p.uid,
+            p.heap_base,
+            p.heap_size,
+            p.cwd_inode,
+            p.fs_base,
+            p.gs_base,
+        )
+    }) {
+        Some(x) => x,
+        None => return Err(-1),
+    };
 
     let child_idx = match table::alloc_slot() {
         Some(i) => i,
@@ -68,6 +76,8 @@ pub fn fork_from_user(user_rip: u64, user_rsp: u64, user_rflags: u64) -> Result<
 
     let _ = table::with_pid(child_pid, |p| {
         p.cwd_inode = cwd;
+        p.fs_base = fs_base;
+        p.gs_base = gs_base;
         p.state = ProcessState::Ready;
         p.user_rip = user_rip;
         p.user_rsp = child_rsp;

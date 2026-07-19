@@ -168,6 +168,8 @@ fn ensure_kstack_base() {
 /// Enter user with a private syscall stack for nested sessions.
 fn enter_user_nested(entry: u64, user_rsp: u64, user_rax: u64) {
     push_syscall_stack();
+    // Ensure this process's TLS bases are in the CPU before ring 3.
+    crate::process::apply_tls();
     unsafe {
         enter_user_mode(entry, user_rsp, user_rax);
     }
@@ -253,6 +255,7 @@ pub extern "C" fn syscall_dispatch(
         num::CHDIR => sys_chdir(a1),
         num::GETDENTS64 => sys_getdents64(a1, a2, a3),
         num::UNAME => sys_uname(a1),
+        num::ARCH_PRCTL => sys_arch_prctl(a1, a2),
         num::EXIT | num::EXIT_GROUP => {
             let status = a1 as i32;
             crate::process::exit_user(status);
@@ -302,6 +305,64 @@ fn sys_uname(buf_ptr: u64) -> u64 {
         core::ptr::copy_nonoverlapping(uts.as_ptr(), buf_ptr as *mut u8, UTS_SIZE);
     }
     0
+}
+
+// Linux arch/x86/include/uapi/asm/prctl.h
+const ARCH_SET_GS: u64 = 0x1001;
+const ARCH_SET_FS: u64 = 0x1002;
+const ARCH_GET_FS: u64 = 0x1003;
+const ARCH_GET_GS: u64 = 0x1004;
+
+/// Linux arch_prctl(2) — set/get FS/GS base for TLS.
+fn sys_arch_prctl(code: u64, arg: u64) -> u64 {
+    match code {
+        ARCH_SET_FS => {
+            // arg = new FS base (user virtual address; 0 clears)
+            if arg != 0 && !user_ptr_ok(arg, 1) {
+                // Allow any canonical-ish user VA in our ranges; 1-byte check.
+                // Some bases point into TLS just past mapped pages — still accept
+                // if in broad user range.
+                if arg < 0x1000 || arg >= 0x0000_8000_0000_0000 {
+                    return errno::neg(errno::EFAULT);
+                }
+            }
+            crate::process::set_fs_base(arg);
+            0
+        }
+        ARCH_SET_GS => {
+            if arg != 0 && (arg < 0x1000 || arg >= 0x0000_8000_0000_0000) {
+                return errno::neg(errno::EFAULT);
+            }
+            crate::process::set_gs_base(arg);
+            0
+        }
+        ARCH_GET_FS => {
+            if !user_ptr_ok(arg, 8) {
+                return errno::neg(errno::EFAULT);
+            }
+            let v = crate::process::get_fs_base_saved();
+            unsafe {
+                core::ptr::write_volatile(arg as *mut u64, v);
+            }
+            0
+        }
+        ARCH_GET_GS => {
+            if !user_ptr_ok(arg, 8) {
+                return errno::neg(errno::EFAULT);
+            }
+            let v = crate::process::get_gs_base_saved();
+            unsafe {
+                core::ptr::write_volatile(arg as *mut u64, v);
+            }
+            0
+        }
+        _ => {
+            console::print("syscall: arch_prctl unknown code=");
+            console::write_hex64(code);
+            console::println("");
+            errno::neg(errno::EINVAL)
+        }
+    }
 }
 
 fn user_ptr_ok(buf: u64, len: u64) -> bool {
@@ -783,6 +844,12 @@ fn load_exec_image(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage,
     if path == "uname" || path == "/bin/uname" || path.ends_with("/uname") {
         return load(crate::embedded_uname::UNAME_ELF);
     }
+    if path == "archprctl"
+        || path == "/bin/archprctl"
+        || path.ends_with("/archprctl")
+    {
+        return load(crate::embedded_archprctl::ARCHPRCTL_ELF);
+    }
     let _ = argv0;
     Err("ENOENT")
 }
@@ -882,6 +949,7 @@ fn enter_and_wait_opts(entry: u64, stack_top: u64, label: &str, quiet: bool) {
         console::println("");
     }
 
+    crate::process::apply_tls();
     unsafe {
         enter_user_mode(entry, stack_top, 0);
     }

@@ -96,6 +96,10 @@ pub struct Process {
     /// Current working directory (ext2 inode). Each process has its own pwd.
     pub cwd_inode: u32,
 
+    /// User FS/GS base (TLS) — applied on context switch / enter user.
+    pub fs_base: u64,
+    pub gs_base: u64,
+
     pub ctx: CpuContext,
 
     /// Saved user ring-3 context (U6 fork / cooperative schedule).
@@ -133,6 +137,8 @@ impl Process {
             heap_base: 0,
             heap_size: 0,
             cwd_inode: 2, // ext2 root
+            fs_base: 0,
+            gs_base: 0,
             ctx: CpuContext::zero(),
             user_rip: 0,
             user_rsp: 0,

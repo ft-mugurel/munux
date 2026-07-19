@@ -44,6 +44,8 @@ pub fn set_current_index(i: usize) {
     unsafe {
         CURRENT = i;
     }
+    // Restore TLS bases for the newly current process.
+    crate::process::apply_tls();
 }
 
 pub fn current_pid() -> Pid {
