@@ -21,6 +21,7 @@ pub mod embedded_forktest;
 pub mod embedded_hello;
 pub mod embedded_ls;
 pub mod embedded_sh;
+pub mod embedded_uname;
 pub mod embedded_vi;
 pub mod fd;
 pub mod fs;

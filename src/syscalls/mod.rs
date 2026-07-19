@@ -26,7 +26,10 @@ pub mod num {
     pub const CHDIR: u64 = 80;
     pub const GETPPID: u64 = 110;
     pub const EXIT_GROUP: u64 = 231; // musl/glibc often use this
+    pub const UNAME: u64 = 63;
     pub const GETDENTS64: u64 = 217;
+    pub const ARCH_PRCTL: u64 = 158; // planned (musl TLS)
+    pub const BRK: u64 = 12; // planned (heap)
     pub const OPENAT: u64 = 257; // planned (modern libc)
 }
 
@@ -249,6 +252,7 @@ pub extern "C" fn syscall_dispatch(
         num::GETCWD => sys_getcwd(a1, a2),
         num::CHDIR => sys_chdir(a1),
         num::GETDENTS64 => sys_getdents64(a1, a2, a3),
+        num::UNAME => sys_uname(a1),
         num::EXIT | num::EXIT_GROUP => {
             let status = a1 as i32;
             crate::process::exit_user(status);
@@ -256,8 +260,48 @@ pub extern "C" fn syscall_dispatch(
                 return_from_user();
             }
         }
-        _ => errno::neg(errno::ENOSYS),
+        _ => {
+            // Always log so musl/static binary bring-up is not blind.
+            console::print("syscall: ENOSYS n=");
+            console::write_u64(num);
+            console::println(" (-38)");
+            errno::neg(errno::ENOSYS)
+        }
     }
+}
+
+/// Linux `struct utsname` — six fields of 65 bytes each (incl. Linux domainname).
+const UTS_LEN: usize = 65;
+const UTS_NFIELD: usize = 6;
+const UTS_SIZE: usize = UTS_LEN * UTS_NFIELD; // 390
+
+fn put_uts_field(buf: &mut [u8], field: usize, s: &str) {
+    let start = field * UTS_LEN;
+    if start + UTS_LEN > buf.len() {
+        return;
+    }
+    let slot = &mut buf[start..start + UTS_LEN];
+    slot.fill(0);
+    let n = core::cmp::min(s.len(), UTS_LEN - 1);
+    slot[..n].copy_from_slice(&s.as_bytes()[..n]);
+}
+
+/// Linux uname(2) — fill user `struct utsname`.
+fn sys_uname(buf_ptr: u64) -> u64 {
+    if !user_ptr_ok(buf_ptr, UTS_SIZE as u64) {
+        return errno::neg(errno::EFAULT);
+    }
+    let mut uts = [0u8; UTS_SIZE];
+    put_uts_field(&mut uts, 0, "munux"); // sysname
+    put_uts_field(&mut uts, 1, "munux"); // nodename
+    put_uts_field(&mut uts, 2, "0.2.0"); // release
+    put_uts_field(&mut uts, 3, "munux 0.2 x86_64"); // version
+    put_uts_field(&mut uts, 4, "x86_64"); // machine
+    put_uts_field(&mut uts, 5, ""); // domainname
+    unsafe {
+        core::ptr::copy_nonoverlapping(uts.as_ptr(), buf_ptr as *mut u8, UTS_SIZE);
+    }
+    0
 }
 
 fn user_ptr_ok(buf: u64, len: u64) -> bool {
@@ -736,6 +780,9 @@ fn load_exec_image(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage,
     {
         return load(crate::embedded_vi::VI_ELF);
     }
+    if path == "uname" || path == "/bin/uname" || path.ends_with("/uname") {
+        return load(crate::embedded_uname::UNAME_ELF);
+    }
     let _ = argv0;
     Err("ENOENT")
 }
@@ -907,6 +954,11 @@ pub fn run_embedded_forktest() -> Result<(), &'static str> {
 /// Run embedded `exectest` (fork + execve + wait4) — U6 test.
 pub fn run_embedded_exectest() -> Result<(), &'static str> {
     exec_elf_bytes(crate::embedded_exectest::EXECTEST_ELF, "exectest")
+}
+
+/// Run embedded `uname` (UTS name fields).
+pub fn run_embedded_uname() -> Result<(), &'static str> {
+    exec_elf_bytes(crate::embedded_uname::UNAME_ELF, "uname")
 }
 
 /// Run embedded `/bin/sh` (U7 user shell).

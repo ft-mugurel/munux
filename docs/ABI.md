@@ -39,6 +39,9 @@ Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.
 | 59 | `execve` | **done** (load ELF; argv up to 3 strings; envp ignored) |
 | 60 | `exit` | **done** (zombie + return to parent) |
 | 61 | `wait4` | **done** (reap; schedules Ready children) |
+| 63 | `uname` | **done** (struct utsname; sysname=munux, machine=x86_64) |
+| 12 | `brk` | planned (heap for musl) |
+| 158 | `arch_prctl` | planned (TLS FS base for musl) |
 | 79 | `getcwd` | **done** (per-process cwd) |
 | 80 | `chdir` | **done** (per-process cwd) |
 | 110 | `getppid` | **done** |
@@ -137,3 +140,4 @@ But using **wrong numbers guarantees** Linux binaries will never work — so mun
 | 0.2+U7 | Freestanding `/bin/sh` (prompt, builtins, fork/exec/wait) |
 | 0.2+U8 | Boot handoff to `/bin/sh`; kernel shell is debug fallback |
 | 0.2+FD | Per-process FD tables (clone on fork/spawn) |
+| 0.2+uname | `uname` + ENOSYS logging for musl bring-up |
