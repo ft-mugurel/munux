@@ -14,31 +14,55 @@ const GC_DATA: u16 = 0x3CF;
 const CRTC_ADDR: u16 = 0x3D4;
 const CRTC_DATA: u16 = 0x3D5;
 
+#[inline]
+unsafe fn seq_set(index: u8, value: u8) {
+    outb(SEQ_ADDR, index);
+    outb(SEQ_DATA, value);
+}
+
+#[inline]
+unsafe fn gc_set(index: u8, value: u8) {
+    outb(GC_ADDR, index);
+    outb(GC_DATA, value);
+}
+
+#[inline]
+unsafe fn seq_get(index: u8) -> u8 {
+    outb(SEQ_ADDR, index);
+    inb(SEQ_DATA)
+}
+
+#[inline]
+unsafe fn gc_get(index: u8) -> u8 {
+    outb(GC_ADDR, index);
+    inb(GC_DATA)
+}
+
 /// Write the 8×16 bitmap font into VGA plane 2 (character map).
 ///
 /// Safe to call once at boot while still in VGA text mode. Identity map must
 /// cover `0xA0000` (our early identity map does).
+///
+/// Sequence follows the standard plane-2 font load (OSDev VGA Fonts).
 pub fn load_vga_bitmap_font() {
     unsafe {
-        // --- unlock plane 2 for sequential write (OSDev / VGA font load) ---
-        // Sequencer: map mask = plane 2 only
-        outb(SEQ_ADDR, 0x02);
-        outb(SEQ_DATA, 0x04);
-        // Sequencer memory mode: disable odd/even, enable extended memory
-        outb(SEQ_ADDR, 0x04);
-        let seq4 = inb(SEQ_DATA);
-        outb(SEQ_DATA, (seq4 | 0x04) & !0x08); // set bit2 (ext), clear bit3 (O/E)
+        // Save sequencer / GC regs we touch so restore is exact.
+        let save_seq2 = seq_get(0x02);
+        let save_seq4 = seq_get(0x04);
+        let save_gc5 = gc_get(0x05);
+        let save_gc6 = gc_get(0x06);
 
-        // Graphics controller: write mode 0, disable odd/even
-        outb(GC_ADDR, 0x05);
-        let gc5 = inb(GC_DATA);
-        outb(GC_DATA, gc5 & !0x10); // clear odd/even
-        // Misc: map memory to A0000h
-        outb(GC_ADDR, 0x06);
-        let gc6 = inb(GC_DATA);
-        outb(GC_DATA, (gc6 & !0x0C) | 0x04);
+        // Map mask = plane 2 only
+        seq_set(0x02, 0x04);
+        // Memory mode: disable odd/even, enable extended mem (value 0x07)
+        seq_set(0x04, 0x07);
 
-        // Each character slot is 32 bytes in plane 2; we use 16 rows of bitmap.
+        // Graphics mode: write mode 0, disable odd/even
+        gc_set(0x05, 0x00);
+        // Misc: map A0000–AFFFF for plane access
+        gc_set(0x06, 0x04);
+
+        // Each character slot is 32 bytes in plane 2; glyphs use 16 rows.
         let plane = 0xA0000 as *mut u8;
         for ch in 0..256usize {
             let glyph = &FONT8X16[ch];
@@ -46,25 +70,33 @@ pub fn load_vga_bitmap_font() {
             for row in 0..16usize {
                 base.add(row).write_volatile(glyph[row]);
             }
-            // Clear remainder of the 32-byte slot
             for row in 16..32usize {
                 base.add(row).write_volatile(0);
             }
         }
 
-        // --- restore text-mode plane config ---
-        outb(SEQ_ADDR, 0x02);
-        outb(SEQ_DATA, 0x03); // planes 0+1 (char+attr) for normal text
-        outb(SEQ_ADDR, 0x04);
-        outb(SEQ_DATA, 0x03); // odd/even on, chain-4-ish text defaults
-        outb(GC_ADDR, 0x05);
-        outb(GC_DATA, 0x10); // odd/even enable, write mode 0
-        outb(GC_ADDR, 0x06);
-        outb(GC_DATA, 0x0E); // B8000 text map, odd/even
+        // Restore original plane mapping for text mode (char+attr at B8000).
+        seq_set(0x02, save_seq2);
+        seq_set(0x04, save_seq4);
+        // If boot left odd defaults, force known-good text values.
+        if save_seq2 == 0 {
+            seq_set(0x02, 0x03);
+        }
+        if save_seq4 & 0x04 == 0 {
+            // ensure we leave text-compatible memory mode
+            seq_set(0x04, 0x03);
+        }
+        gc_set(0x05, if save_gc5 == 0 { 0x10 } else { save_gc5 });
+        gc_set(0x06, if (save_gc6 & 0x0C) == 0x04 { 0x0E } else { save_gc6 });
+        // Prefer classic text restore (most QEMU/VGA BIOS text modes):
+        seq_set(0x02, 0x03);
+        seq_set(0x04, 0x03);
+        gc_set(0x05, 0x10);
+        gc_set(0x06, 0x0E);
 
         // 16 scanlines per character cell (matches 8×16 font).
         outb(CRTC_ADDR, 0x09);
         let msl = inb(CRTC_DATA);
-        outb(CRTC_DATA, (msl & 0xE0) | 0x0F); // max scan line = 15
+        outb(CRTC_DATA, (msl & 0xE0) | 0x0F);
     }
 }
