@@ -11,10 +11,7 @@ const VGA_DATA: u16 = 0x3D5;
 
 static mut ROW: usize = 0;
 static mut COL: usize = 0;
-/// Default: light grey on black (always visible on standard VGA text).
-const DEFAULT_COLOR: u8 = 0x07;
-
-static mut COLOR: u8 = DEFAULT_COLOR;
+static mut COLOR: u8 = 0x07;
 static mut INVERSE: bool = false;
 static mut CURSOR_ENABLED: bool = true;
 
@@ -22,37 +19,21 @@ fn cell(ch: u8, color: u8) -> u16 {
     (color as u16) << 8 | ch as u16
 }
 
-/// Never emit black-on-black (or equal fg/bg): MCP scrapes glyphs, humans need
-/// contrast. If COLOR was corrupted (e.g. historic nest-stack overflow), heal it.
-fn safe_color(c: u8) -> u8 {
-    let fg = c & 0x0F;
-    let bg = (c >> 4) & 0x0F;
-    if fg == bg {
-        DEFAULT_COLOR
-    } else {
-        c
-    }
-}
-
 fn active_color() -> u8 {
     unsafe {
-        let base = safe_color(COLOR);
-        // Heal corrupted global so subsequent clear/scroll stay visible.
-        if COLOR != base {
-            COLOR = base;
-        }
         if INVERSE {
             // Swap fg/bg nybbles for a solid reverse block.
-            ((base & 0x0F) << 4) | ((base & 0xF0) >> 4)
+            let c = COLOR;
+            ((c & 0x0F) << 4) | ((c & 0xF0) >> 4)
         } else {
-            base
+            COLOR
         }
     }
 }
 
 pub fn set_color(c: u8) {
     unsafe {
-        COLOR = safe_color(c);
+        COLOR = c;
     }
 }
 
@@ -101,7 +82,7 @@ pub fn update_hw_cursor() {
 
 pub fn clear() {
     unsafe {
-        let color = active_color();
+        let color = COLOR;
         for i in 0..(WIDTH * HEIGHT) {
             VGA.add(i).write_volatile(cell(b' ', color));
         }
@@ -121,7 +102,7 @@ fn scroll() {
                 VGA.add((r - 1) * WIDTH + c).write_volatile(v);
             }
         }
-        let color = active_color();
+        let color = COLOR;
         for c in 0..WIDTH {
             VGA.add((HEIGHT - 1) * WIDTH + c).write_volatile(cell(b' ', color));
         }
@@ -146,7 +127,7 @@ pub fn put_char(ch: u8) {
                 if COL > 0 {
                     COL -= 1;
                     VGA.add(ROW * WIDTH + COL)
-                        .write_volatile(cell(b' ', active_color()));
+                        .write_volatile(cell(b' ', COLOR));
                 }
             }
             b'\t' => {

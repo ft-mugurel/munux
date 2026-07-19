@@ -79,15 +79,14 @@ const PAGE_USER_RW: u64 = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
 /// Nested syscall stacks so wait4/execve → child does not clobber the outer
 /// syscall frame (all would otherwise share one `syscall_kstack` top).
 ///
-/// Must be large enough for normal syscall depth. ELF file bytes must **not**
-/// live on these stacks (see `ELF_LOAD_BUF`) — a 64 KiB stack buffer on a 16 KiB
-/// nest stack used to overflow into kernel `.data` and zero `console::COLOR`
-/// (invisible black-on-black text after the first `execve`).
+/// ELF file bytes must **not** live on these stacks (see `ELF_LOAD_BUF`).
+/// A former 64 KiB stack buffer on a 16 KiB nest stack overflowed into kernel
+/// `.data` after the first `execve`.
 const NEST_KSTACK_BYTES: usize = 32 * 1024;
 const NEST_KSTACK_MAX: usize = 6;
 
-/// Scratch for loading small ELFs from ext2. Static so execve does not allocate
-/// tens of KiB on the nest kernel stack. Cooperative kernel: one load at a time.
+/// Scratch for loading small ELFs from ext2 (off the nest stack).
+/// Cooperative kernel: one load at a time.
 const ELF_LOAD_CAP: usize = 64 * 1024;
 static mut ELF_LOAD_BUF: [u8; ELF_LOAD_CAP] = [0; ELF_LOAD_CAP];
 
