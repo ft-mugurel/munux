@@ -29,7 +29,7 @@ pub mod num {
     pub const UNAME: u64 = 63;
     pub const GETDENTS64: u64 = 217;
     pub const ARCH_PRCTL: u64 = 158; // planned (musl TLS)
-    pub const BRK: u64 = 12; // planned (heap)
+    pub const BRK: u64 = 12;
     pub const OPENAT: u64 = 257; // planned (modern libc)
 }
 
@@ -275,6 +275,7 @@ pub extern "C" fn syscall_dispatch(
         num::GETDENTS64 => sys_getdents64(a1, a2, a3),
         num::UNAME => sys_uname(a1),
         num::ARCH_PRCTL => sys_arch_prctl(a1, a2),
+        num::BRK => sys_brk(a1),
         num::EXIT | num::EXIT_GROUP => {
             let status = a1 as i32;
             // Clear dying process TLS before switching to parent.
@@ -332,6 +333,15 @@ fn sys_uname(buf_ptr: u64) -> u64 {
         core::ptr::copy_nonoverlapping(uts.as_ptr(), buf_ptr as *mut u8, UTS_SIZE);
     }
     0
+}
+
+/// Linux brk(2) — set or query the program break.
+///
+/// Syscall return value is always the resulting break address (new on success,
+/// old if the request is invalid / OOM). `brk(0)` therefore returns the current
+/// break (Linux rejects 0 as below `start_brk`).
+fn sys_brk(new_brk: u64) -> u64 {
+    crate::process::proc_brk(new_brk)
 }
 
 // Linux arch/x86/include/uapi/asm/prctl.h
@@ -811,6 +821,9 @@ fn sys_execve(path_ptr: u64, argv_ptr: u64, _envp: u64) -> u64 {
         // New image: musl will re-set TLS; do not inherit previous FS base.
         p.fs_base = 0;
         p.gs_base = 0;
+        // Fresh heap from ELF image end (Linux start_brk).
+        p.heap_base = image.brk_start;
+        p.heap_size = 0;
     });
     crate::x86::msr::set_fs_base(0);
     crate::x86::msr::set_gs_base(0);
@@ -887,6 +900,12 @@ fn load_exec_image(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage,
     {
         return load(crate::embedded_archprctl::ARCHPRCTL_ELF);
     }
+    if path == "brktest"
+        || path == "/bin/brktest"
+        || path.ends_with("/brktest")
+    {
+        return load(crate::embedded_brktest::BRKTEST_ELF);
+    }
     let _ = argv0;
     Err("ENOENT")
 }
@@ -951,12 +970,12 @@ fn sys_wait4(pid: u64, status_ptr: u64, options: u64) -> u64 {
     0
 }
 
-fn enter_and_wait(entry: u64, stack_top: u64, label: &str) {
-    enter_and_wait_opts(entry, stack_top, label, false);
+fn enter_and_wait(entry: u64, stack_top: u64, brk_start: u64, label: &str) {
+    enter_and_wait_opts(entry, stack_top, brk_start, label, false);
 }
 
 /// `quiet`: suppress pid/entry chatter (used for clean U8 boot handoff).
-fn enter_and_wait_opts(entry: u64, stack_top: u64, label: &str, quiet: bool) {
+fn enter_and_wait_opts(entry: u64, stack_top: u64, brk_start: u64, label: &str, quiet: bool) {
     // U5/U6: run as a child of init (shell) so getpid/exit/wait/fork are real
     let child = match crate::process::begin_user_task(label) {
         Ok(p) => p,
@@ -973,6 +992,9 @@ fn enter_and_wait_opts(entry: u64, stack_top: u64, label: &str, quiet: bool) {
         SYSCALL_STACK_DEPTH = 0;
     }
     ensure_kstack_base();
+
+    // Program break for this image (heap starts empty at brk_start).
+    crate::process::set_brk_start(brk_start);
 
     if !quiet {
         console::print(label);
@@ -1019,14 +1041,20 @@ fn enter_and_wait_opts(entry: u64, stack_top: u64, label: &str, quiet: bool) {
 /// Run the built-in hand-assembled ring-3 demo until exit.
 pub fn run_demo_user_program() -> Result<(), &'static str> {
     setup_demo_image()?;
-    enter_and_wait(DEMO_CODE, DEMO_STACK_TOP, "user: demo");
+    // Demo blob is tiny; heap starts just after the demo page.
+    enter_and_wait(DEMO_CODE, DEMO_STACK_TOP, DEMO_STACK_PAGE, "user: demo");
     Ok(())
 }
 
 /// Load an ELF64 image from bytes and run until exit.
 pub fn exec_elf_bytes(file: &[u8], argv0: &str) -> Result<(), &'static str> {
     let image = crate::elf::load_bytes(file, argv0)?;
-    enter_and_wait(image.entry, image.stack_top, "exec: ELF64");
+    enter_and_wait(
+        image.entry,
+        image.stack_top,
+        image.brk_start,
+        "exec: ELF64",
+    );
     Ok(())
 }
 
@@ -1083,7 +1111,7 @@ pub fn run_embedded_sh_script(script: &[u8]) -> Result<(), &'static str> {
 /// so the caller can drop into the kernel debug shell.
 pub fn run_init_sh() -> Result<(), &'static str> {
     let image = load_sh_image()?;
-    enter_and_wait_opts(image.entry, image.stack_top, "sh", true);
+    enter_and_wait_opts(image.entry, image.stack_top, image.brk_start, "sh", true);
     Ok(())
 }
 

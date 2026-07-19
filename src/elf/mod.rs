@@ -56,6 +56,9 @@ struct Phdr {
 pub struct LoadedImage {
     pub entry: u64,
     pub stack_top: u64,
+    /// Initial program break: page-aligned end of the highest PT_LOAD segment.
+    /// Linux `brk` grows the heap from here.
+    pub brk_start: u64,
 }
 
 fn page_down(a: u64) -> u64 {
@@ -264,6 +267,7 @@ pub fn load_bytes_argv(file: &[u8], argv: &[&str]) -> Result<LoadedImage, &'stat
     validate_ehdr(&ehdr)?;
 
     let mut total = 0u64;
+    let mut image_end = 0u64;
     for i in 0..ehdr.e_phnum {
         let ph = read_phdr(file, ehdr.e_phoff, i)?;
         if ph.p_type != PT_LOAD {
@@ -273,14 +277,25 @@ pub fn load_bytes_argv(file: &[u8], argv: &[&str]) -> Result<LoadedImage, &'stat
         if total > MAX_LOAD_BYTES {
             return Err("elf: image too large");
         }
+        let vend = ph.p_vaddr.saturating_add(ph.p_memsz);
+        if vend > image_end {
+            image_end = vend;
+        }
     }
     if total == 0 {
         return Err("elf: no PT_LOAD segments");
+    }
+
+    // Program break starts at the first page boundary at/after the image end.
+    let brk_start = page_up(image_end);
+    if brk_start < 0x1000 || brk_start >= 0x0000_8000_0000_0000 {
+        return Err("elf: bad brk start");
     }
 
     let stack_top = setup_stack(argv)?;
     Ok(LoadedImage {
         entry: ehdr.e_entry,
         stack_top,
+        brk_start,
     })
 }

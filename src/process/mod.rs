@@ -12,7 +12,9 @@ pub mod sys;
 pub mod table;
 
 pub use fork::{fork, fork_from_user, switch_to, take_ready_child, UserFrame};
-pub use memory::{proc_read_mem, proc_sbrk, proc_write_mem};
+pub use memory::{
+    current_brk, proc_brk, proc_read_mem, proc_sbrk, proc_write_mem, set_brk_start,
+};
 pub use pcb::{Pid, Process, ProcessState, Uid, MAX_PROCESSES};
 pub use socket::{socket_close, socket_connect, socket_create, socket_recv, socket_send};
 pub use sys::{

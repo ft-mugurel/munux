@@ -161,9 +161,7 @@ pub fn begin_user_task(name: &str) -> Result<Pid, i32> {
     let parent_idx = table::current_index();
     let parent_pid = table::current_pid();
 
-    let (uid, cwd, heap_base, heap_size) = match table::with_current(|p| {
-        (p.uid, p.cwd_inode, p.heap_base, p.heap_size)
-    }) {
+    let (uid, cwd) = match table::with_current(|p| (p.uid, p.cwd_inode)) {
         Some(x) => x,
         None => return Err(-1),
     };
@@ -174,14 +172,16 @@ pub fn begin_user_task(name: &str) -> Result<Pid, i32> {
     };
 
     let mut child_pid = 0;
+    // Fresh user image: heap is set from ELF brk_start before enter_user_mode.
+    // Do not inherit kinit's kernel heap VA.
     table::init_child_slot(
         child_idx,
         parent_pid,
         uid,
         0,
         0,
-        heap_base,
-        heap_size,
+        0,
+        0,
         false,
         &mut child_pid,
     );

@@ -22,6 +22,7 @@ pub mod embedded_hello;
 pub mod embedded_ls;
 pub mod embedded_sh;
 pub mod embedded_archprctl;
+pub mod embedded_brktest;
 pub mod embedded_uname;
 pub mod embedded_vi;
 pub mod fd;
