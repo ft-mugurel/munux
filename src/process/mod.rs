@@ -41,20 +41,28 @@ pub fn apply_tls() {
     crate::x86::msr::set_gs_base(gs);
 }
 
-/// Store FS base for the current process and program the CPU.
+/// Zero TLS for the current process (exit / execve new image).
+pub fn clear_tls() {
+    let _ = table::with_current(|p| {
+        p.fs_base = 0;
+        p.gs_base = 0;
+    });
+    crate::x86::msr::set_fs_base(0);
+    crate::x86::msr::set_gs_base(0);
+}
+
+/// Store FS base for the current process (CPU updated on apply_tls / sysret).
 pub fn set_fs_base(base: u64) {
     let _ = table::with_current(|p| {
         p.fs_base = base;
     });
-    crate::x86::msr::set_fs_base(base);
 }
 
-/// Store GS base for the current process and program the CPU.
+/// Store GS base for the current process (CPU updated on apply_tls / sysret).
 pub fn set_gs_base(base: u64) {
     let _ = table::with_current(|p| {
         p.gs_base = base;
     });
-    crate::x86::msr::set_gs_base(base);
 }
 
 pub fn get_fs_base_saved() -> u64 {

@@ -234,7 +234,12 @@ pub extern "C" fn syscall_dispatch(
     _a4: u64,
     _a5: u64,
 ) -> u64 {
-    match num {
+    // Never run kernel code with a user TLS base in FS/GS. User SET_FS stays
+    // only on the PCB until we restore it for sysret (see end of this fn).
+    crate::x86::msr::set_fs_base(0);
+    crate::x86::msr::set_gs_base(0);
+
+    let ret = match num {
         num::READ => sys_read(a1, a2, a3),
         num::WRITE => sys_write(a1, a2, a3),
         num::OPEN => sys_open(a1, a2, a3),
@@ -258,7 +263,11 @@ pub extern "C" fn syscall_dispatch(
         num::ARCH_PRCTL => sys_arch_prctl(a1, a2),
         num::EXIT | num::EXIT_GROUP => {
             let status = a1 as i32;
+            // Clear dying process TLS before switching to parent.
+            crate::process::clear_tls();
             crate::process::exit_user(status);
+            // Parent is current; load its TLS then leave ring 0 nest.
+            crate::process::apply_tls();
             unsafe {
                 return_from_user();
             }
@@ -270,7 +279,11 @@ pub extern "C" fn syscall_dispatch(
             console::println(" (-38)");
             errno::neg(errno::ENOSYS)
         }
-    }
+    };
+
+    // sysret path: put this process's TLS bases back in the CPU.
+    crate::process::apply_tls();
+    ret
 }
 
 /// Linux `struct utsname` — six fields of 65 bytes each (incl. Linux domainname).
@@ -314,26 +327,31 @@ const ARCH_GET_FS: u64 = 0x1003;
 const ARCH_GET_GS: u64 = 0x1004;
 
 /// Linux arch_prctl(2) — set/get FS/GS base for TLS.
+///
+/// `arg` for SET is the **base address value** (not a pointer to it).
+/// For GET, `arg` is a user pointer where the base is stored.
 fn sys_arch_prctl(code: u64, arg: u64) -> u64 {
     match code {
         ARCH_SET_FS => {
-            // arg = new FS base (user virtual address; 0 clears)
-            if arg != 0 && !user_ptr_ok(arg, 1) {
-                // Allow any canonical-ish user VA in our ranges; 1-byte check.
-                // Some bases point into TLS just past mapped pages — still accept
-                // if in broad user range.
-                if arg < 0x1000 || arg >= 0x0000_8000_0000_0000 {
-                    return errno::neg(errno::EFAULT);
-                }
+            // Canonical user address (or 0 to clear). Musl may point slightly
+            // outside a single mapped page; allow full lower half user VA.
+            if arg != 0 && (arg < 0x1000 || arg >= 0x0000_8000_0000_0000) {
+                return errno::neg(errno::EFAULT);
             }
-            crate::process::set_fs_base(arg);
+            // Only update PCB here — dispatch restores MSRs for sysret.
+            // Avoid leaving user FS loaded during the rest of the syscall path.
+            let _ = crate::process::with_current(|p| {
+                p.fs_base = arg;
+            });
             0
         }
         ARCH_SET_GS => {
             if arg != 0 && (arg < 0x1000 || arg >= 0x0000_8000_0000_0000) {
                 return errno::neg(errno::EFAULT);
             }
-            crate::process::set_gs_base(arg);
+            let _ = crate::process::with_current(|p| {
+                p.gs_base = arg;
+            });
             0
         }
         ARCH_GET_FS => {
@@ -776,7 +794,12 @@ fn sys_execve(path_ptr: u64, argv_ptr: u64, _envp: u64) -> u64 {
         p.user_rip = image.entry;
         p.user_rsp = image.stack_top;
         p.user_rax = 0;
+        // New image: musl will re-set TLS; do not inherit previous FS base.
+        p.fs_base = 0;
+        p.gs_base = 0;
     });
+    crate::x86::msr::set_fs_base(0);
+    crate::x86::msr::set_gs_base(0);
 
     // Nested enter: new image runs until exit, then we unwind this session.
     enter_user_nested(image.entry, image.stack_top, 0);
