@@ -684,6 +684,9 @@ clear_screen:
 	syscall
 	ret
 
+; NOTE: x86_64 `syscall` clobbers rcx and r11. Never keep buffer indices
+; in those registers across syscalls — use BSS (v_idx / v_line / v_rows).
+
 redraw:
 	call clear_screen
 	; compute line of cursor for scroll
@@ -703,46 +706,52 @@ redraw:
 	mov [rel row0], eax
 .draw:
 	; walk buffer printing VIEW_ROWS lines starting at row0
-	xor r10d, r10d			; current line idx
-	xor r11d, r11d			; buf index
-	mov r12d, [rel buflen]
-	mov r13d, [rel row0]
-	xor r14d, r14d			; rows printed
+	mov dword [rel v_line], 0
+	mov dword [rel v_idx], 0
+	mov dword [rel v_rows], 0
 .scan:
-	cmp r11d, r12d
+	mov eax, [rel v_idx]
+	cmp eax, [rel buflen]
 	jae .pad
-	cmp r14d, VIEW_ROWS
+	mov eax, [rel v_rows]
+	cmp eax, VIEW_ROWS
 	jae .status
 	; if current line >= row0, print
-	cmp r10d, r13d
+	mov eax, [rel v_line]
+	cmp eax, [rel row0]
 	jb .skip_line
-	; print line until NL or end; mark cursor
-	call print_view_line		; uses r11, updates r11; r10 is line
-	inc r14d
-	inc r10d
+	call print_view_line		; advances v_idx past line
+	inc dword [rel v_rows]
+	inc dword [rel v_line]
 	jmp .scan
 .skip_line:
-	; advance r11 to next line
+	; advance v_idx to next line
 	lea rsi, [rel buffer]
+	mov eax, [rel v_idx]
 .skl:
-	cmp r11d, r12d
-	jae .scan
-	mov al, [rsi+r11]
-	inc r11d
-	cmp al, 10
-	jne .skl
-	inc r10d
+	cmp eax, [rel buflen]
+	jae .skl_done
+	cmp byte [rsi+rax], 10
+	je .skl_nl
+	inc eax
+	jmp .skl
+.skl_nl:
+	inc eax
+.skl_done:
+	mov [rel v_idx], eax
+	inc dword [rel v_line]
 	jmp .scan
 .pad:
-	cmp r14d, VIEW_ROWS
+	mov eax, [rel v_rows]
+	cmp eax, VIEW_ROWS
 	jae .status
-	; empty line marker
+	; empty line marker (save/restore nothing — use only clobbered regs)
 	mov rax, SYS_WRITE
 	mov rdi, 1
 	lea rsi, [rel tilde_nl]
 	mov rdx, 2
 	syscall
-	inc r14d
+	inc dword [rel v_rows]
 	jmp .pad
 .status:
 	; status line
@@ -829,7 +838,6 @@ redraw:
 
 ; write_inv_char: al = char (or space). Uses inverse video (0x0E … 0x0F).
 write_inv_char:
-	push rax
 	mov [rel onebyte], al
 	mov rax, SYS_WRITE
 	mov rdi, 1
@@ -846,7 +854,6 @@ write_inv_char:
 	lea rsi, [rel inv_off]
 	mov rdx, 1
 	syscall
-	pop rax
 	ret
 
 ; write_plain: al = char
@@ -859,77 +866,69 @@ write_plain:
 	syscall
 	ret
 
-; print one view line starting at r11; highlight cursor; advance r11 past NL
+; print one view line starting at v_idx; highlight cursor; advance v_idx past NL
+; All loop state lives in BSS — safe across syscalls (which clobber r11/rcx).
 print_view_line:
-	push r12
-	push r13
-	push rbx
-	mov r12d, [rel buflen]
-	mov r13d, [rel cursor]
-	lea rbx, [rel buffer]
-	xor ecx, ecx			; col
+	mov dword [rel v_col], 0
+	lea rsi, [rel buffer]
 .pl:
-	cmp r11d, r12d
+	mov eax, [rel v_idx]
+	cmp eax, [rel buflen]
 	jae .eol_pad
-	mov al, [rbx+r11]
+	mov al, [rsi+rax]
 	cmp al, 10
 	je .at_nl
+	mov ecx, [rel v_col]
 	cmp ecx, COLS-1
 	ja .skip_overflow
 	; if this index is the cursor, inverse
-	cmp r11d, r13d
+	mov eax, [rel v_idx]
+	cmp eax, [rel cursor]
 	jne .plain
-	push rcx
-	push r11
+	mov eax, [rel v_idx]
+	mov al, [rsi+rax]
 	call write_inv_char
-	pop r11
-	pop rcx
 	jmp .adv
 .plain:
-	push rcx
-	push r11
+	mov eax, [rel v_idx]
+	lea rsi, [rel buffer]
+	mov al, [rsi+rax]
 	call write_plain
-	pop r11
-	pop rcx
 .adv:
-	inc ecx
+	inc dword [rel v_col]
 .skip_overflow:
-	inc r11d
+	inc dword [rel v_idx]
+	lea rsi, [rel buffer]
 	jmp .pl
 .at_nl:
 	; cursor sitting on NL → show inverse space at end of line
-	cmp r11d, r13d
-	jne .nl_out
+	mov eax, [rel v_idx]
+	cmp eax, [rel cursor]
+	jne .nl_consume
+	mov ecx, [rel v_col]
 	cmp ecx, COLS-1
-	ja .nl_skip
-	push rcx
-	push r11
+	ja .nl_consume
 	mov al, ' '
 	call write_inv_char
-	pop r11
-	pop rcx
-.nl_skip:
-	inc r11d				; consume NL
+.nl_consume:
+	inc dword [rel v_idx]		; consume NL
 	jmp .nl_out
 .eol_pad:
 	; EOF / end of buffer on this line
-	cmp r11d, r13d
+	mov eax, [rel v_idx]
+	cmp eax, [rel cursor]
 	jne .nl_out
+	mov ecx, [rel v_col]
 	cmp ecx, COLS-1
 	ja .nl_out
-	push rcx
 	mov al, ' '
 	call write_inv_char
-	pop rcx
 .nl_out:
 	mov rax, SYS_WRITE
 	mov rdi, 1
 	lea rsi, [rel msg_nl]
 	mov rdx, 1
 	syscall
-	pop rbx
-	pop r13
-	pop r12
 	ret
 
 ; r8 = line number of cursor, r9 = col
@@ -1048,5 +1047,10 @@ row0:		resd 1
 pref_col:	resd 1
 cmdlen:		resd 1
 dirty:		resd 1
+; redraw walk state (must be memory — syscall clobbers r11/rcx)
+v_idx:		resd 1
+v_line:		resd 1
+v_rows:		resd 1
+v_col:		resd 1
 mode:		resb 1
 onebyte:	resb 1
