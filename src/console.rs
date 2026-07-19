@@ -1,5 +1,11 @@
 //! Scrolling VGA text console for the shell.
+//!
+//! Output always goes to the classic text buffer at `0xB8000` (80×25) so
+//! qemu-connect / MCP glyph scrape keeps working. Boot can load a custom
+//! 8×16 **bitmap font** into the VGA character generator for nicer glyphs
+//! without leaving text mode.
 
+use crate::vga::load_vga_bitmap_font;
 use crate::x86::io::{inb, outb};
 
 const VGA: *mut u16 = 0xB8000 as *mut u16;
@@ -14,6 +20,18 @@ static mut COL: usize = 0;
 static mut COLOR: u8 = 0x07;
 static mut INVERSE: bool = false;
 static mut CURSOR_ENABLED: bool = true;
+static mut FONT_LOADED: bool = false;
+
+/// One-time console bring-up: load bitmap font, then clear the text buffer.
+pub fn init() {
+    unsafe {
+        if !FONT_LOADED {
+            load_vga_bitmap_font();
+            FONT_LOADED = true;
+        }
+    }
+    clear();
+}
 
 fn cell(ch: u8, color: u8) -> u16 {
     (color as u16) << 8 | ch as u16
