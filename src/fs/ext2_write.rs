@@ -380,7 +380,7 @@ fn inode_get_block(inode: &Ext2Inode, i: usize) -> u32 {
 
 fn now() -> u32 {
     // No RTC: use a fixed epoch-ish value (or tick counter if available)
-    1_700_000_000u32.wrapping_add(crate::interrupts::timer::ticks())
+    1_700_000_000u32.wrapping_add(crate::interrupts::timer::ticks() as u32)
 }
 
 fn dirent_rec_len(name_len: usize) -> usize {

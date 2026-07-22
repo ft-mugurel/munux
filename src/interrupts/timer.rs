@@ -1,6 +1,6 @@
 //! PIT — IRQ0 → vector 32.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::interrupts::idt::register_interrupt_handler;
 use crate::interrupts::pic;
@@ -9,12 +9,20 @@ use crate::x86::io::outb;
 const PIT_CH0: u16 = 0x40;
 const PIT_CMD: u16 = 0x43;
 const PIT_HZ: u32 = 1_193_182;
-const TARGET_HZ: u32 = 100;
+/// Programmed interrupt rate (also used for timekeeping).
+pub const TARGET_HZ: u32 = 100;
+/// Nanoseconds per PIT tick at `TARGET_HZ`.
+pub const NS_PER_TICK: u64 = 1_000_000_000 / TARGET_HZ as u64;
 
-static TICKS: AtomicU32 = AtomicU32::new(0);
+static TICKS: AtomicU64 = AtomicU64::new(0);
 
-pub fn ticks() -> u32 {
+pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
+}
+
+/// Monotonic nanoseconds since boot (from PIT ticks).
+pub fn uptime_ns() -> u64 {
+    ticks().saturating_mul(NS_PER_TICK)
 }
 
 pub fn init_timer() {

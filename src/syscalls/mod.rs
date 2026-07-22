@@ -37,6 +37,8 @@ pub mod num {
     pub const MPROTECT: u64 = 10;
     pub const MUNMAP: u64 = 11;
     pub const SET_TID_ADDRESS: u64 = 218; // musl crt TLS/thread exit hook
+    pub const GETTIMEOFDAY: u64 = 96;
+    pub const CLOCK_GETTIME: u64 = 228;
     pub const OPENAT: u64 = 257; // planned (modern libc)
 }
 
@@ -293,6 +295,8 @@ pub extern "C" fn syscall_dispatch(
         num::MPROTECT => sys_mprotect(a1, a2, a3),
         num::MUNMAP => sys_munmap(a1, a2),
         num::SET_TID_ADDRESS => sys_set_tid_address(a1),
+        num::GETTIMEOFDAY => sys_gettimeofday(a1, a2),
+        num::CLOCK_GETTIME => sys_clock_gettime(a1, a2),
         num::EXIT | num::EXIT_GROUP => {
             let status = a1 as i32;
             // Clear dying process TLS before switching to parent.
@@ -393,6 +397,67 @@ fn sys_munmap(addr: u64, length: u64) -> u64 {
 fn sys_set_tid_address(_tidptr: u64) -> u64 {
     // Optionally validate user pointer later; musl always passes a valid TLS slot.
     crate::process::getpid() as u64
+}
+
+// Linux clockid_t (subset)
+const CLOCK_REALTIME: u64 = 0;
+const CLOCK_MONOTONIC: u64 = 1;
+const CLOCK_MONOTONIC_RAW: u64 = 4;
+const CLOCK_REALTIME_COARSE: u64 = 5;
+const CLOCK_MONOTONIC_COARSE: u64 = 6;
+const CLOCK_BOOTTIME: u64 = 7;
+
+/// Fixed REALTIME origin at boot (no CMOS RTC yet). Ext2 write uses a similar base.
+const REALTIME_EPOCH_BASE_SEC: u64 = 1_700_000_000;
+
+/// (sec, nsec) for wall clock = epoch base + uptime.
+fn wall_time() -> (u64, u64) {
+    let ns = crate::interrupts::timer::uptime_ns();
+    let sec = REALTIME_EPOCH_BASE_SEC.saturating_add(ns / 1_000_000_000);
+    let nsec = ns % 1_000_000_000;
+    (sec, nsec)
+}
+
+/// (sec, nsec) monotonic since boot.
+fn mono_time() -> (u64, u64) {
+    let ns = crate::interrupts::timer::uptime_ns();
+    (ns / 1_000_000_000, ns % 1_000_000_000)
+}
+
+/// Linux clock_gettime(2) — fill user `struct timespec { i64 tv_sec; i64 tv_nsec; }`.
+fn sys_clock_gettime(clkid: u64, tp: u64) -> u64 {
+    if !user_ptr_ok(tp, 16) {
+        return errno::neg(errno::EFAULT);
+    }
+    let (sec, nsec) = match clkid {
+        CLOCK_REALTIME | CLOCK_REALTIME_COARSE => wall_time(),
+        CLOCK_MONOTONIC | CLOCK_MONOTONIC_RAW | CLOCK_MONOTONIC_COARSE | CLOCK_BOOTTIME => {
+            mono_time()
+        }
+        _ => return errno::neg(errno::EINVAL),
+    };
+    unsafe {
+        core::ptr::write_volatile(tp as *mut i64, sec as i64);
+        core::ptr::write_volatile((tp + 8) as *mut i64, nsec as i64);
+    }
+    0
+}
+
+/// Linux gettimeofday(2) — fill `struct timeval { i64 tv_sec; i64 tv_usec; }`.
+/// `tz` is ignored (Linux also treats it as obsolete).
+fn sys_gettimeofday(tv: u64, _tz: u64) -> u64 {
+    if tv != 0 {
+        if !user_ptr_ok(tv, 16) {
+            return errno::neg(errno::EFAULT);
+        }
+        let (sec, nsec) = wall_time();
+        let usec = nsec / 1000;
+        unsafe {
+            core::ptr::write_volatile(tv as *mut i64, sec as i64);
+            core::ptr::write_volatile((tv + 8) as *mut i64, usec as i64);
+        }
+    }
+    0
 }
 
 // Linux arch/x86/include/uapi/asm/prctl.h

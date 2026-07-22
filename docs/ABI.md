@@ -47,8 +47,10 @@ Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.
 | 10 | `mprotect` | **done** (update PTE flags / `PROT_NONE` unmap) |
 | 11 | `munmap` | **done** (tracked region or best-effort page unmap) |
 | 12 | `brk` | **done** (program break / heap grow; per-process; Linux return = break addr) |
+| 96 | `gettimeofday` | **done** (wall time = fixed epoch + PIT uptime; `tz` ignored) |
 | 158 | `arch_prctl` | **done** (`ARCH_SET/GET_FS`, `ARCH_SET/GET_GS`; per-process + CPU MSRs) |
 | 218 | `set_tid_address` | **done** (return pid; clear_child_tid on exit not yet) |
+| 228 | `clock_gettime` | **done** (REALTIME / MONOTONIC from PIT ticks @ 100 Hz) |
 | 79 | `getcwd` | **done** (per-process cwd) |
 | 80 | `chdir` | **done** (per-process cwd) |
 | 110 | `getppid` | **done** |
