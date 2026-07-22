@@ -531,12 +531,13 @@ fn user_ptr_ok(buf: u64, len: u64) -> bool {
         return true;
     }
     let end = buf.saturating_add(len);
-    // Demo blob, classic ELF load (0x400000+), user stacks, fork child stacks
+    // Demo blob, classic ELF load (0x400000+), brk heap, mmap arena, stacks
     (buf >= DEMO_CODE && end <= DEMO_STACK_TOP + 0x1000)
         || (buf >= 0x400000 && end <= 0x800000)
+        // brk heap + mmap arena (musl stdio buffers often live here)
+        || (buf >= 0x1000 && end <= 0x0000_0000_7000_0000)
         || (buf >= 0x0000_0000_7000_0000 && end <= 0x0000_0000_8000_0000)
         || (buf >= 0x0000_0000_6F00_0000 && end <= 0x0000_0000_7000_0000)
-        || (buf >= 0x1000 && end <= 0x4000_0000)
 }
 
 fn sys_write(fd: u64, buf: u64, len: u64) -> u64 {
