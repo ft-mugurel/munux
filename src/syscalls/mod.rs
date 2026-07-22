@@ -17,6 +17,7 @@ pub mod num {
     pub const WRITE: u64 = 1;
     pub const OPEN: u64 = 2;
     pub const CLOSE: u64 = 3;
+    pub const READV: u64 = 19; // musl stdio (fread)
     pub const WRITEV: u64 = 20; // musl stdio (printf)
     pub const IOCTL: u64 = 16; // musl TIOCGWINSZ probe
     pub const GETPID: u64 = 39;
@@ -263,6 +264,7 @@ pub extern "C" fn syscall_dispatch(
     let ret = match num {
         num::READ => sys_read(a1, a2, a3),
         num::WRITE => sys_write(a1, a2, a3),
+        num::READV => sys_readv(a1, a2, a3),
         num::WRITEV => sys_writev(a1, a2, a3),
         num::IOCTL => sys_ioctl(a1, a2, a3),
         num::OPEN => sys_open(a1, a2, a3),
@@ -489,14 +491,14 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> u64 {
 
 /// Linux `struct iovec` — two u64 fields on x86_64.
 const IOV_SIZE: u64 = 16;
-const WRITEV_MAX: u64 = 16;
+const IOV_MAX: u64 = 16;
 
 /// Linux writev(2) — used by musl stdio (`printf`).
 fn sys_writev(fd: u64, iov_ptr: u64, iovcnt: u64) -> u64 {
     if iovcnt == 0 {
         return 0;
     }
-    if iovcnt > WRITEV_MAX {
+    if iovcnt > IOV_MAX {
         return errno::neg(errno::EINVAL);
     }
     let bytes = iovcnt.saturating_mul(IOV_SIZE);
@@ -523,6 +525,50 @@ fn sys_writev(fd: u64, iov_ptr: u64, iovcnt: u64) -> u64 {
         if n < len {
             break; // short write
         }
+    }
+    total
+}
+
+/// Linux readv(2) — used by musl stdio (`fread` / file buffering).
+///
+/// Scatter-read: fill iov[0], then iov[1], … until request done or EOF.
+/// Same iovec layout as writev.
+fn sys_readv(fd: u64, iov_ptr: u64, iovcnt: u64) -> u64 {
+    if iovcnt == 0 {
+        return 0;
+    }
+    if iovcnt > IOV_MAX {
+        return errno::neg(errno::EINVAL);
+    }
+    let bytes = iovcnt.saturating_mul(IOV_SIZE);
+    if !user_ptr_ok(iov_ptr, bytes) {
+        return errno::neg(errno::EFAULT);
+    }
+    let mut total: u64 = 0;
+    for i in 0..iovcnt {
+        let base = unsafe {
+            core::ptr::read_volatile((iov_ptr + i * IOV_SIZE) as *const u64)
+        };
+        let len = unsafe {
+            core::ptr::read_volatile((iov_ptr + i * IOV_SIZE + 8) as *const u64)
+        };
+        if len == 0 {
+            continue;
+        }
+        // May take multiple sys_read chunks if len > 4096 (sys_read cap).
+        let mut filled: u64 = 0;
+        while filled < len {
+            let n = sys_read(fd, base + filled, len - filled);
+            if (n as i64) < 0 {
+                return if total == 0 { n } else { total };
+            }
+            if n == 0 {
+                // EOF
+                return total.saturating_add(filled);
+            }
+            filled = filled.saturating_add(n);
+        }
+        total = total.saturating_add(filled);
     }
     total
 }

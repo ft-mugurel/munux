@@ -35,6 +35,7 @@ Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.
 | 2 | `open` | **done** (files + dirs; `O_CREAT`/`O_TRUNC`/`O_WRONLY`/`O_RDWR`) |
 | 3 | `close` | **done** |
 | 16 | `ioctl` | **done** (stub: returns `-ENOTTY`; enough for musl TIOCGWINSZ probe) |
+| 19 | `readv` | **done** (musl stdio / `fread`) |
 | 20 | `writev` | **done** (musl stdio / `printf`) |
 | 39 | `getpid` | **done** (real PCB pid) |
 | 57 | `fork` | **done** (PCB + Ready child; shared AS) |
