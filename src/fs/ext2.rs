@@ -319,28 +319,57 @@ fn ft_to_type(ft: u8) -> NodeType {
     }
 }
 
-/// Get data block number for file logical block `lb` (direct + single indirect only).
+/// Read a little-endian u32 block pointer from filesystem block `blk` at index `idx`.
+fn read_block_ptr(blk: u32, idx: usize) -> Result<u32, &'static str> {
+    if blk == 0 {
+        return Ok(0);
+    }
+    let mut bbuf = [0u8; 4096];
+    read_fs_block(blk, &mut bbuf)?;
+    let off = idx * 4;
+    if off + 4 > bbuf.len() {
+        return Err("block ptr OOB");
+    }
+    let mut b = [0u8; 4];
+    b.copy_from_slice(&bbuf[off..off + 4]);
+    Ok(u32::from_le_bytes(b))
+}
+
+/// Get data block number for file logical block `lb`.
+/// Supports direct, single-indirect, and double-indirect (enough for ~1 MiB BusyBox
+/// on 1 KiB blocks; triple not needed yet).
 fn get_data_block(inode: &Ext2Inode, lb: u32) -> Result<u32, &'static str> {
     if lb < 12 {
         return Ok(inode_block(inode, lb as usize));
     }
-    // single indirect
     let bs = block_size();
-    let per = bs / 4;
+    let per = bs / 4; // pointers per indirect block
+    // single indirect: blocks 12 .. 12+per-1
     if lb < 12 + per {
         let ind = inode_block(inode, 12);
         if ind == 0 {
             return Ok(0);
         }
-        let mut bbuf = [0u8; 4096];
-        read_fs_block(ind, &mut bbuf)?;
-        let idx = (lb - 12) as usize;
-        let off = idx * 4;
-        let mut b = [0u8; 4];
-        b.copy_from_slice(&bbuf[off..off + 4]);
-        return Ok(u32::from_le_bytes(b));
+        return read_block_ptr(ind, (lb - 12) as usize);
     }
-    Err("file too large (need double indirect)")
+    // double indirect: blocks 12+per .. 12+per+per*per-1
+    let dbase = 12 + per;
+    let dmax = dbase + per * per;
+    if lb < dmax {
+        let dind = inode_block(inode, 13);
+        if dind == 0 {
+            return Ok(0);
+        }
+        let off = lb - dbase;
+        let first = (off / per) as usize;
+        let second = (off % per) as usize;
+        let ind = read_block_ptr(dind, first)?;
+        if ind == 0 {
+            return Ok(0);
+        }
+        return read_block_ptr(ind, second);
+    }
+    Err("file too large (need triple indirect)")
 }
 
 /// Read up to `buf.len()` bytes from file inode at offset.
@@ -623,6 +652,36 @@ pub fn inode_is_dir(ino: u32) -> bool {
 
 pub fn inode_file_size(ino: u32) -> u32 {
     read_inode(ino).map(|i| inode_size(&i)).unwrap_or(0)
+}
+
+/// Fields needed to fill Linux `struct stat` (x86_64).
+#[derive(Clone, Copy)]
+pub struct InodeStat {
+    pub mode: u16,
+    pub uid: u16,
+    pub gid: u16,
+    pub nlink: u16,
+    pub size: u32,
+    /// ext2 `i_blocks` is in 512-byte units already on disk.
+    pub blocks_512: u32,
+    pub atime: u32,
+    pub mtime: u32,
+    pub ctime: u32,
+}
+
+pub fn inode_stat(ino: u32) -> Result<InodeStat, &'static str> {
+    let i = read_inode(ino)?;
+    Ok(InodeStat {
+        mode: inode_mode(&i),
+        uid: unsafe { core::ptr::addr_of!(i.i_uid).read_unaligned() },
+        gid: unsafe { core::ptr::addr_of!(i.i_gid).read_unaligned() },
+        nlink: inode_links(&i),
+        size: inode_size(&i),
+        blocks_512: unsafe { core::ptr::addr_of!(i.i_blocks).read_unaligned() },
+        atime: unsafe { core::ptr::addr_of!(i.i_atime).read_unaligned() },
+        mtime: unsafe { core::ptr::addr_of!(i.i_mtime).read_unaligned() },
+        ctime: unsafe { core::ptr::addr_of!(i.i_ctime).read_unaligned() },
+    })
 }
 
 // ---- Accessors for write module (same crate) ----

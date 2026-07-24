@@ -233,15 +233,33 @@ const AT_EGID: u64 = 14;
 const AT_SECURE: u64 = 23;
 const AT_RANDOM: u64 = 25;
 
+/// Choose stack top for a new image.
+///
+/// Under cooperative fork with a **shared** address space, a forked child has a
+/// private stack at `PCB.stack_base`. Exec must rebuild argv there — never at
+/// `USER_STACK_TOP` — or it zeroes the sleeping parent's shell stack.
+fn exec_stack_top() -> (u64, u64) {
+    if let Some((base, size)) = crate::process::current_stack_region() {
+        if base >= 0x1000 && size >= FRAME_SIZE as u64 {
+            let top = base.saturating_add(size);
+            // Leave top page-aligned high address (same convention as USER_STACK_TOP).
+            return (top, size / FRAME_SIZE as u64);
+        }
+    }
+    (USER_STACK_TOP, USER_STACK_PAGES)
+}
+
 /// Build a Linux-like initial stack:
 /// `[argc][argv…][NULL][envp NULL][auxv… AT_NULL][strings][16B random]`
 ///
 /// `argv` strings are copied onto the stack (max 4 args, 64 bytes each).
 /// Auxv is required by musl's `__init_libc` (it walks pairs until `AT_NULL`).
 pub fn setup_stack(argv: &[&str], aux: &AuxInfo) -> Result<u64, &'static str> {
-    let stack_base = USER_STACK_TOP - USER_STACK_PAGES * FRAME_SIZE as u64;
-    map_user_range(stack_base, USER_STACK_TOP)?;
-    for i in 0..USER_STACK_PAGES {
+    let (stack_top, pages) = exec_stack_top();
+    let pages = pages.max(1).min(16);
+    let stack_base = stack_top - pages * FRAME_SIZE as u64;
+    map_user_range(stack_base, stack_top)?;
+    for i in 0..pages {
         zero_user(stack_base + i * FRAME_SIZE as u64, FRAME_SIZE as u64)?;
     }
 
@@ -251,7 +269,7 @@ pub fn setup_stack(argv: &[&str], aux: &AuxInfo) -> Result<u64, &'static str> {
     }
 
     // High end: 16 bytes for AT_RANDOM, then argv strings.
-    let mut top = USER_STACK_TOP;
+    let mut top = stack_top;
     top -= 16;
     top &= !0xF;
     let random_ptr = top;

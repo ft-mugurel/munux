@@ -256,6 +256,15 @@ disk: userland
 	@echo 'Hello from munux ext2!' > build/rootfs/hello.txt
 	@echo 'second line' >> build/rootfs/hello.txt
 	@echo 'readme content' > build/rootfs/docs/readme.txt
+	@# Optional static BusyBox: set BUSYBOX_STATIC=/path/to/busybox.static
+	@if [ -n "$(BUSYBOX_STATIC)" ] && [ -f "$(BUSYBOX_STATIC)" ]; then \
+		cp -f "$(BUSYBOX_STATIC)" build/rootfs/bin/busybox; \
+		chmod 755 build/rootfs/bin/busybox; \
+		for a in true false; do cp -f build/rootfs/bin/busybox build/rootfs/bin/$$a; done; \
+		echo -e "$(BOLD)$(GREEN)[✓] installed static BusyBox + true/false$(RESET)"; \
+	elif [ -f build/rootfs/bin/busybox ]; then \
+		echo -e "$(YELLOW)[i] keeping existing build/rootfs/bin/busybox$(RESET)"; \
+	fi
 	@rm -f ${DISK_IMG}
 	@dd if=/dev/zero of=${DISK_IMG} bs=1M count=32 status=none
 	@mkfs.ext2 -F -q -b 1024 -d build/rootfs ${DISK_IMG}

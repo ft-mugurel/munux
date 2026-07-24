@@ -565,3 +565,60 @@ pub fn sys_getdents64(fd: u64, buf: &mut [u8]) -> Result<usize, FdError> {
     }
     with_current(|t| t.getdents64(fd as usize, buf))
 }
+
+/// Linux lseek(2) — SEEK_SET=0, SEEK_CUR=1, SEEK_END=2.
+pub fn sys_lseek(fd: u64, offset: i64, whence: u64) -> Result<u64, FdError> {
+    if !is_ready() || fd >= FD_MAX as u64 {
+        return Err(FdError::BadFd);
+    }
+    with_current(|t| {
+        let file = t.get_mut(fd as usize).ok_or(FdError::BadFd)?;
+        match file.kind {
+            FileKind::Ext2File { ino } => {
+                let size = fs::ext2::inode_file_size(ino) as i64;
+                let cur = file.offset as i64;
+                let new = match whence {
+                    0 => offset,                 // SEEK_SET
+                    1 => cur.saturating_add(offset), // SEEK_CUR
+                    2 => size.saturating_add(offset), // SEEK_END
+                    _ => return Err(FdError::Inval),
+                };
+                if new < 0 {
+                    return Err(FdError::Inval);
+                }
+                file.offset = new as u64;
+                Ok(file.offset)
+            }
+            FileKind::Ext2Dir { .. } => Err(FdError::IsDir),
+            FileKind::Console => Err(FdError::Inval),
+            FileKind::None => Err(FdError::BadFd),
+        }
+    })
+}
+
+/// Resolve open fd to an ext2 inode (file or dir), if any.
+pub fn sys_fd_inode(fd: u64) -> Result<u32, FdError> {
+    if !is_ready() || fd >= FD_MAX as u64 {
+        return Err(FdError::BadFd);
+    }
+    with_current(|t| {
+        let file = t.get(fd as usize).ok_or(FdError::BadFd)?;
+        match file.kind {
+            FileKind::Ext2File { ino } | FileKind::Ext2Dir { ino } => Ok(ino),
+            FileKind::Console => Err(FdError::Inval),
+            FileKind::None => Err(FdError::BadFd),
+        }
+    })
+}
+
+/// True if fd is the console (stdin/stdout/stderr style).
+pub fn sys_fd_is_console(fd: u64) -> bool {
+    if !is_ready() || fd >= FD_MAX as u64 {
+        return false;
+    }
+    with_current(|t| {
+        t.get(fd as usize)
+            .map(|f| matches!(f.kind, FileKind::Console))
+            .unwrap_or(false)
+    })
+}

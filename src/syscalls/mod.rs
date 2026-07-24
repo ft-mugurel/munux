@@ -20,6 +20,18 @@ pub mod num {
     pub const READV: u64 = 19; // musl stdio (fread)
     pub const WRITEV: u64 = 20; // musl stdio (printf)
     pub const IOCTL: u64 = 16; // musl TIOCGWINSZ probe
+    pub const STAT: u64 = 4; // busybox ls (classic x86_64)
+    pub const FSTAT: u64 = 5;
+    pub const LSTAT: u64 = 6;
+    pub const LSEEK: u64 = 8;
+    pub const RT_SIGPROCMASK: u64 = 14; // busybox setuid path
+    pub const GETUID: u64 = 102;
+    pub const GETGID: u64 = 104;
+    pub const SETUID: u64 = 105;
+    pub const SETGID: u64 = 106;
+    pub const GETEUID: u64 = 107;
+    pub const GETEGID: u64 = 108;
+    pub const GETGROUPS: u64 = 115;
     pub const GETPID: u64 = 39;
     pub const FORK: u64 = 57;
     pub const EXECVE: u64 = 59;
@@ -40,7 +52,8 @@ pub mod num {
     pub const GETTIMEOFDAY: u64 = 96;
     pub const CLOCK_GETTIME: u64 = 228;
     pub const FCNTL: u64 = 72;
-    pub const OPENAT: u64 = 257; // planned (modern libc)
+    pub const OPENAT: u64 = 257; // modern libc; thin wrapper over open
+    pub const NEWFSTATAT: u64 = 262; // fstatat
 }
 
 /// Linux-style: return `-errno` as `u64` bit pattern (negative i64).
@@ -96,9 +109,10 @@ const PAGE_USER_RW: u64 = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
 const NEST_KSTACK_BYTES: usize = 32 * 1024;
 const NEST_KSTACK_MAX: usize = 6;
 
-/// Scratch for loading small ELFs from ext2 (off the nest stack).
+/// Scratch for loading static ELFs from ext2 (off the nest stack).
 /// Cooperative kernel: one load at a time.
-const ELF_LOAD_CAP: usize = 64 * 1024;
+/// Sized for full static BusyBox (~1 MiB) and similar tools (was 64 KiB).
+const ELF_LOAD_CAP: usize = 2 * 1024 * 1024;
 static mut ELF_LOAD_BUF: [u8; ELF_LOAD_CAP] = [0; ELF_LOAD_CAP];
 
 fn elf_load_buf() -> &'static mut [u8; ELF_LOAD_CAP] {
@@ -273,6 +287,14 @@ pub extern "C" fn syscall_dispatch(
         num::OPEN => sys_open(a1, a2, a3),
         num::CLOSE => sys_close(a1),
         num::GETPID => crate::process::getpid() as u64,
+        num::GETUID | num::GETEUID => crate::process::getuid() as u64,
+        num::GETGID | num::GETEGID => 0u64, // single-user kernel for now
+        // Single-user kernel: accept setuid/setgid as no-ops (busybox drops privs).
+        num::SETUID | num::SETGID => 0u64,
+        // No real signals yet; pretend the mask was applied.
+        num::RT_SIGPROCMASK => 0u64,
+        // One supplementary group (0); busybox `id` uses this.
+        num::GETGROUPS => sys_getgroups(a1, a2),
         num::GETPPID => {
             let pp = crate::process::getppid();
             if pp < 0 {
@@ -281,6 +303,12 @@ pub extern "C" fn syscall_dispatch(
                 pp as u64
             }
         }
+        num::STAT => sys_stat(a1, a2),
+        num::LSTAT => sys_lstat(a1, a2),
+        num::FSTAT => sys_fstat(a1, a2),
+        num::NEWFSTATAT => sys_newfstatat(a1, a2, a3, a4),
+        num::LSEEK => sys_lseek(a1, a2, a3),
+        num::OPENAT => sys_openat(a1, a2, a3, a4),
         num::FORK => sys_fork(),
         num::EXECVE => sys_execve(a1, a2, a3),
         num::WAIT4 => sys_wait4(a1, a2, a3),
@@ -461,14 +489,6 @@ fn sys_gettimeofday(tv: u64, _tz: u64) -> u64 {
     }
     0
 }
-
-// Linux fcntl commands (subset)
-const F_DUPFD: u64 = 0;
-const F_GETFD: u64 = 1;
-const F_SETFD: u64 = 2;
-const F_GETFL: u64 = 3;
-const F_SETFL: u64 = 4;
-const F_DUPFD_CLOEXEC: u64 = 1030;
 
 /// Linux fcntl(2) — minimal support for musl `opendir` (F_SETFD CLOEXEC) etc.
 fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
@@ -688,7 +708,7 @@ fn sys_close(fd: u64) -> u64 {
     }
 }
 
-/// Linux open(path, flags, mode) — mode ignored; read-only files only.
+/// Linux open(path, flags, mode) — mode ignored for creat defaults in fd layer.
 fn sys_open(path_ptr: u64, flags: u64, _mode: u64) -> u64 {
     let mut path_buf = [0u8; 256];
     let n = match copy_user_path(path_ptr, &mut path_buf) {
@@ -703,6 +723,209 @@ fn sys_open(path_ptr: u64, flags: u64, _mode: u64) -> u64 {
         Ok(fd) => fd as u64,
         Err(e) => map_fd_err(e),
     }
+}
+
+/// Linux openat(dirfd, path, flags, mode) — AT_FDCWD (-100) or absolute path only.
+fn sys_openat(dirfd: u64, path_ptr: u64, flags: u64, mode: u64) -> u64 {
+    const AT_FDCWD: i32 = -100;
+    let mut path_buf = [0u8; 256];
+    let n = match copy_user_path(path_ptr, &mut path_buf) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let path = match core::str::from_utf8(&path_buf[..n]) {
+        Ok(s) => s,
+        Err(_) => return errno::neg(errno::ENOENT),
+    };
+    // Relative openat via dirfd not yet supported (no per-fd cwd).
+    if !path.starts_with('/') && dirfd as i32 != AT_FDCWD {
+        return errno::neg(errno::ENOSYS);
+    }
+    let _ = mode;
+    match fd::sys_open_path(path, flags) {
+        Ok(fd) => fd as u64,
+        Err(e) => map_fd_err(e),
+    }
+}
+
+/// Linux x86_64 `struct stat` size (arch/x86/include/uapi/asm/stat.h).
+const STAT_SIZE: usize = 144;
+
+/// Fill a Linux x86_64 `struct stat` at `stat_buf` from ext2 inode metadata.
+fn fill_linux_stat(stat_buf: u64, ino: u32, st: &crate::fs::ext2::InodeStat) -> u64 {
+    if !user_ptr_ok(stat_buf, STAT_SIZE as u64) {
+        return errno::neg(errno::EFAULT);
+    }
+    // Zero the whole struct first.
+    unsafe {
+        core::ptr::write_bytes(stat_buf as *mut u8, 0, STAT_SIZE);
+    }
+    // Layout (all little-endian, natural alignment on x86_64):
+    //  0: st_dev u64
+    //  8: st_ino u64
+    // 16: st_nlink u64
+    // 24: st_mode u32
+    // 28: st_uid u32
+    // 32: st_gid u32
+    // 36: __pad0 u32
+    // 40: st_rdev u64
+    // 48: st_size i64
+    // 56: st_blksize i64
+    // 64: st_blocks i64  (512-byte units)
+    // 72: st_atime u64
+    // 80: st_atime_nsec u64
+    // 88: st_mtime u64
+    // 96: st_mtime_nsec u64
+    //104: st_ctime u64
+    //112: st_ctime_nsec u64
+    //120: __unused[3] i64
+    let blksize = unsafe { crate::fs::ext2::fs_block_size() } as i64;
+    let blksize = if blksize == 0 { 1024 } else { blksize };
+    let p = stat_buf as *mut u8;
+    write_u64_le(p, 0, 0xdead); // st_dev: fake device id
+    write_u64_le(p, 8, ino as u64);
+    write_u64_le(p, 16, st.nlink as u64);
+    write_u32_le(p, 24, st.mode as u32);
+    write_u32_le(p, 28, st.uid as u32);
+    write_u32_le(p, 32, st.gid as u32);
+    write_u32_le(p, 36, 0);
+    write_u64_le(p, 40, 0); // st_rdev
+    write_u64_le(p, 48, st.size as u64); // st_size (positive)
+    write_u64_le(p, 56, blksize as u64);
+    write_u64_le(p, 64, st.blocks_512 as u64);
+    write_u64_le(p, 72, st.atime as u64);
+    write_u64_le(p, 80, 0);
+    write_u64_le(p, 88, st.mtime as u64);
+    write_u64_le(p, 96, 0);
+    write_u64_le(p, 104, st.ctime as u64);
+    write_u64_le(p, 112, 0);
+    0
+}
+
+fn write_u64_le(base: *mut u8, off: usize, v: u64) {
+    unsafe {
+        core::ptr::copy_nonoverlapping(v.to_le_bytes().as_ptr(), base.add(off), 8);
+    }
+}
+fn write_u32_le(base: *mut u8, off: usize, v: u32) {
+    unsafe {
+        core::ptr::copy_nonoverlapping(v.to_le_bytes().as_ptr(), base.add(off), 4);
+    }
+}
+
+fn fill_console_stat(stat_buf: u64) -> u64 {
+    if !user_ptr_ok(stat_buf, STAT_SIZE as u64) {
+        return errno::neg(errno::EFAULT);
+    }
+    unsafe {
+        core::ptr::write_bytes(stat_buf as *mut u8, 0, STAT_SIZE);
+        let p = stat_buf as *mut u8;
+        write_u64_le(p, 0, 5); // st_dev
+        write_u64_le(p, 8, 1); // st_ino
+        write_u64_le(p, 16, 1); // nlink
+        // S_IFCHR | 0666
+        write_u32_le(p, 24, 0o020666);
+        write_u64_le(p, 56, 1024); // blksize
+    }
+    0
+}
+
+fn stat_path(path: &str, stat_buf: u64) -> u64 {
+    if !crate::fs::is_ready() {
+        return errno::neg(errno::ENOENT);
+    }
+    let cwd = crate::fs::path::cwd_inode();
+    let ino = match crate::fs::ext2::resolve_path(cwd, path) {
+        Ok(i) => i,
+        Err(_) => return errno::neg(errno::ENOENT),
+    };
+    let st = match crate::fs::ext2::inode_stat(ino) {
+        Ok(s) => s,
+        Err(_) => return errno::neg(errno::ENOENT),
+    };
+    fill_linux_stat(stat_buf, ino, &st)
+}
+
+/// Linux stat(path, buf).
+fn sys_stat(path_ptr: u64, stat_buf: u64) -> u64 {
+    let mut path_buf = [0u8; 256];
+    let n = match copy_user_path(path_ptr, &mut path_buf) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let path = match core::str::from_utf8(&path_buf[..n]) {
+        Ok(s) => s,
+        Err(_) => return errno::neg(errno::ENOENT),
+    };
+    // No symlink resolution yet — same as lstat for now.
+    stat_path(path, stat_buf)
+}
+
+/// Linux lstat(path, buf) — same as stat until we follow symlinks.
+fn sys_lstat(path_ptr: u64, stat_buf: u64) -> u64 {
+    sys_stat(path_ptr, stat_buf)
+}
+
+/// Linux fstat(fd, buf).
+fn sys_fstat(fd: u64, stat_buf: u64) -> u64 {
+    if fd::sys_fd_is_console(fd) {
+        return fill_console_stat(stat_buf);
+    }
+    let ino = match fd::sys_fd_inode(fd) {
+        Ok(i) => i,
+        Err(e) => return map_fd_err(e),
+    };
+    let st = match crate::fs::ext2::inode_stat(ino) {
+        Ok(s) => s,
+        Err(_) => return errno::neg(errno::EBADF),
+    };
+    fill_linux_stat(stat_buf, ino, &st)
+}
+
+/// Linux newfstatat(dirfd, path, buf, flags) — AT_FDCWD / absolute only.
+fn sys_newfstatat(dirfd: u64, path_ptr: u64, stat_buf: u64, _flags: u64) -> u64 {
+    const AT_FDCWD: i32 = -100;
+    // Empty path + AT_EMPTY_PATH not supported; require a path.
+    let mut path_buf = [0u8; 256];
+    let n = match copy_user_path(path_ptr, &mut path_buf) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let path = match core::str::from_utf8(&path_buf[..n]) {
+        Ok(s) => s,
+        Err(_) => return errno::neg(errno::ENOENT),
+    };
+    if !path.starts_with('/') && dirfd as i32 != AT_FDCWD {
+        return errno::neg(errno::ENOSYS);
+    }
+    stat_path(path, stat_buf)
+}
+
+/// Linux lseek(fd, offset, whence).
+fn sys_lseek(fd: u64, offset: u64, whence: u64) -> u64 {
+    match fd::sys_lseek(fd, offset as i64, whence) {
+        Ok(off) => off,
+        Err(e) => map_fd_err(e),
+    }
+}
+
+/// Linux getgroups(size, list) — single-user: one group id 0.
+fn sys_getgroups(size: u64, list: u64) -> u64 {
+    // size==0: return count only
+    if size == 0 {
+        return 1;
+    }
+    if size < 1 {
+        return errno::neg(errno::EINVAL);
+    }
+    // gid_t is u32 on x86_64 Linux
+    if !user_ptr_ok(list, 4) {
+        return errno::neg(errno::EFAULT);
+    }
+    unsafe {
+        core::ptr::write_volatile(list as *mut u32, 0);
+    }
+    1
 }
 
 /// Linux getcwd(buf, size) — returns length including NUL, or -ERANGE/-EFAULT.
@@ -1156,11 +1379,8 @@ fn load_elf_from_fs(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage
         return Err("is a directory");
     }
     let size = crate::fs::ext2::inode_file_size(ino) as usize;
-    if size == 0 || size > 512 * 1024 {
+    if size == 0 || size > ELF_LOAD_CAP {
         return Err("bad file size");
-    }
-    if size > ELF_LOAD_CAP {
-        return Err("ELF too large");
     }
     let buf = elf_load_buf();
     let n = crate::fs::ext2::read_file(ino, 0, &mut buf[..size])?;
@@ -1378,11 +1598,8 @@ fn load_elf_image_from_fs(
         return Err("is a directory");
     }
     let size = crate::fs::ext2::inode_file_size(ino) as usize;
-    if size == 0 || size > 512 * 1024 {
+    if size == 0 || size > ELF_LOAD_CAP {
         return Err("bad file size");
-    }
-    if size > ELF_LOAD_CAP {
-        return Err("ELF too large (max 64KiB)");
     }
     let buf = elf_load_buf();
     let n = crate::fs::ext2::read_file(ino, 0, &mut buf[..size])?;
@@ -1417,11 +1634,8 @@ fn run_elf_from_fs(path: &str) -> Result<(), &'static str> {
         return Err("is a directory");
     }
     let size = crate::fs::ext2::inode_file_size(ino) as usize;
-    if size == 0 || size > 512 * 1024 {
+    if size == 0 || size > ELF_LOAD_CAP {
         return Err("bad file size");
-    }
-    if size > ELF_LOAD_CAP {
-        return Err("ELF too large (max 64KiB)");
     }
     let buf = elf_load_buf();
     let n = crate::fs::ext2::read_file(ino, 0, &mut buf[..size])?;

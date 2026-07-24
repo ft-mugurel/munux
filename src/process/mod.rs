@@ -27,6 +27,22 @@ pub use table::{
     current_index, current_pid, for_each_process, process_count, with_current,
 };
 
+/// Private user stack region for the current process, if any.
+///
+/// Fork children get a slot at `CHILD_STACK_REGION`; the initial shell uses the
+/// classic ELF stack (`stack_base == 0`). Exec must honour this so it does not
+/// wipe the parent's stack under a shared address space.
+pub fn current_stack_region() -> Option<(u64, u64)> {
+    table::with_current(|p| {
+        if p.stack_base != 0 && p.stack_size != 0 {
+            Some((p.stack_base, p.stack_size))
+        } else {
+            None
+        }
+    })
+    .flatten()
+}
+
 /// Per-process working directory (ext2 inode).
 pub fn get_cwd_inode() -> u32 {
     table::with_current(|p| p.cwd_inode).unwrap_or(2)
