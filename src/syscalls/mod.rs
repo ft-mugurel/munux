@@ -39,6 +39,7 @@ pub mod num {
     pub const SET_TID_ADDRESS: u64 = 218; // musl crt TLS/thread exit hook
     pub const GETTIMEOFDAY: u64 = 96;
     pub const CLOCK_GETTIME: u64 = 228;
+    pub const FCNTL: u64 = 72;
     pub const OPENAT: u64 = 257; // planned (modern libc)
 }
 
@@ -297,6 +298,7 @@ pub extern "C" fn syscall_dispatch(
         num::SET_TID_ADDRESS => sys_set_tid_address(a1),
         num::GETTIMEOFDAY => sys_gettimeofday(a1, a2),
         num::CLOCK_GETTIME => sys_clock_gettime(a1, a2),
+        num::FCNTL => sys_fcntl(a1, a2, a3),
         num::EXIT | num::EXIT_GROUP => {
             let status = a1 as i32;
             // Clear dying process TLS before switching to parent.
@@ -458,6 +460,22 @@ fn sys_gettimeofday(tv: u64, _tz: u64) -> u64 {
         }
     }
     0
+}
+
+// Linux fcntl commands (subset)
+const F_DUPFD: u64 = 0;
+const F_GETFD: u64 = 1;
+const F_SETFD: u64 = 2;
+const F_GETFL: u64 = 3;
+const F_SETFL: u64 = 4;
+const F_DUPFD_CLOEXEC: u64 = 1030;
+
+/// Linux fcntl(2) — minimal support for musl `opendir` (F_SETFD CLOEXEC) etc.
+fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> u64 {
+    match crate::fd::sys_fcntl(fd, cmd, arg) {
+        Ok(v) => v,
+        Err(e) => map_fd_err(e),
+    }
 }
 
 // Linux arch/x86/include/uapi/asm/prctl.h

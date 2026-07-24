@@ -162,6 +162,18 @@ impl FdTable {
         Ok(i)
     }
 
+    /// Install a copy of `file` in the lowest free slot ≥ `min_fd` (fcntl F_DUPFD).
+    pub fn install_at_least(&mut self, min_fd: usize, file: File) -> Result<usize, FdError> {
+        let start = min_fd.min(FD_MAX);
+        for i in start..FD_MAX {
+            if self.entries[i].kind == FileKind::None {
+                self.entries[i] = file;
+                return Ok(i);
+            }
+        }
+        Err(FdError::NoMem)
+    }
+
     pub fn close(&mut self, fd: usize) -> bool {
         if fd >= FD_MAX || self.entries[fd].kind == FileKind::None {
             return false;
@@ -494,6 +506,57 @@ pub fn sys_close(fd: u64) -> Result<(), FdError> {
 
 pub fn sys_open_path(path: &str, flags: u64) -> Result<usize, FdError> {
     open_path(path, flags)
+}
+
+// Linux fcntl cmds (keep in sync with syscalls::sys_fcntl)
+const F_DUPFD: u64 = 0;
+const F_GETFD: u64 = 1;
+const F_SETFD: u64 = 2;
+const F_GETFL: u64 = 3;
+const F_SETFL: u64 = 4;
+const F_DUPFD_CLOEXEC: u64 = 1030;
+
+/// Minimal fcntl for musl (CLOEXEC after opendir, GETFL, optional DUPFD).
+pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> Result<u64, FdError> {
+    if !is_ready() || fd >= FD_MAX as u64 {
+        return Err(FdError::BadFd);
+    }
+    let fd = fd as usize;
+    with_current(|t| {
+        let file = t.get(fd).ok_or(FdError::BadFd)?;
+        match cmd {
+            F_GETFD => Ok(0), // we do not track FD_CLOEXEC yet
+            F_SETFD => {
+                // Accept FD_CLOEXEC; no-op until exec filters FDs.
+                let _ = arg;
+                Ok(0)
+            }
+            F_GETFL => {
+                let mut fl = if file.readable && file.writable {
+                    O_RDWR
+                } else if file.writable {
+                    O_WRONLY
+                } else {
+                    O_RDONLY
+                };
+                if matches!(file.kind, FileKind::Ext2Dir { .. }) {
+                    fl |= O_DIRECTORY;
+                }
+                Ok(fl)
+            }
+            F_SETFL => {
+                // Ignore O_APPEND/O_NONBLOCK for now.
+                let _ = arg;
+                Ok(0)
+            }
+            F_DUPFD | F_DUPFD_CLOEXEC => {
+                let min = arg as usize;
+                let copy = *file;
+                t.install_at_least(min, copy).map(|i| i as u64)
+            }
+            _ => Err(FdError::Inval),
+        }
+    })
 }
 
 pub fn sys_getdents64(fd: u64, buf: &mut [u8]) -> Result<usize, FdError> {

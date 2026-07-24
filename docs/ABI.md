@@ -43,6 +43,7 @@ Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.
 | 60 | `exit` | **done** (zombie + return to parent) |
 | 61 | `wait4` | **done** (reap; schedules Ready children) |
 | 63 | `uname` | **done** (struct utsname; sysname=munux, machine=x86_64) |
+| 72 | `fcntl` | **done** (F_GETFD/SETFD, F_GETFL/SETFL, F_DUPFD; CLOEXEC accepted as no-op) |
 | 9 | `mmap` | **done** (anonymous `MAP_PRIVATE`; `MAP_FIXED` + `PROT_NONE` for musl guards) |
 | 10 | `mprotect` | **done** (update PTE flags / `PROT_NONE` unmap) |
 | 11 | `munmap` | **done** (tracked region or best-effort page unmap) |
