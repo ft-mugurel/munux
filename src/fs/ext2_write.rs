@@ -67,7 +67,10 @@ fn write_fs_block(block: u32, buf: &[u8]) -> Result<(), &'static str> {
     }
     let sectors = bs / 512;
     let lba = block * sectors;
-    ide::write_sectors(lba, sectors, &buf[..bs as usize]).map_err(|_| "IDE write block")
+    ide::write_sectors(lba, sectors, &buf[..bs as usize]).map_err(|_| "IDE write block")?;
+    // Keep the read cache coherent with on-disk data.
+    crate::fs::ext2::cache_write_block(block, &buf[..bs as usize]);
+    Ok(())
 }
 
 fn read_fs_block(block: u32, buf: &mut [u8]) -> Result<(), &'static str> {

@@ -130,6 +130,127 @@ static mut FS: Ext2Fs = Ext2Fs {
 const MAX_GROUPS: usize = 32;
 static mut GROUPS: [Ext2GroupDesc; MAX_GROUPS] = [unsafe { core::mem::zeroed() }; MAX_GROUPS];
 
+// ---- Block cache (LRU) ----
+//
+// BusyBox-sized files use single/double-indirect maps. Without a cache every
+// logical block re-reads the same pointer blocks from IDE (≈3× PIO). A small
+// LRU of FS blocks keeps indirect + hot data in RAM.
+//
+// 64 × 4 KiB = 256 KiB BSS. On 1 KiB filesystems only the first `block_size`
+// bytes of each slot are used.
+
+const BCACHE_SLOTS: usize = 64;
+const BCACHE_BLOCK_CAP: usize = 4096;
+
+#[derive(Clone, Copy)]
+struct BCacheSlot {
+    valid: bool,
+    /// Filesystem block number when `valid`.
+    block: u32,
+    /// Higher = more recently used.
+    tick: u64,
+    data: [u8; BCACHE_BLOCK_CAP],
+}
+
+static mut BCACHE: [BCacheSlot; BCACHE_SLOTS] = [BCacheSlot {
+    valid: false,
+    block: 0,
+    tick: 0,
+    data: [0; BCACHE_BLOCK_CAP],
+}; BCACHE_SLOTS];
+static mut BCACHE_CLOCK: u64 = 1;
+#[allow(dead_code)]
+static mut BCACHE_HITS: u64 = 0;
+#[allow(dead_code)]
+static mut BCACHE_MISSES: u64 = 0;
+
+fn bcache_slot_mut(i: usize) -> *mut BCacheSlot {
+    unsafe { (core::ptr::addr_of_mut!(BCACHE) as *mut BCacheSlot).add(i) }
+}
+
+fn bcache_clear() {
+    unsafe {
+        for i in 0..BCACHE_SLOTS {
+            let s = &mut *bcache_slot_mut(i);
+            s.valid = false;
+            s.block = 0;
+            s.tick = 0;
+        }
+        BCACHE_CLOCK = 1;
+        BCACHE_HITS = 0;
+        BCACHE_MISSES = 0;
+    }
+}
+
+fn bcache_next_tick() -> u64 {
+    unsafe {
+        BCACHE_CLOCK = BCACHE_CLOCK.wrapping_add(1);
+        if BCACHE_CLOCK == 0 {
+            BCACHE_CLOCK = 1;
+        }
+        BCACHE_CLOCK
+    }
+}
+
+/// Install/overwrite a cache entry after a successful disk I/O (or write-through).
+fn bcache_store(block: u32, src: &[u8], bs: usize) {
+    if bs == 0 || bs > BCACHE_BLOCK_CAP {
+        return;
+    }
+    let tick = bcache_next_tick();
+    unsafe {
+        // Prefer existing slot for this block, else free, else lowest tick (LRU).
+        let mut target = None;
+        let mut lru_i = 0usize;
+        let mut lru_tick = u64::MAX;
+        for i in 0..BCACHE_SLOTS {
+            let s = &*bcache_slot_mut(i);
+            if s.valid && s.block == block {
+                target = Some(i);
+                break;
+            }
+            if !s.valid {
+                target = Some(i);
+                break;
+            }
+            if s.tick < lru_tick {
+                lru_tick = s.tick;
+                lru_i = i;
+            }
+        }
+        let i = target.unwrap_or(lru_i);
+        let s = &mut *bcache_slot_mut(i);
+        s.valid = true;
+        s.block = block;
+        s.tick = tick;
+        s.data[..bs].copy_from_slice(&src[..bs]);
+    }
+}
+
+/// Drop a block from the cache (e.g. after a write that bypassed write-through).
+pub fn invalidate_cached_block(block: u32) {
+    unsafe {
+        for i in 0..BCACHE_SLOTS {
+            let s = &mut *bcache_slot_mut(i);
+            if s.valid && s.block == block {
+                s.valid = false;
+                s.block = 0;
+                s.tick = 0;
+            }
+        }
+    }
+}
+
+/// Write-through helper: keep cache coherent after a successful block write.
+pub fn cache_write_block(block: u32, data: &[u8]) {
+    let bs = block_size() as usize;
+    if data.len() < bs || bs > BCACHE_BLOCK_CAP {
+        invalidate_cached_block(block);
+        return;
+    }
+    bcache_store(block, &data[..bs], bs);
+}
+
 unsafe fn sb_magic(sb: &Ext2Superblock) -> u16 {
     core::ptr::addr_of!(sb.s_magic).read_unaligned()
 }
@@ -179,10 +300,27 @@ pub fn mount() -> Result<(), &'static str> {
 
     let groups_count = (blocks_count + blocks_per_group - 1) / blocks_per_group;
 
+    if block_size as usize > BCACHE_BLOCK_CAP {
+        return Err("block size too large for bcache");
+    }
+
     // Group descriptors start in the block immediately after the superblock.
     // block_size 1024: superblock in block 1 → GDT block 2
     // block_size >= 2048: superblock in block 0 → GDT block 1
     let gdt_block = if block_size == 1024 { 2u32 } else { 1u32 };
+
+    // Mount metadata first so cached reads use the correct block size.
+    bcache_clear();
+    unsafe {
+        FS.superblock = sb;
+        FS.block_size = block_size;
+        FS.inode_size = inode_size;
+        FS.inodes_per_group = inodes_per_group;
+        FS.blocks_per_group = blocks_per_group;
+        FS.groups_count = groups_count;
+        FS.first_data_block = first_data_block;
+        FS.mounted = true;
+    }
 
     let n_groups = (groups_count as usize).min(MAX_GROUPS);
     {
@@ -205,17 +343,6 @@ pub fn mount() -> Result<(), &'static str> {
         }
     }
 
-    unsafe {
-        FS.superblock = sb;
-        FS.block_size = block_size;
-        FS.inode_size = inode_size;
-        FS.inodes_per_group = inodes_per_group;
-        FS.blocks_per_group = blocks_per_group;
-        FS.groups_count = groups_count;
-        FS.first_data_block = first_data_block;
-        FS.mounted = true;
-    }
-
     let _ = (blocks_count, block_size, groups_count, inodes_per_group);
 
     // Warm cache with root directory listing
@@ -231,11 +358,43 @@ fn block_size() -> u32 {
     unsafe { FS.block_size }
 }
 
-/// Read one filesystem block into buf (len >= block_size).
+/// Read one filesystem block into `buf` (must be ≥ `bs`).
+///
+/// Uses the in-memory LRU when `bs` matches the mounted filesystem block size.
 pub fn read_block(block: u32, bs: u32, buf: &mut [u8]) -> Result<(), &'static str> {
+    if buf.len() < bs as usize {
+        return Err("block buffer small");
+    }
+    let bs_usize = bs as usize;
+    if bs_usize == 0 || bs_usize > BCACHE_BLOCK_CAP || bs % 512 != 0 {
+        return Err("bad block size");
+    }
+
+    // Cache path (mounted FS, normal block size).
+    let use_cache = unsafe { FS.mounted && FS.block_size == bs };
+    if use_cache {
+        unsafe {
+            for i in 0..BCACHE_SLOTS {
+                let s = &mut *bcache_slot_mut(i);
+                if s.valid && s.block == block {
+                    buf[..bs_usize].copy_from_slice(&s.data[..bs_usize]);
+                    s.tick = bcache_next_tick();
+                    BCACHE_HITS = BCACHE_HITS.wrapping_add(1);
+                    return Ok(());
+                }
+            }
+            BCACHE_MISSES = BCACHE_MISSES.wrapping_add(1);
+        }
+    }
+
     let sectors_per = bs / 512;
     let lba = block * sectors_per;
-    ide::read_sectors(lba, sectors_per, buf)
+    ide::read_sectors(lba, sectors_per, &mut buf[..bs_usize])?;
+
+    if use_cache {
+        bcache_store(block, &buf[..bs_usize], bs_usize);
+    }
+    Ok(())
 }
 
 fn read_fs_block(block: u32, buf: &mut [u8]) -> Result<(), &'static str> {
@@ -244,6 +403,12 @@ fn read_fs_block(block: u32, buf: &mut [u8]) -> Result<(), &'static str> {
         return Err("block buffer small");
     }
     read_block(block, bs, &mut buf[..bs as usize])
+}
+
+/// Optional debug counters (hits / misses) for the block cache.
+#[allow(dead_code)]
+pub fn bcache_stats() -> (u64, u64) {
+    unsafe { (BCACHE_HITS, BCACHE_MISSES) }
 }
 
 /// Read inode `ino` (1-based).
