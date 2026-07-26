@@ -82,7 +82,7 @@ pub unsafe extern "C" fn exception_handler(frame: *const ExceptionFrame) -> ! {
 
     let cr2 = if vec == 14 { read_cr2() } else { 0 };
 
-    crate::vga_print::clear_screen();
+    // Keep prior console text (syscall debug lines) visible under the banner.
     crate::vga_print::println_line(0, b"*** munux KERNEL PANIC ***", 0x4F);
     crate::vga_print::println_line(1, b"CPU exception", 0x0C);
 

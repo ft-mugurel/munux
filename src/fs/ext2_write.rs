@@ -14,12 +14,17 @@ const EXT2_FT_DIR: u8 = 2;
 
 const MAX_GROUPS: usize = 32;
 
-/// Shared 4 KiB scratch for block I/O — avoid large stack frames on the 16 KiB
-/// syscall stack (nested open/trunc/write was overflowing → #UD).
-static mut BLOCK_SCRATCH: [u8; 4096] = [0; 4096];
+/// Shared 4 KiB scratches for block I/O — never put [u8; 4096] on the nest
+/// syscall stack (32 KiB). Nested frames (mkdir → dir_add_entry → write_inode
+/// → write_group_desc) used to overflow, corrupt the saved user context, and
+/// #PF in userland (CR2=0) right after the syscall returned.
+///
+/// Cooperative kernel + cli around FS writes: no concurrent users.
+/// Use scratch(0) for leaf I/O; scratch(1) only when a caller already holds 0.
+static mut BLOCK_SCRATCH: [[u8; 4096]; 2] = [[0; 4096]; 2];
 
-fn scratch() -> &'static mut [u8; 4096] {
-    unsafe { &mut *core::ptr::addr_of_mut!(BLOCK_SCRATCH) }
+fn scratch(i: usize) -> &'static mut [u8; 4096] {
+    unsafe { &mut *core::ptr::addr_of_mut!(BLOCK_SCRATCH[i & 1]) }
 }
 
 // Re-access mount state through helpers in ext2 module — we use public read/write
@@ -81,9 +86,13 @@ fn read_fs_block(block: u32, buf: &mut [u8]) -> Result<(), &'static str> {
     read_block(block, bs, &mut buf[..bs as usize])
 }
 
+/// Superblock scratch — never put 1 KiB on the nest stack (was overflowing
+/// with alloc_inode → write_group_desc → write_superblock nesting).
+static mut SB_SCRATCH: [u8; 1024] = [0; 1024];
+
 fn write_superblock() -> Result<(), &'static str> {
     // Superblock lives at byte offset 1024 (sectors 2..3 for first 1024 bytes of SB area)
-    let mut buf = [0u8; 1024];
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(SB_SCRATCH) };
     ide::read_sector(2, &mut buf[0..512]).map_err(|_| "IDE r")?;
     ide::read_sector(3, &mut buf[512..1024]).map_err(|_| "IDE r")?;
     unsafe {
@@ -101,9 +110,11 @@ fn write_group_desc(group: u32) -> Result<(), &'static str> {
         return Err("group OOB");
     }
     let bs = fs_block_size();
-    let mut gbuf = [0u8; 4096];
+    // Leaf helper: always uses scratch(0). Callers that still need their block
+    // buffer must hold it in scratch(1) or finish with scratch(0) first.
+    let gbuf = scratch(0);
     let blen = (bs as usize).min(4096);
-    read_fs_block(gdt_block(), &mut gbuf)?;
+    read_fs_block(gdt_block(), gbuf)?;
     let gsize = core::mem::size_of::<Ext2GroupDesc>();
     let off = (group as usize) * gsize;
     if off + gsize > blen {
@@ -113,7 +124,7 @@ fn write_group_desc(group: u32) -> Result<(), &'static str> {
         let gd = crate::fs::ext2::fs_group_ptr(group as usize);
         core::ptr::copy_nonoverlapping(gd as *const u8, gbuf.as_mut_ptr().add(off), gsize);
     }
-    write_fs_block(gdt_block(), &gbuf)
+    write_fs_block(gdt_block(), gbuf)
 }
 
 fn bitmap_test(bm: &[u8], bit: u32) -> bool {
@@ -143,7 +154,8 @@ fn group_first_block(group: u32) -> u32 {
 pub fn alloc_block() -> Result<u32, &'static str> {
     let bpg = fs_blocks_per_group();
     let groups = fs_groups_count().min(MAX_GROUPS as u32);
-    let bm = scratch();
+    // Bitmap lives in scratch(1) so write_group_desc can use scratch(0).
+    let bm = scratch(1);
 
     for g in 0..groups {
         let bmp_block = unsafe {
@@ -175,8 +187,8 @@ pub fn alloc_block() -> Result<u32, &'static str> {
                 write_group_desc(g)?;
                 write_superblock()?;
                 let blk = group_first_block(g) + bit;
-                // zero the new block (scratch was bitmap; re-zero after write)
-                let z = scratch();
+                // zero the new block (scratch(0) free after write_group_desc)
+                let z = scratch(0);
                 z.fill(0);
                 write_fs_block(blk, z)?;
                 return Ok(blk);
@@ -197,7 +209,7 @@ fn free_block(block: u32) -> Result<(), &'static str> {
     if g as usize >= MAX_GROUPS {
         return Err("group OOB");
     }
-    let bm = scratch();
+    let bm = scratch(1);
     let bmp_block = unsafe {
         core::ptr::addr_of!((*crate::fs::ext2::fs_group_ptr(g as usize)).bg_block_bitmap)
             .read_unaligned()
@@ -224,20 +236,26 @@ fn free_block(block: u32) -> Result<(), &'static str> {
 pub fn alloc_inode() -> Result<u32, &'static str> {
     let ipg = fs_inodes_per_group();
     let groups = fs_groups_count().min(MAX_GROUPS as u32);
-    let mut bm = [0u8; 4096];
+    // Use scratch(1) so write_group_desc can use scratch(0).
+    // Copy bitmap into a small on-stack? NO — keep static; finish all uses
+    // of scratch(1) before any nested helper that also needs it.
+    let bm = scratch(1);
 
     for g in 0..groups {
         let bmp_block = unsafe {
             core::ptr::addr_of!((*crate::fs::ext2::fs_group_ptr(g as usize)).bg_inode_bitmap)
                 .read_unaligned()
         };
-        read_fs_block(bmp_block, &mut bm)?;
+        read_fs_block(bmp_block, bm)?;
         // inode bits: bit 0 = first inode of group; inodes start at 1
         let start_bit = if g == 0 { 1u32 } else { 0u32 }; // skip inode 0; also root etc. may be set
         for bit in start_bit..ipg {
-            if !bitmap_test(&bm, bit) {
-                bitmap_set(&mut bm, bit, true);
-                write_fs_block(bmp_block, &bm)?;
+            if !bitmap_test(bm, bit) {
+                bitmap_set(bm, bit, true);
+                // Snapshot block # and free-count updates before releasing scratch.
+                write_fs_block(bmp_block, bm)?;
+                // Drop live borrow of scratch(1) before helpers that may re-enter I/O.
+                let ino = g * ipg + bit + 1;
                 unsafe {
                     let gd = crate::fs::ext2::fs_group_ptr(g as usize);
                     let free =
@@ -256,7 +274,6 @@ pub fn alloc_inode() -> Result<u32, &'static str> {
                 }
                 write_group_desc(g)?;
                 write_superblock()?;
-                let ino = g * ipg + bit + 1;
                 return Ok(ino);
             }
         }
@@ -274,14 +291,14 @@ fn free_inode(ino: u32) -> Result<(), &'static str> {
     if g as usize >= MAX_GROUPS {
         return Err("group OOB");
     }
-    let mut bm = [0u8; 4096];
+    let bm = scratch(1);
     let bmp_block = unsafe {
         core::ptr::addr_of!((*crate::fs::ext2::fs_group_ptr(g as usize)).bg_inode_bitmap)
             .read_unaligned()
     };
-    read_fs_block(bmp_block, &mut bm)?;
-    bitmap_set(&mut bm, bit, false);
-    write_fs_block(bmp_block, &bm)?;
+    read_fs_block(bmp_block, bm)?;
+    bitmap_set(bm, bit, false);
+    write_fs_block(bmp_block, bm)?;
     unsafe {
         let gd = crate::fs::ext2::fs_group_ptr(g as usize);
         let free = core::ptr::addr_of!((*gd).bg_free_inodes_count).read_unaligned();
@@ -313,8 +330,8 @@ fn write_inode(ino: u32, inode: &Ext2Inode) -> Result<(), &'static str> {
     let byte_off = index * inode_size;
     let block = table_block + byte_off / bs;
     let offset = (byte_off % bs) as usize;
-    let mut bbuf = [0u8; 4096];
-    read_fs_block(block, &mut bbuf)?;
+    let bbuf = scratch(0);
+    read_fs_block(block, bbuf)?;
     let n = core::mem::size_of::<Ext2Inode>().min(inode_size as usize);
     unsafe {
         core::ptr::copy_nonoverlapping(
@@ -323,7 +340,7 @@ fn write_inode(ino: u32, inode: &Ext2Inode) -> Result<(), &'static str> {
             n,
         );
     }
-    write_fs_block(block, &bbuf)
+    write_fs_block(block, bbuf)
 }
 
 fn zero_inode() -> Ext2Inode {
@@ -413,7 +430,7 @@ fn dir_add_entry(dir_ino: u32, name: &str, child_ino: u32, file_type: u8) -> Res
     let size = inode_get_size(&inode);
     let mut offset = 0u32;
 
-    // Scan for free space in existing entries
+    // Scan for free space in existing entries (scratch(0); no nested 4K frames)
     while offset < size {
         let lb = offset / bs as u32;
         let boff = (offset % bs as u32) as usize;
@@ -427,12 +444,12 @@ fn dir_add_entry(dir_ino: u32, name: &str, child_ino: u32, file_type: u8) -> Res
         if block == 0 {
             break;
         }
-        let mut bbuf = [0u8; 4096];
-        read_fs_block(block, &mut bbuf)?;
+        let bbuf = scratch(0);
+        read_fs_block(block, bbuf)?;
         let mut pos = boff;
         while pos + 8 <= bs && (offset as usize) < size as usize {
-            let ino = read_u32_le(&bbuf, pos);
-            let rec = read_u16_le(&bbuf, pos + 4) as usize;
+            let ino = read_u32_le(bbuf, pos);
+            let rec = read_u16_le(bbuf, pos + 4) as usize;
             let nlen = bbuf[pos + 6] as usize;
             if rec < 8 {
                 break;
@@ -440,8 +457,8 @@ fn dir_add_entry(dir_ino: u32, name: &str, child_ino: u32, file_type: u8) -> Res
             let ideal = dirent_rec_len(nlen);
             // empty slot
             if ino == 0 && rec >= need {
-                write_dirent(&mut bbuf, pos, rec, child_ino, name, file_type);
-                write_fs_block(block, &bbuf)?;
+                write_dirent(bbuf, pos, rec, child_ino, name, file_type);
+                write_fs_block(block, bbuf)?;
                 return Ok(());
             }
             // split trailing free space in this entry
@@ -452,8 +469,8 @@ fn dir_add_entry(dir_ino: u32, name: &str, child_ino: u32, file_type: u8) -> Res
                 bbuf[pos + 4] = nr[0];
                 bbuf[pos + 5] = nr[1];
                 let npos = pos + new_rec;
-                write_dirent(&mut bbuf, npos, rest, child_ino, name, file_type);
-                write_fs_block(block, &bbuf)?;
+                write_dirent(bbuf, npos, rest, child_ino, name, file_type);
+                write_fs_block(block, bbuf)?;
                 return Ok(());
             }
             pos += rec;
@@ -467,12 +484,14 @@ fn dir_add_entry(dir_ino: u32, name: &str, child_ino: u32, file_type: u8) -> Res
         }
     }
 
-    // Need a new directory block
+    // Need a new directory block (scratch free before alloc_block)
     let new_blk = alloc_block()?;
-    let mut bbuf = [0u8; 4096];
-    write_dirent(&mut bbuf, 0, bs, child_ino, name, file_type);
-    // rest of block is empty (rec_len already covers full block for first entry)
-    write_fs_block(new_blk, &bbuf)?;
+    {
+        let bbuf = scratch(0);
+        bbuf.fill(0);
+        write_dirent(bbuf, 0, bs, child_ino, name, file_type);
+        write_fs_block(new_blk, bbuf)?;
+    }
 
     // attach to inode
     let mut placed = false;
@@ -520,13 +539,13 @@ fn dir_remove_entry(dir_ino: u32, name: &str) -> Result<u32, &'static str> {
         if block == 0 {
             break;
         }
-        let mut bbuf = [0u8; 4096];
-        read_fs_block(block, &mut bbuf)?;
+        let bbuf = scratch(0);
+        read_fs_block(block, bbuf)?;
         let mut pos = 0usize;
         let mut prev_pos: Option<usize> = None;
         while pos + 8 <= bs {
-            let ino = read_u32_le(&bbuf, pos);
-            let rec = read_u16_le(&bbuf, pos + 4) as usize;
+            let ino = read_u32_le(bbuf, pos);
+            let rec = read_u16_le(bbuf, pos + 4) as usize;
             let nlen = bbuf[pos + 6] as usize;
             if rec < 8 {
                 break;
@@ -539,14 +558,14 @@ fn dir_remove_entry(dir_ino: u32, name: &str) -> Result<u32, &'static str> {
                     }
                     // merge into previous or zero inode
                     if let Some(pp) = prev_pos {
-                        let prec = read_u16_le(&bbuf, pp + 4) as usize;
+                        let prec = read_u16_le(bbuf, pp + 4) as usize;
                         let new_rec = (prec + rec) as u16;
                         bbuf[pp + 4..pp + 6].copy_from_slice(&new_rec.to_le_bytes());
                     } else {
                         // first entry: zero inode, keep rec_len
                         bbuf[pos..pos + 4].copy_from_slice(&0u32.to_le_bytes());
                     }
-                    write_fs_block(block, &bbuf)?;
+                    write_fs_block(block, bbuf)?;
                     return Ok(ino);
                 }
             }
@@ -598,7 +617,6 @@ pub fn touch(cwd: u32, path: &str) -> Result<u32, &'static str> {
         return Err("bad name");
     }
     if let Ok(existing) = ext2::lookup(parent, name) {
-        // update times
         let mut ino = read_inode(existing)?;
         inode_set_times(&mut ino, now());
         write_inode(existing, &ino)?;
@@ -635,19 +653,15 @@ pub fn mkdir(cwd: u32, path: &str) -> Result<u32, &'static str> {
     let blk = alloc_block()?;
     let bs = fs_block_size() as usize;
 
-    // directory data: . and ..
-    let mut bbuf = [0u8; 4096];
-    let rec_dot = dirent_rec_len(1);
-    write_dirent(&mut bbuf, 0, rec_dot, ino_num, ".", EXT2_FT_DIR);
-    write_dirent(
-        &mut bbuf,
-        rec_dot,
-        bs - rec_dot,
-        parent,
-        "..",
-        EXT2_FT_DIR,
-    );
-    write_fs_block(blk, &bbuf)?;
+    // directory data: . and .. (scratch, then released before further FS ops)
+    {
+        let bbuf = scratch(0);
+        bbuf.fill(0);
+        let rec_dot = dirent_rec_len(1);
+        write_dirent(bbuf, 0, rec_dot, ino_num, ".", EXT2_FT_DIR);
+        write_dirent(bbuf, rec_dot, bs - rec_dot, parent, "..", EXT2_FT_DIR);
+        write_fs_block(blk, bbuf)?;
+    }
 
     let mut inode = zero_inode();
     inode_set_mode(&mut inode, S_IFDIR | 0o755);
@@ -711,17 +725,20 @@ pub fn unlink(cwd: u32, path: &str) -> Result<(), &'static str> {
             free_block(b)?;
         }
     }
-    // free indirect
+    // free indirect — copy ptrs out first; free_block reuses scratches
     let ind = inode_get_block(&inode, 12);
     if ind != 0 {
-        let mut bbuf = [0u8; 4096];
-        read_fs_block(ind, &mut bbuf)?;
+        let bbuf = scratch(0);
+        read_fs_block(ind, bbuf)?;
         let per = fs_block_size() as usize / 4;
-        for i in 0..per {
-            let off = i * 4;
-            let b = read_u32_le(&bbuf, off);
-            if b != 0 {
-                free_block(b)?;
+        let mut ptrs = [0u32; 1024];
+        let n = per.min(1024);
+        for i in 0..n {
+            ptrs[i] = read_u32_le(bbuf, i * 4);
+        }
+        for i in 0..n {
+            if ptrs[i] != 0 {
+                free_block(ptrs[i])?;
             }
         }
         free_block(ind)?;
@@ -802,7 +819,7 @@ pub fn truncate_file(ino: u32) -> Result<(), &'static str> {
     }
     let ind = inode_get_block(&inode, 12);
     if ind != 0 {
-        let bbuf = scratch();
+        let bbuf = scratch(0);
         read_fs_block(ind, bbuf)?;
         let per = fs_block_size() as usize / 4;
         // Copy block numbers out first — free_block reuses scratch/bitmap buffers.
@@ -860,7 +877,8 @@ pub fn write_file_at(ino: u32, offset: u32, data: &[u8]) -> Result<usize, &'stat
             // keep our in-memory i_block updates on `inode`.
             inode_set_block(&mut inode, lb, block);
         }
-        let bbuf = scratch();
+        // scratch(0) free after alloc_block (which uses 0/1 only transiently)
+        let bbuf = scratch(0);
         read_fs_block(block, bbuf)?;
         let chunk = core::cmp::min(data.len() - done, bs as usize - boff);
         bbuf[boff..boff + chunk].copy_from_slice(&data[done..done + chunk]);

@@ -61,34 +61,23 @@ _start:
 	test rax, rax
 	jnz .main_loop			; cd handled (ok or error printed)
 
-	; external: first word = command, rest = arg (optional)
-	; r14 = cmd len, r15 = arg ptr (0 if none)
+	; external: split line into up to 3 argv words (kernel execve cap).
+	; In-place NULs in linebuf; argv_ptrs → words. argv[0] basename in argv0buf.
 	lea rdi, [rel linebuf]
 	mov rsi, r12
-	call split_cmd_arg		; rcx=cmd_len, rdx=arg_ptr or 0
+	call build_argv			; sets argv_ptrs; rcx = first-word length
 	mov r14, rcx
-	mov r15, rdx
 
 	lea rdi, [rel linebuf]
 	mov rsi, r14
 	call build_exec_path		; pathbuf from first word only
 
-	; build argv array: [arg0_ptr, arg1_ptr or 0, 0]
-	; arg0 = basename in argv0buf, arg1 = rest of line if any
+	; argv[0] = basename (busybox multi-call / conventional)
 	lea rdi, [rel linebuf]
 	mov rsi, r14
 	call copy_argv0			; → argv0buf
 	lea rax, [rel argv0buf]
 	mov [rel argv_ptrs], rax
-	test r15, r15
-	jz .no_arg1
-	mov [rel argv_ptrs+8], r15
-	mov qword [rel argv_ptrs+16], 0
-	jmp .do_fork
-.no_arg1:
-	; argv = [arg0, NULL]
-	mov qword [rel argv_ptrs+8], 0
-	mov qword [rel argv_ptrs+16], 0
 
 .do_fork:
 	mov rax, 57
@@ -400,35 +389,88 @@ try_cd:
 	xor rax, rax
 	ret
 
-; split_cmd_arg(rdi=line, rsi=len)
-; → rcx = length of first word, rdx = ptr to rest (or 0)
-split_cmd_arg:
-	xor rcx, rcx
-.sc_scan:
-	cmp rcx, rsi
-	jae .sc_only
-	cmp byte [rdi+rcx], ' '
-	je .sc_space
+; build_argv(rdi=line, rsi=len)
+; Split into ≤3 space-separated words; write NULs into linebuf.
+; argv_ptrs[0] = first word, [1]/[2] = next words or 0, then trailing 0.
+; → rcx = length of first word (for path builder)
+build_argv:
+	push rbx
+	push r12
+	push r13
+	mov rbx, rdi			; line base
+	mov r12, rsi			; len
+	; clear argv_ptrs (7 slots: a0..a5 + NULL)
+	lea rdi, [rel argv_ptrs]
+	xor rax, rax
+	mov rcx, 7
+.ba_clr:
+	mov [rdi], rax
+	add rdi, 8
+	dec rcx
+	jnz .ba_clr
+
+	xor r13, r13			; word index 0..2
+	xor rcx, rcx			; i
+	xor r8, r8			; first-word length out
+.ba_loop:
+	cmp rcx, r12
+	jae .ba_done
+	; skip spaces
+.ba_sp:
+	cmp rcx, r12
+	jae .ba_done
+	cmp byte [rbx+rcx], ' '
+	jne .ba_word
 	inc rcx
-	jmp .sc_scan
-.sc_only:
-	xor rdx, rdx
-	ret
-.sc_space:
-	; rcx = cmd length; find first non-space after it
-	lea rdx, [rdi+rcx]
-	lea rax, [rdi+rsi]		; end of line
-.sc_sk:
-	cmp rdx, rax
-	jae .sc_noarg
-	cmp byte [rdx], ' '
-	jne .sc_arg
-	inc rdx
-	jmp .sc_sk
-.sc_noarg:
-	xor rdx, rdx
-	ret
-.sc_arg:
+	jmp .ba_sp
+.ba_word:
+	cmp r13, 6
+	jae .ba_done			; ignore extra words (execve cap)
+	lea rax, [rbx+rcx]		; start of word
+	lea rdi, [rel argv_ptrs]
+	mov [rdi+r13*8], rax
+	; find end of word
+.ba_we:
+	cmp rcx, r12
+	jae .ba_endw
+	cmp byte [rbx+rcx], ' '
+	je .ba_endw
+	inc rcx
+	jmp .ba_we
+.ba_endw:
+	; NUL-terminate word (overwrite space or write past if at end)
+	cmp rcx, r12
+	jae .ba_nul_end
+	mov byte [rbx+rcx], 0
+	inc rcx				; skip the NUL/space
+	jmp .ba_next
+.ba_nul_end:
+	; at end of buffer: ensure NUL (read_line should already NUL-term)
+	mov byte [rbx+rcx], 0
+.ba_next:
+	; first word length
+	test r13, r13
+	jnz .ba_ni
+	mov rax, [rel argv_ptrs]
+	lea rdx, [rbx+rcx]
+	; length = (current pos after word) - start; easier: strlen
+	mov rdi, rax
+	xor r8, r8
+.ba_slen:
+	cmp byte [rdi+r8], 0
+	je .ba_ni
+	inc r8
+	cmp r8, 64
+	jb .ba_slen
+.ba_ni:
+	inc r13
+	jmp .ba_loop
+.ba_done:
+	mov rcx, r8			; first word len
+	; if empty first word, rcx=0
+	pop r13
+	pop r12
+	pop rbx
 	ret
 
 ; copy_argv0(rdi=cmd, rsi=len) → argv0buf NUL-terminated (basename if path)
@@ -551,7 +593,7 @@ align 16
 linebuf:	resb 128
 pathbuf:	resb 160
 argv0buf:	resb 64
-argv_ptrs:	resq 3			; [arg0, arg1, NULL]
+argv_ptrs:	resq 7			; [arg0..arg5, NULL] — kernel execve max 6 args
 cwd_buf:	resb 256
 onebyte:	resb 1
 wait_status:	resd 1

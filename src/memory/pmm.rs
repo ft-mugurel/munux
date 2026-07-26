@@ -221,6 +221,28 @@ pub fn free_frames() -> usize {
     total_frames().saturating_sub(used_frames())
 }
 
+/// Mark a physical frame used without zeroing.
+///
+/// Used when installing a user mapping on an identity-mapped page (VA==PA).
+/// We must claim that PA so a later [`alloc_frame`] does not reuse it — zeroing
+/// through the identity address after the VA was remapped to a different frame
+/// would corrupt whatever the VA now points at (often a page table).
+pub fn claim_frame(addr: PhysAddr) -> bool {
+    if !is_initialized() || !addr.is_aligned() {
+        return false;
+    }
+    let frame = addr.frame_index();
+    unsafe {
+        if frame >= HIGHEST_FRAME {
+            return false;
+        }
+        if !is_used(frame) {
+            set_used(frame);
+        }
+        true
+    }
+}
+
 /// Allocate one 4 KiB frame; returns physical address (zeroed).
 pub fn alloc_frame() -> Option<PhysAddr> {
     if !is_initialized() {
@@ -231,8 +253,17 @@ pub fn alloc_frame() -> Option<PhysAddr> {
             if !is_used(frame) {
                 set_used(frame);
                 let addr = (frame as u64) * FRAME_SIZE as u64;
-                // Identity-mapped for early kernel
-                core::ptr::write_bytes(addr as *mut u8, 0, FRAME_SIZE);
+                // Zero via identity map only if this VA still targets this PA.
+                // After user maps claim low identity pages, VA==PA may no longer
+                // hold — but claimed frames are used so we never alloc them here.
+                if let Some(p) = crate::memory::paging::virt_to_phys(addr) {
+                    if (p & !0xFFF) == addr {
+                        core::ptr::write_bytes(addr as *mut u8, 0, FRAME_SIZE);
+                    }
+                } else {
+                    // Not mapped: best-effort identity write (early boot path).
+                    core::ptr::write_bytes(addr as *mut u8, 0, FRAME_SIZE);
+                }
                 return Some(PhysAddr::new(addr));
             }
         }

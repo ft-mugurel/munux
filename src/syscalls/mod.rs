@@ -6,8 +6,8 @@ use crate::console;
 use crate::fd;
 use crate::gdt::{self, STAR_KERNEL_CS, STAR_USER_BASE, USER_CODE_SELECTOR, USER_DATA_SELECTOR};
 use crate::gdt::tss;
-use crate::memory::paging::{self, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
-use crate::memory::pmm::{self, FRAME_SIZE, PhysAddr};
+use crate::memory::paging;
+use crate::memory::pmm::FRAME_SIZE;
 
 /// Linux **x86_64** syscall numbers (see `arch/x86/entry/syscalls/syscall_64.tbl`).
 /// Using Linux numbers is required so static Linux binaries can target munux later.
@@ -24,6 +24,8 @@ pub mod num {
     pub const FSTAT: u64 = 5;
     pub const LSTAT: u64 = 6;
     pub const LSEEK: u64 = 8;
+    /// BusyBox `cat` prefers sendfile(out, in, …) before falling back to read/write.
+    pub const SENDFILE: u64 = 40;
     pub const RT_SIGPROCMASK: u64 = 14; // busybox setuid path
     pub const GETUID: u64 = 102;
     pub const GETGID: u64 = 104;
@@ -54,6 +56,29 @@ pub mod num {
     pub const FCNTL: u64 = 72;
     pub const OPENAT: u64 = 257; // modern libc; thin wrapper over open
     pub const NEWFSTATAT: u64 = 262; // fstatat
+    // File create/remove (BusyBox touch/mkdir/rm/…):
+    pub const ACCESS: u64 = 21;
+    pub const PIPE: u64 = 22; // not yet
+    pub const DUP2: u64 = 33;
+    pub const NANOSLEEP: u64 = 35;
+    pub const RENAME: u64 = 82;
+    pub const MKDIR: u64 = 83;
+    pub const RMDIR: u64 = 84;
+    pub const LINK: u64 = 86;
+    pub const UNLINK: u64 = 87;
+    pub const READLINK: u64 = 89;
+    pub const CHMOD: u64 = 90;
+    pub const CHOWN: u64 = 92;
+    pub const UMASK: u64 = 95;
+    pub const SYNC: u64 = 162;
+    pub const MKDIRAT: u64 = 258;
+    pub const UNLINKAT: u64 = 263;
+    pub const RENAMEAT: u64 = 264;
+    pub const FCHMODAT: u64 = 268;
+    pub const FACCESSAT: u64 = 269;
+    pub const UTIMENSAT: u64 = 280;
+    pub const FUTIMESAT: u64 = 261; // obsolete; busybox touch probes it
+    pub const UTIMES: u64 = 235;
 }
 
 /// Linux-style: return `-errno` as `u64` bit pattern (negative i64).
@@ -61,6 +86,7 @@ pub mod num {
 mod errno {
     pub const EPERM: i64 = 1;
     pub const ENOENT: i64 = 2;
+    pub const ENOEXEC: i64 = 8;
     pub const EBADF: i64 = 9;
     pub const ECHILD: i64 = 10;
     pub const EAGAIN: i64 = 11;
@@ -69,11 +95,13 @@ mod errno {
     pub const EISDIR: i64 = 21;
     pub const EINVAL: i64 = 22;
     pub const ENOTDIR: i64 = 20;
+    pub const EEXIST: i64 = 17;
     pub const ENOSYS: i64 = 38;
     pub const ENAMETOOLONG: i64 = 36;
     pub const EMFILE: i64 = 24;
     pub const ERANGE: i64 = 34;
     pub const ENOTTY: i64 = 25;
+    pub const ENOTEMPTY: i64 = 39;
 
     #[inline]
     pub fn neg(e: i64) -> u64 {
@@ -98,26 +126,33 @@ const DEMO_CODE: u64 = 0x0000_0000_4000_0000;
 const DEMO_STACK_PAGE: u64 = 0x0000_0000_4000_1000;
 const DEMO_STACK_TOP: u64 = DEMO_STACK_PAGE + 0x1000;
 
-const PAGE_USER_RW: u64 = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
-
 /// Nested syscall stacks so wait4/execve → child does not clobber the outer
 /// syscall frame (all would otherwise share one `syscall_kstack` top).
 ///
-/// ELF file bytes must **not** live on these stacks (see `ELF_LOAD_BUF`).
-/// A former 64 KiB stack buffer on a 16 KiB nest stack overflowed into kernel
-/// `.data` after the first `execve`.
-const NEST_KSTACK_BYTES: usize = 32 * 1024;
+/// 64 KiB: FS write paths need headroom. Safe while `kernel_end` < 0x400000
+/// (BusyBox ET_EXEC). The 2 MiB ELF load buffer is at high VA so it is not in
+/// .bss (that alone used to push kernel_end into the BusyBox window).
+const NEST_KSTACK_BYTES: usize = 64 * 1024;
 const NEST_KSTACK_MAX: usize = 6;
 
-/// Scratch for loading static ELFs from ext2 (off the nest stack).
-/// Cooperative kernel: one load at a time.
-/// Sized for full static BusyBox (~1 MiB) and similar tools (was 64 KiB).
+/// Scratch for loading static ELFs from ext2 — high VA, not .bss.
 const ELF_LOAD_CAP: usize = 2 * 1024 * 1024;
-static mut ELF_LOAD_BUF: [u8; ELF_LOAD_CAP] = [0; ELF_LOAD_CAP];
+const ELF_LOAD_VA: u64 = 0x0000_0001_3000_0000;
+static mut ELF_LOAD_PTR: *mut u8 = core::ptr::null_mut();
 
 fn elf_load_buf() -> &'static mut [u8; ELF_LOAD_CAP] {
-    // SAFETY: only called from the single-threaded syscall path; no concurrent load.
-    unsafe { &mut *core::ptr::addr_of_mut!(ELF_LOAD_BUF) }
+    unsafe {
+        if ELF_LOAD_PTR.is_null() {
+            let pages = (ELF_LOAD_CAP + 4095) / 4096;
+            for i in 0..pages {
+                let v = ELF_LOAD_VA + (i as u64) * 4096;
+                crate::memory::paging::create_page(v, crate::memory::paging::PAGE_KERNEL_RW);
+            }
+            ELF_LOAD_PTR = ELF_LOAD_VA as *mut u8;
+            core::ptr::write_bytes(ELF_LOAD_PTR, 0, ELF_LOAD_CAP);
+        }
+        &mut *(ELF_LOAD_PTR as *mut [u8; ELF_LOAD_CAP])
+    }
 }
 
 #[repr(align(16))]
@@ -286,6 +321,7 @@ pub extern "C" fn syscall_dispatch(
         num::IOCTL => sys_ioctl(a1, a2, a3),
         num::OPEN => sys_open(a1, a2, a3),
         num::CLOSE => sys_close(a1),
+        num::SENDFILE => sys_sendfile(a1, a2, a3, a4),
         num::GETPID => crate::process::getpid() as u64,
         num::GETUID | num::GETEUID => crate::process::getuid() as u64,
         num::GETGID | num::GETEGID => 0u64, // single-user kernel for now
@@ -309,6 +345,22 @@ pub extern "C" fn syscall_dispatch(
         num::NEWFSTATAT => sys_newfstatat(a1, a2, a3, a4),
         num::LSEEK => sys_lseek(a1, a2, a3),
         num::OPENAT => sys_openat(a1, a2, a3, a4),
+        num::MKDIR => sys_mkdir(a1, a2),
+        num::MKDIRAT => sys_mkdirat(a1, a2, a3),
+        num::RMDIR => sys_rmdir(a1),
+        num::UNLINK => sys_unlink(a1),
+        num::UNLINKAT => sys_unlinkat(a1, a2, a3),
+        num::ACCESS => sys_access(a1, a2),
+        num::FACCESSAT => sys_faccessat(a1, a2, a3, a4),
+        num::CHMOD => sys_chmod(a1, a2),
+        num::FCHMODAT => sys_fchmodat(a1, a2, a3, a4),
+        num::CHOWN => 0u64, // single-user; pretend success
+        num::UMASK => sys_umask(a1),
+        num::SYNC => 0u64, // write-through FS; nothing to flush
+        num::NANOSLEEP => sys_nanosleep(a1, a2),
+        num::UTIMENSAT => sys_utimensat(a1, a2, a3, a4),
+        num::FUTIMESAT => sys_futimesat(a1, a2, a3),
+        num::UTIMES => sys_utimes(a1, a2),
         num::FORK => sys_fork(),
         num::EXECVE => sys_execve(a1, a2, a3),
         num::WAIT4 => sys_wait4(a1, a2, a3),
@@ -591,6 +643,104 @@ fn sys_write(fd: u64, buf: u64, len: u64) -> u64 {
         Ok(n) => n as u64,
         Err(e) => map_fd_err(e),
     }
+}
+
+/// Kernel buffer for sendfile (keep off the nest stack).
+static mut SENDFILE_BUF: [u8; 4096] = [0; 4096];
+
+/// Linux sendfile(out_fd, in_fd, *offset, count).
+///
+/// Copies up to `count` bytes from `in_fd` to `out_fd`. If `offset` is non-null,
+/// uses/updates that file position and does **not** change `in_fd`'s offset
+/// (Linux semantics). If null, advances `in_fd`'s offset.
+///
+/// Implemented as a read→write loop (no zero-copy); enough for BusyBox `cat`.
+fn sys_sendfile(out_fd: u64, in_fd: u64, offset_ptr: u64, count: u64) -> u64 {
+    if count == 0 {
+        return 0;
+    }
+    // Cap one sendfile call (cat often passes full file size; loop until done).
+    let mut remaining = count.min(16 * 1024 * 1024); // 16 MiB safety cap
+    let use_user_off = offset_ptr != 0;
+    if use_user_off && !user_ptr_ok(offset_ptr, 8) {
+        return errno::neg(errno::EFAULT);
+    }
+
+    let mut pos: u64 = if use_user_off {
+        unsafe { core::ptr::read_volatile(offset_ptr as *const u64) }
+    } else {
+        match fd::sys_fd_offset(in_fd) {
+            Ok(o) => o,
+            Err(e) => return map_fd_err(e),
+        }
+    };
+
+    let buf = unsafe { &mut *core::ptr::addr_of_mut!(SENDFILE_BUF) };
+    let mut total: u64 = 0;
+
+    while remaining > 0 {
+        let chunk = (remaining as usize).min(buf.len());
+        // Read at `pos` without permanently moving in_fd if user offset is set.
+        let n_read = if use_user_off {
+            match fd::sys_read_at(in_fd, pos, &mut buf[..chunk]) {
+                Ok(n) => n,
+                Err(e) => {
+                    return if total == 0 {
+                        map_fd_err(e)
+                    } else {
+                        total
+                    };
+                }
+            }
+        } else {
+            match fd::sys_read_into(in_fd, &mut buf[..chunk]) {
+                Ok(n) => n,
+                Err(e) => {
+                    return if total == 0 {
+                        map_fd_err(e)
+                    } else {
+                        total
+                    };
+                }
+            }
+        };
+        if n_read == 0 {
+            break; // EOF
+        }
+        // Write all of n_read to out (console write may be partial-ish; retry).
+        let mut written = 0usize;
+        while written < n_read {
+            match fd::sys_write_slice(out_fd, &buf[written..n_read]) {
+                Ok(0) => break,
+                Ok(w) => written += w,
+                Err(e) => {
+                    return if total == 0 && written == 0 {
+                        map_fd_err(e)
+                    } else {
+                        total.saturating_add(written as u64)
+                    };
+                }
+            }
+        }
+        if written == 0 {
+            break;
+        }
+        total = total.saturating_add(written as u64);
+        pos = pos.saturating_add(written as u64);
+        remaining = remaining.saturating_sub(written as u64);
+        // If write was short vs read, still advance by what was written.
+        if written < n_read {
+            break;
+        }
+    }
+
+    if use_user_off {
+        unsafe {
+            core::ptr::write_volatile(offset_ptr as *mut u64, pos);
+        }
+    }
+    // When offset_ptr is null, sys_read_into already advanced in_fd.offset.
+    total
 }
 
 /// Linux `struct iovec` — two u64 fields on x86_64.
@@ -958,6 +1108,9 @@ fn sys_getcwd(buf: u64, size: u64) -> u64 {
     need as u64
 }
 
+/// Off-stack buffer for getdents64 (avoid nest-stack 4 KiB + dir_next frames).
+static mut GETDENTS_TMP: [u8; 4096] = [0; 4096];
+
 /// Linux getdents64(fd, dirp, count) — bytes written, 0 at EOF, or -errno.
 fn sys_getdents64(fd: u64, dirp: u64, count: u64) -> u64 {
     if count == 0 {
@@ -967,7 +1120,7 @@ fn sys_getdents64(fd: u64, dirp: u64, count: u64) -> u64 {
     if !user_ptr_ok(dirp, count as u64) {
         return errno::neg(errno::EFAULT);
     }
-    let mut tmp = [0u8; 4096];
+    let tmp = unsafe { &mut *core::ptr::addr_of_mut!(GETDENTS_TMP) };
     let n = match fd::sys_getdents64(fd, &mut tmp[..count]) {
         Ok(n) => n,
         Err(e) => return map_fd_err(e),
@@ -994,6 +1147,244 @@ fn sys_chdir(path_ptr: u64) -> u64 {
         Err("not a directory") => errno::neg(errno::ENOTDIR),
         Err(_) => errno::neg(errno::ENOENT),
     }
+}
+
+fn map_fs_write_err(e: &str) -> u64 {
+    match e {
+        "exists" => errno::neg(errno::EEXIST),
+        "not a directory" => errno::neg(errno::ENOTDIR),
+        "is a directory (use rmdir)" | "is a directory" => errno::neg(errno::EISDIR),
+        "directory not empty" => errno::neg(errno::ENOTEMPTY),
+        "bad name" => errno::neg(errno::EINVAL),
+        "not mounted" | "not found" | "no such" => errno::neg(errno::ENOENT),
+        _ => {
+            // lookup / resolve failures
+            if e.contains("not found") || e.contains("ENOENT") {
+                errno::neg(errno::ENOENT)
+            } else {
+                errno::neg(errno::EINVAL)
+            }
+        }
+    }
+}
+
+fn user_path_str<'a>(path_ptr: u64, buf: &'a mut [u8]) -> Result<&'a str, u64> {
+    let n = copy_user_path(path_ptr, buf)?;
+    core::str::from_utf8(&buf[..n]).map_err(|_| errno::neg(errno::ENOENT))
+}
+
+/// Linux mkdir(path, mode) — mode largely ignored (default 0755 in FS layer).
+fn sys_mkdir(path_ptr: u64, _mode: u64) -> u64 {
+    let mut path_buf = [0u8; 256];
+    let path = match user_path_str(path_ptr, &mut path_buf) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let cwd = crate::fs::path::cwd_inode();
+    // cli: ext2 write uses static block scratches (not re-entrant with IRQ).
+    let r = unsafe {
+        asm!("cli", options(nomem, nostack));
+        let r = crate::fs::ext2_write::mkdir(cwd, path);
+        asm!("sti", options(nomem, nostack));
+        r
+    };
+    match r {
+        Ok(_) => 0,
+        Err(e) => map_fs_write_err(e),
+    }
+}
+
+/// Linux mkdirat(dirfd, path, mode) — AT_FDCWD / absolute only for now.
+fn sys_mkdirat(dirfd: u64, path_ptr: u64, mode: u64) -> u64 {
+    const AT_FDCWD: i32 = -100;
+    let mut path_buf = [0u8; 256];
+    let path = match user_path_str(path_ptr, &mut path_buf) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if !path.starts_with('/') && dirfd as i32 != AT_FDCWD {
+        return errno::neg(errno::ENOSYS);
+    }
+    let _ = mode;
+    sys_mkdir(path_ptr, mode)
+}
+
+/// Linux rmdir(path).
+fn sys_rmdir(path_ptr: u64) -> u64 {
+    let mut path_buf = [0u8; 256];
+    let path = match user_path_str(path_ptr, &mut path_buf) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let cwd = crate::fs::path::cwd_inode();
+    let r = unsafe {
+        asm!("cli", options(nomem, nostack));
+        let r = crate::fs::ext2_write::rmdir(cwd, path);
+        asm!("sti", options(nomem, nostack));
+        r
+    };
+    match r {
+        Ok(()) => 0,
+        Err(e) => map_fs_write_err(e),
+    }
+}
+
+/// Linux unlink(path).
+fn sys_unlink(path_ptr: u64) -> u64 {
+    let mut path_buf = [0u8; 256];
+    let path = match user_path_str(path_ptr, &mut path_buf) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let cwd = crate::fs::path::cwd_inode();
+    let r = unsafe {
+        asm!("cli", options(nomem, nostack));
+        let r = crate::fs::ext2_write::unlink(cwd, path);
+        asm!("sti", options(nomem, nostack));
+        r
+    };
+    match r {
+        Ok(()) => 0,
+        Err(e) => map_fs_write_err(e),
+    }
+}
+
+/// Linux unlinkat(dirfd, path, flags) — AT_FDCWD / absolute; AT_REMOVEDIR → rmdir.
+fn sys_unlinkat(dirfd: u64, path_ptr: u64, flags: u64) -> u64 {
+    const AT_FDCWD: i32 = -100;
+    const AT_REMOVEDIR: u64 = 0x200;
+    let mut path_buf = [0u8; 256];
+    let path = match user_path_str(path_ptr, &mut path_buf) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if !path.starts_with('/') && dirfd as i32 != AT_FDCWD {
+        return errno::neg(errno::ENOSYS);
+    }
+    if flags & AT_REMOVEDIR != 0 {
+        sys_rmdir(path_ptr)
+    } else {
+        sys_unlink(path_ptr)
+    }
+}
+
+/// Linux access(path, mode) — existence / pretend writable for single-user.
+fn sys_access(path_ptr: u64, _mode: u64) -> u64 {
+    let mut path_buf = [0u8; 256];
+    let path = match user_path_str(path_ptr, &mut path_buf) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let cwd = crate::fs::path::cwd_inode();
+    match crate::fs::ext2::resolve_path(cwd, path) {
+        Ok(_) => 0,
+        Err(_) => errno::neg(errno::ENOENT),
+    }
+}
+
+fn sys_faccessat(dirfd: u64, path_ptr: u64, mode: u64, _flags: u64) -> u64 {
+    const AT_FDCWD: i32 = -100;
+    let mut path_buf = [0u8; 256];
+    let path = match user_path_str(path_ptr, &mut path_buf) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if !path.starts_with('/') && dirfd as i32 != AT_FDCWD {
+        return errno::neg(errno::ENOSYS);
+    }
+    sys_access(path_ptr, mode)
+}
+
+/// Linux chmod — accept and ignore mode bits for now (single-user FS).
+fn sys_chmod(path_ptr: u64, _mode: u64) -> u64 {
+    let mut path_buf = [0u8; 256];
+    let path = match user_path_str(path_ptr, &mut path_buf) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let cwd = crate::fs::path::cwd_inode();
+    match crate::fs::ext2::resolve_path(cwd, path) {
+        Ok(_) => 0,
+        Err(_) => errno::neg(errno::ENOENT),
+    }
+}
+
+fn sys_fchmodat(dirfd: u64, path_ptr: u64, mode: u64, _flags: u64) -> u64 {
+    const AT_FDCWD: i32 = -100;
+    let mut path_buf = [0u8; 256];
+    let path = match user_path_str(path_ptr, &mut path_buf) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if !path.starts_with('/') && dirfd as i32 != AT_FDCWD {
+        return errno::neg(errno::ENOSYS);
+    }
+    sys_chmod(path_ptr, mode)
+}
+
+/// Linux umask — store ignored; return previous (always 0022).
+fn sys_umask(_mask: u64) -> u64 {
+    0o022
+}
+
+/// Linux nanosleep(req, rem) — coarse sleep using PIT ticks (~10 ms).
+fn sys_nanosleep(req: u64, rem: u64) -> u64 {
+    if !user_ptr_ok(req, 16) {
+        return errno::neg(errno::EFAULT);
+    }
+    let sec = unsafe { core::ptr::read_volatile(req as *const i64) };
+    let nsec = unsafe { core::ptr::read_volatile((req + 8) as *const i64) };
+    if sec < 0 || nsec < 0 || nsec >= 1_000_000_000 {
+        return errno::neg(errno::EINVAL);
+    }
+    // Convert to PIT ticks at 100 Hz.
+    let total_ns = (sec as u64).saturating_mul(1_000_000_000).saturating_add(nsec as u64);
+    let ticks_needed = (total_ns + 9_999_999) / 10_000_000; // ceil to 10ms
+    let start = crate::interrupts::ticks();
+    while crate::interrupts::ticks().wrapping_sub(start) < ticks_needed as u64 {
+        unsafe {
+            asm!("hlt", options(nomem, nostack));
+        }
+    }
+    if rem != 0 && user_ptr_ok(rem, 16) {
+        unsafe {
+            core::ptr::write_volatile(rem as *mut i64, 0);
+            core::ptr::write_volatile((rem + 8) as *mut i64, 0);
+        }
+    }
+    0
+}
+
+/// Linux utimensat — update times; create empty file if missing (BusyBox touch).
+/// Linux itself does not create on ENOENT; BusyBox then open(O_CREAT). We accept
+/// either path: create-on-utimensat OR create-on-open both go through `touch`.
+fn sys_utimensat(dirfd: u64, path_ptr: u64, _times: u64, _flags: u64) -> u64 {
+    const AT_FDCWD: i32 = -100;
+    // path_ptr == 0 means "dirfd itself" — not supported without fstat path.
+    if path_ptr == 0 {
+        return 0;
+    }
+    let mut path_buf = [0u8; 256];
+    let path = match user_path_str(path_ptr, &mut path_buf) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if !path.starts_with('/') && dirfd as i32 != AT_FDCWD {
+        return errno::neg(errno::ENOSYS);
+    }
+    let cwd = crate::fs::path::cwd_inode();
+    match crate::fs::ext2_write::touch(cwd, path) {
+        Ok(_) => 0,
+        Err(e) => map_fs_write_err(e),
+    }
+}
+
+fn sys_futimesat(dirfd: u64, path_ptr: u64, _times: u64) -> u64 {
+    sys_utimensat(dirfd, path_ptr, 0, 0)
+}
+
+fn sys_utimes(path_ptr: u64, _times: u64) -> u64 {
+    sys_utimensat((-100i32) as u64, path_ptr, 0, 0)
 }
 
 // ENOTDIR used above
@@ -1032,20 +1423,9 @@ fn copy_user_path(path_ptr: u64, out: &mut [u8]) -> Result<usize, u64> {
     Ok(n)
 }
 
-/// Ensure a user-accessible page at `virt`.
+/// Ensure a user-accessible page at `virt` (see `elf::map_user_page`).
 fn map_user_page(virt: u64) -> Result<(), &'static str> {
-    if virt & 0xFFF != 0 {
-        return Err("unaligned");
-    }
-    // If already present, re-map with USER flags if needed
-    if let Some(phys) = paging::virt_to_phys(virt) {
-        let page = phys & !0xFFF;
-        paging::map_page(virt, PhysAddr::new(page), PAGE_USER_RW);
-        return Ok(());
-    }
-    let frame = pmm::alloc_frame().ok_or("oom")?;
-    paging::map_page(virt, frame, PAGE_USER_RW);
-    Ok(())
+    crate::elf::map_user_page(virt).map_err(|_| "map_user_page")
 }
 
 fn setup_demo_image() -> Result<(), &'static str> {
@@ -1208,33 +1588,28 @@ fn sys_execve(path_ptr: u64, argv_ptr: u64, _envp: u64) -> u64 {
         Err(_) => return errno::neg(errno::ENOENT),
     };
 
-    // Collect argv strings (max 3) into kernel buffers.
-    let mut a0 = [0u8; 64];
-    let mut a1 = [0u8; 64];
-    let mut a2 = [0u8; 64];
-    let mut arg_lens = [0usize; 3];
+    // Collect argv strings (max 6) into kernel buffers.
+    // BusyBox needs e.g. argv=["busybox","cp","a","b"] or tar with flags.
+    const ARGV_MAX: usize = 6;
+    let mut abuf = [[0u8; 64]; ARGV_MAX];
+    let mut arg_lens = [0usize; ARGV_MAX];
 
     let argv0_default = path.rsplit('/').next().unwrap_or(path);
     // Default argv[0] from path basename (overwritten if user argv provided)
     let dlen = core::cmp::min(argv0_default.len(), 63);
-    a0[..dlen].copy_from_slice(argv0_default.as_bytes());
+    abuf[0][..dlen].copy_from_slice(argv0_default.as_bytes());
     arg_lens[0] = dlen;
     let mut argc = 1usize;
 
     if argv_ptr != 0 && user_ptr_ok(argv_ptr, 8) {
-        // argv is char**; read pointers until NULL (max 3)
+        // argv is char**; read pointers until NULL
         let mut n = 0usize;
-        for i in 0..3u64 {
+        for i in 0..ARGV_MAX as u64 {
             let p = unsafe { core::ptr::read_volatile((argv_ptr + i * 8) as *const u64) };
             if p == 0 {
                 break;
             }
-            let slot = match i as usize {
-                0 => &mut a0[..],
-                1 => &mut a1[..],
-                _ => &mut a2[..],
-            };
-            match copy_user_path(p, slot) {
+            match copy_user_path(p, &mut abuf[i as usize]) {
                 Ok(len) => {
                     arg_lens[i as usize] = core::cmp::min(len, 63);
                     n = i as usize + 1;
@@ -1247,27 +1622,34 @@ fn sys_execve(path_ptr: u64, argv_ptr: u64, _envp: u64) -> u64 {
         }
     }
 
-    let s0 = core::str::from_utf8(&a0[..arg_lens[0]]).unwrap_or("?");
-    let s1 = core::str::from_utf8(&a1[..arg_lens[1]]).unwrap_or("");
-    let s2 = core::str::from_utf8(&a2[..arg_lens[2]]).unwrap_or("");
-    let argv_refs: [&str; 3] = [s0, s1, s2];
-    let argv_slice = &argv_refs[..argc];
+    // Build &str view array for the loader (stack/auxv).
+    let mut refs: [&str; ARGV_MAX] = [""; ARGV_MAX];
+    for i in 0..argc {
+        refs[i] = core::str::from_utf8(&abuf[i][..arg_lens[i]]).unwrap_or("?");
+    }
+    let argv_slice = &refs[..argc];
 
     let image = match load_exec_image(path, argv_slice) {
         Ok(img) => img,
-        Err("no filesystem") | Err("not found") | Err("ENOENT") => {
-            return errno::neg(errno::ENOENT);
+        Err(e) => {
+            return match e {
+                "no filesystem" | "not found" | "ENOENT" => errno::neg(errno::ENOENT),
+                "is a directory" => errno::neg(errno::EISDIR),
+                "OOM" | "elf: OOM page" | "oom" => errno::neg(errno::ENOMEM),
+                "elf: entry page zero" | "elf: entry page unmapped" | "elf: map vanished" => {
+                    errno::neg(errno::ENOEXEC)
+                }
+                _ if e.starts_with("elf:") => errno::neg(errno::ENOEXEC),
+                _ => errno::neg(errno::ENOENT),
+            };
         }
-        Err("is a directory") => return errno::neg(errno::EISDIR),
-        Err("OOM") | Err("elf: OOM page") => return errno::neg(errno::ENOMEM),
-        Err(_) => return errno::neg(errno::ENOENT),
     };
 
     // New image: drop old anonymous maps before replacing metadata.
     crate::process::clear_mmaps();
 
     let _ = crate::process::with_current(|p| {
-        p.set_name(s0);
+        p.set_name(refs[0]);
         p.user_rip = image.entry;
         p.user_rsp = image.stack_top;
         p.user_rax = 0;
@@ -1294,8 +1676,12 @@ fn load_exec_image(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage,
     let argv0 = if argv.is_empty() { "?" } else { argv[0] };
     // Prefer filesystem; fall back to embedded known binaries.
     if crate::fs::is_ready() {
-        if let Ok(img) = load_elf_from_fs(path, argv) {
-            return Ok(img);
+        match load_elf_from_fs(path, argv) {
+            Ok(img) => return Ok(img),
+            // Surface real ELF/IO errors (not just "not found") so BusyBox-sized
+            // loads are not silently turned into ENOENT via the embedded path.
+            Err(e) if e != "not found" && e != "ENOENT" => return Err(e),
+            Err(_) => {}
         }
         // try absolute /bin/*
         if !path.starts_with('/') {
@@ -1306,8 +1692,10 @@ fn load_exec_image(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage,
                 abs[prefix.len()..prefix.len() + path.len()]
                     .copy_from_slice(path.as_bytes());
                 if let Ok(s) = core::str::from_utf8(&abs[..prefix.len() + path.len()]) {
-                    if let Ok(img) = load_elf_from_fs(s, argv) {
-                        return Ok(img);
+                    match load_elf_from_fs(s, argv) {
+                        Ok(img) => return Ok(img),
+                        Err(e) if e != "not found" && e != "ENOENT" => return Err(e),
+                        Err(_) => {}
                     }
                 }
             }
@@ -1384,6 +1772,9 @@ fn load_elf_from_fs(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage
     }
     let buf = elf_load_buf();
     let n = crate::fs::ext2::read_file(ino, 0, &mut buf[..size])?;
+    if n < 64 {
+        return Err("elf: short read");
+    }
     crate::elf::load_bytes_argv(&buf[..n], argv)
 }
 

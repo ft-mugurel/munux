@@ -136,11 +136,25 @@ static mut GROUPS: [Ext2GroupDesc; MAX_GROUPS] = [unsafe { core::mem::zeroed() }
 // logical block re-reads the same pointer blocks from IDE (≈3× PIO). A small
 // LRU of FS blocks keeps indirect + hot data in RAM.
 //
-// 64 × 4 KiB = 256 KiB BSS. On 1 KiB filesystems only the first `block_size`
-// bytes of each slot are used.
+// 64 × 4 KiB ≈ 256 KiB — MUST NOT live in low kernel .bss. Classic Linux
+// ET_EXEC loads at 0x400000; if kernel BSS extends into that range, mapping
+// user pages (or writing the ELF through the identity map) clobbers IDT /
+// stacks and the machine triple-faults/reboots. Cache lives at a high VA.
 
 const BCACHE_SLOTS: usize = 64;
 const BCACHE_BLOCK_CAP: usize = 4096;
+
+/// Scratches for read_inode / list_dir / dir_next — never put [u8; 4096] on the
+/// nest syscall stack (nested frames overflow → corrupt return to user).
+/// [0] = leaf I/O (read_inode, read_block_ptr, read_file chunk)
+/// [1] = directory scan holding a block while read_inode uses [0]
+static mut READ_SCRATCH: [[u8; 4096]; 2] = [[0; 4096]; 2];
+
+fn read_scratch(i: usize) -> &'static mut [u8; 4096] {
+    unsafe { &mut *core::ptr::addr_of_mut!(READ_SCRATCH[i & 1]) }
+}
+/// High virtual base for the block cache (outside 1 GiB identity + user ELF).
+const BCACHE_VA: u64 = 0x0000_0001_1000_0000;
 
 #[derive(Clone, Copy)]
 struct BCacheSlot {
@@ -152,26 +166,51 @@ struct BCacheSlot {
     data: [u8; BCACHE_BLOCK_CAP],
 }
 
-static mut BCACHE: [BCacheSlot; BCACHE_SLOTS] = [BCacheSlot {
-    valid: false,
-    block: 0,
-    tick: 0,
-    data: [0; BCACHE_BLOCK_CAP],
-}; BCACHE_SLOTS];
+static mut BCACHE_PTR: *mut BCacheSlot = core::ptr::null_mut();
 static mut BCACHE_CLOCK: u64 = 1;
 #[allow(dead_code)]
 static mut BCACHE_HITS: u64 = 0;
 #[allow(dead_code)]
 static mut BCACHE_MISSES: u64 = 0;
 
+/// Map and zero the high-VA cache if needed. Safe to call multiple times.
+fn bcache_ensure() -> bool {
+    unsafe {
+        if !BCACHE_PTR.is_null() {
+            return true;
+        }
+        let bytes = BCACHE_SLOTS * core::mem::size_of::<BCacheSlot>();
+        let pages = (bytes + 4095) / 4096;
+        for i in 0..pages {
+            let v = BCACHE_VA + (i as u64) * 4096;
+            crate::memory::paging::create_page(v, crate::memory::paging::PAGE_KERNEL_RW);
+        }
+        BCACHE_PTR = BCACHE_VA as *mut BCacheSlot;
+        core::ptr::write_bytes(BCACHE_PTR as *mut u8, 0, bytes);
+        true
+    }
+}
+
 fn bcache_slot_mut(i: usize) -> *mut BCacheSlot {
-    unsafe { (core::ptr::addr_of_mut!(BCACHE) as *mut BCacheSlot).add(i) }
+    if !bcache_ensure() {
+        // Should never fail after paging+PMM init; return a dangling high VA
+        // only to avoid panicking in leaf paths — callers check mount order.
+        return core::ptr::null_mut();
+    }
+    unsafe { BCACHE_PTR.add(i) }
 }
 
 fn bcache_clear() {
+    if !bcache_ensure() {
+        return;
+    }
     unsafe {
         for i in 0..BCACHE_SLOTS {
-            let s = &mut *bcache_slot_mut(i);
+            let p = bcache_slot_mut(i);
+            if p.is_null() {
+                return;
+            }
+            let s = &mut *p;
             s.valid = false;
             s.block = 0;
             s.tick = 0;
@@ -197,6 +236,9 @@ fn bcache_store(block: u32, src: &[u8], bs: usize) {
     if bs == 0 || bs > BCACHE_BLOCK_CAP {
         return;
     }
+    if !bcache_ensure() {
+        return;
+    }
     let tick = bcache_next_tick();
     unsafe {
         // Prefer existing slot for this block, else free, else lowest tick (LRU).
@@ -204,7 +246,11 @@ fn bcache_store(block: u32, src: &[u8], bs: usize) {
         let mut lru_i = 0usize;
         let mut lru_tick = u64::MAX;
         for i in 0..BCACHE_SLOTS {
-            let s = &*bcache_slot_mut(i);
+            let p = bcache_slot_mut(i);
+            if p.is_null() {
+                return;
+            }
+            let s = &*p;
             if s.valid && s.block == block {
                 target = Some(i);
                 break;
@@ -229,9 +275,16 @@ fn bcache_store(block: u32, src: &[u8], bs: usize) {
 
 /// Drop a block from the cache (e.g. after a write that bypassed write-through).
 pub fn invalidate_cached_block(block: u32) {
+    if !bcache_ensure() {
+        return;
+    }
     unsafe {
         for i in 0..BCACHE_SLOTS {
-            let s = &mut *bcache_slot_mut(i);
+            let p = bcache_slot_mut(i);
+            if p.is_null() {
+                return;
+            }
+            let s = &mut *p;
             if s.valid && s.block == block {
                 s.valid = false;
                 s.block = 0;
@@ -371,11 +424,15 @@ pub fn read_block(block: u32, bs: u32, buf: &mut [u8]) -> Result<(), &'static st
     }
 
     // Cache path (mounted FS, normal block size).
-    let use_cache = unsafe { FS.mounted && FS.block_size == bs };
+    let use_cache = unsafe { FS.mounted && FS.block_size == bs } && bcache_ensure();
     if use_cache {
         unsafe {
             for i in 0..BCACHE_SLOTS {
-                let s = &mut *bcache_slot_mut(i);
+                let p = bcache_slot_mut(i);
+                if p.is_null() {
+                    break;
+                }
+                let s = &mut *p;
                 if s.valid && s.block == block {
                     buf[..bs_usize].copy_from_slice(&s.data[..bs_usize]);
                     s.tick = bcache_next_tick();
@@ -430,9 +487,9 @@ pub fn read_inode(ino: u32) -> Result<Ext2Inode, &'static str> {
         let block = table_block + byte_off / bs;
         let offset = (byte_off % bs) as usize;
 
-        let mut bbuf = [0u8; 4096];
+        let bbuf = read_scratch(0);
         let blen = (bs as usize).min(4096);
-        read_fs_block(block, &mut bbuf)?;
+        read_fs_block(block, bbuf)?;
         if offset + core::mem::size_of::<Ext2Inode>() > blen {
             return Err("inode spans");
         }
@@ -489,8 +546,8 @@ fn read_block_ptr(blk: u32, idx: usize) -> Result<u32, &'static str> {
     if blk == 0 {
         return Ok(0);
     }
-    let mut bbuf = [0u8; 4096];
-    read_fs_block(blk, &mut bbuf)?;
+    let bbuf = read_scratch(0);
+    read_fs_block(blk, bbuf)?;
     let off = idx * 4;
     if off + 4 > bbuf.len() {
         return Err("block ptr OOB");
@@ -561,8 +618,8 @@ pub fn read_file(ino: u32, offset: u32, buf: &mut [u8]) -> Result<usize, &'stati
             done += chunk;
             continue;
         }
-        let mut bbuf = [0u8; 4096];
-        read_fs_block(block, &mut bbuf)?;
+        let bbuf = read_scratch(0);
+        read_fs_block(block, bbuf)?;
         let chunk = core::cmp::min(to_read - done, bs as usize - boff);
         buf[done..done + chunk].copy_from_slice(&bbuf[boff..boff + chunk]);
         done += chunk;
@@ -592,8 +649,9 @@ pub fn list_dir(dir_ino: u32) -> Result<usize, &'static str> {
         if block == 0 {
             break;
         }
-        let mut bbuf = [0u8; 4096];
-        read_fs_block(block, &mut bbuf)?;
+        // Dir block in scratch(1); read_inode uses scratch(0).
+        let bbuf = read_scratch(1);
+        read_fs_block(block, bbuf)?;
 
         let mut pos = boff;
         while pos + 8 <= bs as usize && offset < size {
@@ -607,8 +665,11 @@ pub fn list_dir(dir_ino: u32) -> Result<usize, &'static str> {
                 break;
             }
             if ino != 0 && name_len > 0 && pos + 8 + name_len <= bs as usize {
-                let name_bytes = &bbuf[pos + 8..pos + 8 + name_len];
-                let name = core::str::from_utf8(name_bytes).unwrap_or("?");
+                // Copy name before read_inode reuses scratch(0) only; bbuf is [1].
+                let mut name_tmp = [0u8; 255];
+                let nlen = name_len.min(255);
+                name_tmp[..nlen].copy_from_slice(&bbuf[pos + 8..pos + 8 + nlen]);
+                let name = core::str::from_utf8(&name_tmp[..nlen]).unwrap_or("?");
 
                 let child_inode = read_inode(ino).ok();
                 let mut node = FsNode::empty();
@@ -712,8 +773,8 @@ pub fn dir_next_entry(dir_ino: u32, mut offset: u32) -> Result<Option<DirentInfo
         if block == 0 {
             break;
         }
-        let mut bbuf = [0u8; 4096];
-        read_fs_block(block, &mut bbuf)?;
+        let bbuf = read_scratch(1);
+        read_fs_block(block, bbuf)?;
 
         let mut pos = boff;
         while pos + 8 <= bs as usize {
@@ -731,17 +792,16 @@ pub fn dir_next_entry(dir_ino: u32, mut offset: u32) -> Result<Option<DirentInfo
 
             if ino != 0 && name_len > 0 && pos + 8 + name_len <= bs as usize && entry_off >= offset
             {
-                let name_bytes = &bbuf[pos + 8..pos + 8 + name_len];
+                let n = name_len.min(255);
                 let mut info = DirentInfo {
                     ino,
                     next_off,
                     d_type: ext2_ft_to_dt(file_type),
                     name: [0; 255],
-                    name_len: name_len.min(255) as u8,
+                    name_len: n as u8,
                 };
-                let n = info.name_len as usize;
-                info.name[..n].copy_from_slice(&name_bytes[..n]);
-                // If type unknown, try inode mode
+                info.name[..n].copy_from_slice(&bbuf[pos + 8..pos + 8 + n]);
+                // If type unknown, try inode mode (scratch 0; name already copied)
                 if info.d_type == dt::UNKNOWN {
                     if let Ok(ci) = read_inode(ino) {
                         let m = inode_mode(&ci);
@@ -773,16 +833,27 @@ pub fn dir_next_entry(dir_ino: u32, mut offset: u32) -> Result<Option<DirentInfo
 }
 
 /// Lookup a single path component in directory.
+///
+/// Walks the directory with the shared read scratch (no VFS cache fill). The
+/// old `list_dir`+cache path overflowed the nest syscall stack during BusyBox
+/// `touch` and corrupted the saved user context.
 pub fn lookup(dir_ino: u32, name: &str) -> Result<u32, &'static str> {
-    list_dir(dir_ino)?;
-    for i in 0..vfs::cache_len() {
-        if let Some(n) = vfs::cache_get(i) {
-            if n.name_str() == name {
-                return Ok(n.inode);
+    if name.is_empty() || name.len() > 255 {
+        return Err("bad name");
+    }
+    let mut off = 0u32;
+    loop {
+        match dir_next_entry(dir_ino, off)? {
+            None => return Err("not found"),
+            Some(e) => {
+                let n = e.name_len as usize;
+                if n == name.len() && &e.name[..n] == name.as_bytes() {
+                    return Ok(e.ino);
+                }
+                off = e.next_off;
             }
         }
     }
-    Err("not found")
 }
 
 /// Resolve path relative to `cwd_ino`. Absolute if starts with '/'.

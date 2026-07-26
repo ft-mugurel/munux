@@ -454,8 +454,9 @@ pub fn open_path(path: &str, flags: u64) -> Result<usize, FdError> {
             if flags & O_CREAT == 0 {
                 return Err(FdError::NoEnt);
             }
-            // Create empty file then re-resolve.
-            fs::ext2_write::touch(cwd, path).map_err(|_| FdError::NoEnt)?
+            // Create empty file then re-resolve (do not trust returned ino alone).
+            fs::ext2_write::touch(cwd, path).map_err(|_| FdError::NoEnt)?;
+            fs::ext2::resolve_path(cwd, path).map_err(|_| FdError::NoEnt)?
         }
     };
     let is_dir = fs::ext2::inode_is_dir(ino);
@@ -491,6 +492,34 @@ pub fn sys_read_into(fd: u64, buf: &mut [u8]) -> Result<usize, FdError> {
         return Err(FdError::BadFd);
     }
     with_current(|t| t.read(fd as usize, buf))
+}
+
+/// Read from `fd` at absolute `offset` without changing the FD's current offset.
+/// Used by sendfile when the user passes a non-null offset pointer.
+pub fn sys_read_at(fd: u64, offset: u64, buf: &mut [u8]) -> Result<usize, FdError> {
+    if !is_ready() || fd >= FD_MAX as u64 {
+        return Err(FdError::BadFd);
+    }
+    with_current(|t| {
+        let file = t.get(fd as usize).ok_or(FdError::BadFd)?;
+        if !file.readable {
+            return Err(FdError::BadFd);
+        }
+        match file.kind {
+            FileKind::Ext2File { ino } => ext2_file_read(ino, offset, buf),
+            FileKind::Console => Ok(0),
+            FileKind::Ext2Dir { .. } => Err(FdError::IsDir),
+            FileKind::None => Err(FdError::BadFd),
+        }
+    })
+}
+
+/// Current byte offset of an open FD (for sendfile with null offset).
+pub fn sys_fd_offset(fd: u64) -> Result<u64, FdError> {
+    if !is_ready() || fd >= FD_MAX as u64 {
+        return Err(FdError::BadFd);
+    }
+    with_current(|t| t.get(fd as usize).map(|f| f.offset).ok_or(FdError::BadFd))
 }
 
 pub fn sys_close(fd: u64) -> Result<(), FdError> {

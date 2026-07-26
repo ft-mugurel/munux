@@ -195,17 +195,26 @@ pub fn map_page(virt: u64, phys: PhysAddr, flags: u64) {
         let t2 = table_mut(e3.addr());
         let i2 = pd_index(virt);
         let e2 = (*t2).entries[i2];
+        let mut split_huge = false;
         if e2.is_present() && e2.flags() & PAGE_SIZE_2M != 0 {
             // Expand huge page so we can set per-4K USER/flags (ELF at 0x400000).
-            let base = e2.addr() & !0x1F_FFFF;
+            // Phys of a 2 MiB page is aligned to 2 MiB (bits 20:12 are zero).
+            let base = e2.0 & !0x1F_FFFF;
+            // Preserve U/S from the huge page on every leaf. If we drop USER here,
+            // a later brk/mmap that splits a user ET_EXEC 2 MiB mapping leaves the
+            // program text supervisor-only → user #PF (error=0x5) mid-BusyBox.
+            let leaf_flags = PAGE_PRESENT
+                | PAGE_WRITABLE
+                | (e2.flags() & PAGE_USER)
+                | (flags & PAGE_USER);
             let pt = alloc_table();
             let pt_t = table_mut(pt.as_u64());
             for i in 0..ENTRIES {
-                let phys = base + (i as u64) * FRAME_SIZE as u64;
-                // Preserve identity (supervisor R/W); leaf may upgrade USER below.
-                (*pt_t).entries[i] = Entry::new(phys, PAGE_PRESENT | PAGE_WRITABLE);
+                let p = base + (i as u64) * FRAME_SIZE as u64;
+                (*pt_t).entries[i] = Entry::new(p, leaf_flags);
             }
             (*t2).entries[i2] = Entry::new(pt.as_u64(), need);
+            split_huge = true;
         } else if !e2.is_present() {
             let pt = alloc_table();
             (*t2).entries[i2] = Entry::new(pt.as_u64(), need);
@@ -214,12 +223,27 @@ pub fn map_page(virt: u64, phys: PhysAddr, flags: u64) {
             (*t2).entries[i2] = Entry::new(e.addr(), e.flags() | need);
         }
         let e2 = (*t2).entries[i2];
+        // Must not still look like a 2 MiB leaf — that would make the next walk
+        // treat a PT physical address as a huge page and corrupt translations.
+        if e2.flags() & PAGE_SIZE_2M != 0 {
+            panic_paging("map_page: PD still PS after split");
+        }
 
         let t1 = table_mut(e2.addr());
         let i1 = pt_index(virt);
         (*t1).entries[i1] = Entry::new(phys.as_u64(), flags | PAGE_PRESENT);
         if PAGING_ENABLED {
             invlpg(virt);
+            // Drop any cached 2 MiB TLB covering this region.
+            if split_huge {
+                let base = virt & !0x1F_FFFF;
+                let mut v = base;
+                while v < base + 0x20_0000 {
+                    invlpg(v);
+                    v += FRAME_SIZE as u64;
+                }
+                write_cr3(read_cr3());
+            }
         }
     }
 }
@@ -229,6 +253,91 @@ pub fn create_page(virt: u64, flags: u64) -> PhysAddr {
     let frame = pmm::alloc_frame().expect("paging: create_page OOM");
     map_page(virt, frame, flags);
     frame
+}
+
+/// Ensure a 2 MiB identity region is user-accessible (U/S=1) without splitting
+/// into 4 KiB pages. Used for classic ET_EXEC loads at 0x400000+.
+///
+/// `base` must be 2 MiB-aligned. Phys = virt (identity). Claims each 4 KiB
+/// frame in the PMM so later `alloc_frame` will not reuse them.
+pub fn map_identity_2m_user(base: u64) -> Result<(), &'static str> {
+    if base & 0x1F_FFFF != 0 {
+        return Err("paging: 2m base unaligned");
+    }
+    let pml4 = unsafe {
+        if PML4_PHYS == 0 {
+            return Err("paging: not init");
+        }
+        PML4_PHYS
+    };
+    let need = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+    let flags_2m = need | PAGE_SIZE_2M;
+
+    unsafe {
+        let t4 = table_mut(pml4);
+        let i4 = pml4_index(base);
+        if !(*t4).entries[i4].is_present() {
+            let pdpt = alloc_table();
+            (*t4).entries[i4] = Entry::new(pdpt.as_u64(), need);
+        } else {
+            let e = (*t4).entries[i4];
+            (*t4).entries[i4] = Entry::new(e.addr(), e.flags() | need);
+        }
+        let e4 = (*t4).entries[i4];
+
+        let t3 = table_mut(e4.addr());
+        let i3 = pdpt_index(base);
+        if !(*t3).entries[i3].is_present() {
+            let pd = alloc_table();
+            (*t3).entries[i3] = Entry::new(pd.as_u64(), need);
+        } else {
+            let e = (*t3).entries[i3];
+            (*t3).entries[i3] = Entry::new(e.addr(), e.flags() | need);
+        }
+        let e3 = (*t3).entries[i3];
+
+        let t2 = table_mut(e3.addr());
+        let i2 = pd_index(base);
+        let e2 = (*t2).entries[i2];
+
+        if e2.is_present() && e2.flags() & PAGE_SIZE_2M == 0 {
+            // Already split to 4K — set USER on every leaf instead.
+            let pt = e2.addr();
+            // Upgrade PDE U/S
+            (*t2).entries[i2] = Entry::new(pt, e2.flags() | need);
+            let pt_t = table_mut(pt);
+            for i in 0..ENTRIES {
+                let e = (*pt_t).entries[i];
+                if e.is_present() {
+                    let p = e.addr();
+                    (*pt_t).entries[i] = Entry::new(p, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+                    let _ = pmm::claim_frame(PhysAddr::new(p));
+                } else {
+                    let p = base + (i as u64) * FRAME_SIZE as u64;
+                    (*pt_t).entries[i] = Entry::new(p, PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER);
+                    let _ = pmm::claim_frame(PhysAddr::new(p));
+                }
+            }
+        } else {
+            // Install / upgrade 2 MiB identity leaf with USER.
+            (*t2).entries[i2] = Entry::new(base, flags_2m);
+            let mut off = 0u64;
+            while off < 0x20_0000 {
+                let _ = pmm::claim_frame(PhysAddr::new(base + off));
+                off += FRAME_SIZE as u64;
+            }
+        }
+
+        if PAGING_ENABLED {
+            let mut v = base;
+            while v < base + 0x20_0000 {
+                invlpg(v);
+                v += FRAME_SIZE as u64;
+            }
+            write_cr3(read_cr3());
+        }
+    }
+    Ok(())
 }
 
 pub fn unmap_page(virt: u64) {

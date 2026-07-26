@@ -1,7 +1,7 @@
 //! ELF64 loader for freestanding x86_64 user programs (ET_EXEC).
 
 use crate::memory::paging::{self, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
-use crate::memory::pmm::{self, FRAME_SIZE, PhysAddr};
+use crate::memory::pmm::{self, FRAME_SIZE};
 
 const ELFMAG: [u8; 4] = [0x7f, b'E', b'L', b'F'];
 const ELFCLASS64: u8 = 2;
@@ -16,7 +16,8 @@ const MAX_FILE_SIZE: usize = 2 * 1024 * 1024;
 
 /// User stack grows down toward lower addresses.
 pub const USER_STACK_TOP: u64 = 0x0000_0000_7FFF_F000;
-const USER_STACK_PAGES: u64 = 4;
+/// Default stack for non-fork loads. BusyBox can use hundreds of KiB.
+const USER_STACK_PAGES: u64 = 256; // 1 MiB
 
 const PAGE_USER_RW: u64 = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
 
@@ -75,25 +76,51 @@ pub fn map_user_page(virt: u64) -> Result<(), &'static str> {
     if virt < 0x1000 || virt >= 0x0000_8000_0000_0000 {
         return Err("elf: bad user VA");
     }
-    if let Some(phys) = paging::virt_to_phys(virt) {
-        let page = phys & !0xFFF;
-        paging::map_page(virt, PhysAddr::new(page), PAGE_USER_RW);
+    // Low ET_EXEC window: promote whole 2 MiB identity pages to user.
+    if virt >= IDENTITY_USER_LO && virt < IDENTITY_USER_HI {
+        let base = virt & !0x1F_FFFF;
+        return paging::map_identity_2m_user(base);
+    }
+    // High user stack / other: private frames.
+    if paging::virt_to_phys(virt).is_some() {
         return Ok(());
     }
     let frame = pmm::alloc_frame().ok_or("elf: OOM page")?;
     paging::map_page(virt, frame, PAGE_USER_RW);
+    unsafe {
+        core::ptr::write_bytes(virt as *mut u8, 0, FRAME_SIZE);
+    }
     Ok(())
 }
 
 fn map_user_range(start: u64, end: u64) -> Result<(), &'static str> {
     let mut v = page_down(start);
     let end = page_up(end);
+    // Coalesce low identity range into 2 MiB promotions.
+    if v >= IDENTITY_USER_LO && end <= IDENTITY_USER_HI {
+        let mut b = v & !0x1F_FFFF;
+        let last = (end - 1) & !0x1F_FFFF;
+        while b <= last {
+            paging::map_identity_2m_user(b)?;
+            b = b.saturating_add(0x20_0000);
+            if b == 0 {
+                break;
+            }
+        }
+        return Ok(());
+    }
     while v < end {
         map_user_page(v)?;
         v = v.wrapping_add(FRAME_SIZE as u64);
     }
     Ok(())
 }
+
+/// Classic static ET_EXEC window lives in the low identity map (VA == PA).
+/// Writes go straight to that physical memory; page tables only need U/S for
+/// user-mode fetch, not for the kernel copy path.
+const IDENTITY_USER_LO: u64 = 0x400000;
+const IDENTITY_USER_HI: u64 = 0x8000000; // 128 MiB
 
 fn write_user(virt: u64, src: &[u8]) -> Result<(), &'static str> {
     if src.is_empty() {
@@ -103,8 +130,30 @@ fn write_user(virt: u64, src: &[u8]) -> Result<(), &'static str> {
     if virt < 0x1000 || end > 0x0000_8000_0000_0000 {
         return Err("elf: write outside user space");
     }
-    unsafe {
-        core::ptr::copy_nonoverlapping(src.as_ptr(), virt as *mut u8, src.len());
+    // Preferred path: ET_EXEC image in identity window (BusyBox, musl, …).
+    if virt >= IDENTITY_USER_LO && end <= IDENTITY_USER_HI {
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr(), virt as *mut u8, src.len());
+        }
+        return Ok(());
+    }
+    // High user stack / other: write via resolved PA (identity for low frames).
+    let mut done = 0usize;
+    while done < src.len() {
+        let va = virt + done as u64;
+        let page = va & !0xFFF;
+        let phys_base = paging::virt_to_phys(page).ok_or("elf: write unmapped")?;
+        let phys_page = phys_base & !0xFFF;
+        let page_off = (va & 0xFFF) as usize;
+        let chunk = core::cmp::min(src.len() - done, FRAME_SIZE - page_off);
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                src.as_ptr().add(done),
+                (phys_page as usize + page_off) as *mut u8,
+                chunk,
+            );
+        }
+        done += chunk;
     }
     Ok(())
 }
@@ -117,8 +166,24 @@ fn zero_user(virt: u64, len: u64) -> Result<(), &'static str> {
     if virt < 0x1000 || end > 0x0000_8000_0000_0000 {
         return Err("elf: zero outside user space");
     }
-    unsafe {
-        core::ptr::write_bytes(virt as *mut u8, 0, len as usize);
+    if virt >= IDENTITY_USER_LO && end <= IDENTITY_USER_HI {
+        unsafe {
+            core::ptr::write_bytes(virt as *mut u8, 0, len as usize);
+        }
+        return Ok(());
+    }
+    let mut done = 0u64;
+    while done < len {
+        let va = virt + done;
+        let page = va & !0xFFF;
+        let phys_base = paging::virt_to_phys(page).ok_or("elf: zero unmapped")?;
+        let phys_page = phys_base & !0xFFF;
+        let page_off = va & 0xFFF;
+        let chunk = core::cmp::min(len - done, FRAME_SIZE as u64 - page_off);
+        unsafe {
+            core::ptr::write_bytes((phys_page + page_off) as *mut u8, 0, chunk as usize);
+        }
+        done += chunk;
     }
     Ok(())
 }
@@ -252,18 +317,24 @@ fn exec_stack_top() -> (u64, u64) {
 /// Build a Linux-like initial stack:
 /// `[argc][argv…][NULL][envp NULL][auxv… AT_NULL][strings][16B random]`
 ///
-/// `argv` strings are copied onto the stack (max 4 args, 64 bytes each).
+/// `argv` strings are copied onto the stack (max 6 args, 64 bytes each).
 /// Auxv is required by musl's `__init_libc` (it walks pairs until `AT_NULL`).
 pub fn setup_stack(argv: &[&str], aux: &AuxInfo) -> Result<u64, &'static str> {
     let (stack_top, pages) = exec_stack_top();
-    let pages = pages.max(1).min(16);
+    // Cap at 256 pages (1 MiB) — matches child-stack sizing for BusyBox.
+    let pages = pages.max(1).min(256);
     let stack_base = stack_top - pages * FRAME_SIZE as u64;
-    map_user_range(stack_base, stack_top)?;
-    for i in 0..pages {
+    // Map [base, top) plus one page at `stack_top` itself. BusyBox/musl has
+    // been observed to touch a few dozen bytes just above the initial SP
+    // region (CR2 ≈ stack_top+0x42 → not-present #PF after touch/mkdir).
+    // Child stacks use a 2 MiB stride with 1 MiB used, so +4 KiB fits.
+    let map_end = stack_top.saturating_add(FRAME_SIZE as u64);
+    map_user_range(stack_base, map_end)?;
+    for i in 0..=pages {
         zero_user(stack_base + i * FRAME_SIZE as u64, FRAME_SIZE as u64)?;
     }
 
-    let narg = core::cmp::min(argv.len(), 4);
+    let narg = core::cmp::min(argv.len(), 6);
     if narg == 0 {
         return Err("elf: empty argv");
     }
@@ -280,7 +351,7 @@ pub fn setup_stack(argv: &[&str], aux: &AuxInfo) -> Result<u64, &'static str> {
     ];
     write_user(random_ptr, &rnd)?;
 
-    let mut str_ptrs = [0u64; 4];
+    let mut str_ptrs = [0u64; 6];
     for i in 0..narg {
         let bytes = argv[i].as_bytes();
         let len = core::cmp::min(bytes.len(), 64);
@@ -396,6 +467,23 @@ pub fn load_bytes_argv(file: &[u8], argv: &[&str]) -> Result<LoadedImage, &'stat
     let brk_start = page_up(image_end);
     if brk_start < 0x1000 || brk_start >= 0x0000_8000_0000_0000 {
         return Err("elf: bad brk start");
+    }
+
+    // Sanity: entry page must be present (catches failed private-frame installs).
+    {
+        let entry = ehdr.e_entry;
+        let page = entry & !0xFFF;
+        match paging::virt_to_phys(page) {
+            None => return Err("elf: entry page unmapped"),
+            Some(_) => {
+                let b0 = unsafe { core::ptr::read_volatile(entry as *const u8) };
+                let b1 = unsafe { core::ptr::read_volatile((entry + 1) as *const u8) };
+                let b2 = unsafe { core::ptr::read_volatile((entry + 2) as *const u8) };
+                if b0 == 0 && b1 == 0 && b2 == 0 {
+                    return Err("elf: entry page zero");
+                }
+            }
+        }
     }
 
     let aux = AuxInfo {

@@ -15,9 +15,10 @@ pub struct UserFrame {
 }
 
 /// Private user stacks for fork children (shared page tables ⇒ need distinct VAs).
+/// BusyBox (cal etc.) can use hundreds of KiB of stack; 16 KiB caused #PF.
 const CHILD_STACK_REGION: u64 = 0x0000_0000_6F00_0000;
-const CHILD_STACK_STRIDE: u64 = 0x0000_0000_0002_0000; // 128 KiB per slot
-const CHILD_STACK_PAGES: u64 = 4;
+const CHILD_STACK_STRIDE: u64 = 0x0000_0000_0020_0000; // 2 MiB per slot
+const CHILD_STACK_PAGES: u64 = 256; // 1 MiB
 
 /// Fork current process. Parent stays current and returns child PID (>0).
 /// Child is left **Ready** with `user_rax = 0` and a **private stack copy**.
@@ -102,37 +103,36 @@ pub fn fork_from_user(user_rip: u64, user_rsp: u64, user_rflags: u64) -> Result<
     Ok(child_pid)
 }
 
-/// Map `CHILD_STACK_PAGES` at a per-slot VA and copy from the parent's stack window.
+/// Map a full child stack (always `CHILD_STACK_PAGES`) and copy what we can
+/// from the parent. Always allocate the full stack — BusyBox needs ~1 MiB;
+/// the old "1 page if parent rsp unknown" path caused stack #PF (cal, etc.).
 fn clone_user_stack(parent_rsp: u64, slot: usize) -> Option<(u64, u64, u64)> {
     let flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
     let stack_size = CHILD_STACK_PAGES * FRAME_SIZE as u64;
     let child_base = CHILD_STACK_REGION + (slot as u64) * CHILD_STACK_STRIDE;
 
-    // Infer parent stack window: prefer classic ELF stack, else page-align rsp.
+    // Prefer classic ELF stack window for the copy source.
     let elf_top = crate::elf::USER_STACK_TOP;
-    let elf_base = elf_top - stack_size;
+    let elf_base = elf_top.saturating_sub(stack_size);
     let (parent_base, offset_in_stack) = if parent_rsp >= elf_base && parent_rsp <= elf_top {
         (elf_base, parent_rsp - elf_base)
+    } else if parent_rsp >= 0x1000 {
+        // Best-effort: align parent window to stack_size ending above rsp.
+        let parent_top = (parent_rsp + FRAME_SIZE as u64 - 1) & !(FRAME_SIZE as u64 - 1);
+        let parent_base = parent_top.saturating_sub(stack_size).max(0x1000);
+        (parent_base, parent_rsp.saturating_sub(parent_base))
     } else {
-        // Demo stack or unknown: copy one page containing rsp
-        let page = parent_rsp & !(FRAME_SIZE as u64 - 1);
-        (page, parent_rsp - page)
+        (0u64, stack_size.saturating_sub(16))
     };
 
-    let pages = if parent_rsp >= elf_base && parent_rsp <= elf_top {
-        CHILD_STACK_PAGES
-    } else {
-        1
-    };
-    let copy_size = pages * FRAME_SIZE as u64;
-
-    for i in 0..pages {
+    // Always map the full child stack.
+    for i in 0..CHILD_STACK_PAGES {
         let cv = child_base + i * FRAME_SIZE as u64;
         let frame = pmm::alloc_frame()?;
         paging::map_page(cv, frame, flags);
-        let pv = parent_base + i * FRAME_SIZE as u64;
+        let pv = parent_base.saturating_add(i * FRAME_SIZE as u64);
         unsafe {
-            if paging::virt_to_phys(pv).is_some() {
+            if parent_base != 0 && paging::virt_to_phys(pv).is_some() {
                 core::ptr::copy_nonoverlapping(
                     pv as *const u8,
                     cv as *mut u8,
@@ -144,8 +144,9 @@ fn clone_user_stack(parent_rsp: u64, slot: usize) -> Option<(u64, u64, u64)> {
         }
     }
 
-    let child_rsp = child_base + offset_in_stack.min(copy_size.saturating_sub(8));
-    Some((child_rsp, child_base, copy_size))
+    let child_rsp = child_base
+        + offset_in_stack.min(stack_size.saturating_sub(16));
+    Some((child_rsp, child_base, stack_size))
 }
 
 /// Legacy fork helper (kernel). Prefer [`fork_from_user`].
