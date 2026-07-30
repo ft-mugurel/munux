@@ -1,65 +1,85 @@
 # munux
 
-**munux** is a freestanding operating-system kernel written in **Rust** and **NASM**. It boots via **Multiboot/GRUB**, runs under **QEMU**, and aims for long-term **Linux-compatible** userspace (syscalls, processes, VFS) while staying small and readable.
+**munux** is a freestanding **x86_64** operating-system kernel written in **Rust** and **NASM**.  
+It boots via **Multiboot / GRUB**, runs under **QEMU**, and targets a **Linux-compatible** kernel ABI (syscalls, processes, memory, VFS, and later threads and modules).
 
-Started as a **42 KFS** learning kernel; the project now continues independently as **munux**.
+Started as a **42 KFS** learning kernel; development continues independently as **munux**.
 
 | Branch | Role |
 |--------|------|
-| **`main`** | Active development (x86_64 port in progress) |
-| **`32bit`** | Frozen **i686** snapshot (full Multiboot kernel as of the rename) |
+| **`main`** | Active **x86_64** development (this tree) |
+| **`32bit`** | Frozen **i686** snapshot (historical Multiboot kernel) |
 
 Repository: [github.com/ft-mugurel/munux](https://github.com/ft-mugurel/munux)
 
-**ABI:** Linux **x86_64** syscall numbers + FDs — see [`docs/ABI.md`](docs/ABI.md) (v0.2).
+---
+
+## Project goal
+
+Build a **Linux x86_64 ABI–compatible kernel in Rust** — not “run every BusyBox applet.”
+
+BusyBox / static musl binaries are **compatibility probes** and regression tests.  
+Primary architecture targets:
+
+1. **Per-process address spaces** and a real process model  
+2. **Threads** (`clone`, TID, futex, TLS)  
+3. **Loadable kernel modules** (ELF loader, symbol export, init/exit)  
+4. Growing syscall / VFS surface on top of that foundation  
+
+See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phased plan.
 
 ---
 
-## Current capabilities (i686 baseline on `32bit` / shared tree)
+## Current status (x86_64 `main`)
 
 ### Boot & build
-- Multiboot 1 header + assembly entry (`_start`), stack at `stack_top`
-- Custom freestanding Rust target (`#![no_std]`, soft-float, panic = abort)
-- Kernel linked at **1 MiB**; GRUB ISO + QEMU targets
-- IDE disk image (`build/disk.img`) with a small **ext2** rootfs
+- Multiboot → long mode trampoline → Rust `kmain`
+- Custom freestanding Rust target (`#![no_std]`, panic = abort)
+- Kernel linked for **x86_64**; `make iso` / `make run` / `make run-iso`
+- IDE disk image (`build/disk.img`) with **ext2** rootfs (BusyBox, tools under `/bin`)
 
 ### CPU / interrupts
-- **GDT** at fixed address **`0x800`** (8 entries): null, kcode, kdata, kstack, ucode, udata, ustack, **TSS**
-- **TSS** (`ltr 0x38`) — ring-3 → ring-0 stack switch
-- **IDT** — exceptions, **IRQ0** (PIT), **IRQ1** (keyboard), **int 0x80** (syscalls, DPL=3)
-- 8259 PIC remapped; kernel signal / callback helpers
+- **GDT** + **TSS** (ring 3 → ring 0 stack)
+- **IDT** — exceptions, **IRQ0** (PIT 100 Hz), **IRQ1** (keyboard)
+- Userspace entry via **`syscall` / `sysret`** (STAR / LSTAR / SCE), not `int 0x80`
+- Nested `enter_user_mode` frames for cooperative fork / exec / wait
 
 ### Memory
 - Multiboot memory map → **PMM** (frame bitmap)
-- Identity-mapped **paging** (CR0.PG)
-- Kernel **heap** (`kmalloc` freelist)
+- **4-level paging**, identity map + user mappings
+- Kernel heap (`kmalloc`)
+- **Still single shared address space** for processes (no per-process CR3 yet)  
+  → fork+exec uses parent **user-image / mmap / stack snapshots** as a temporary bridge
 
-### Processes
-- PCB table, fork/wait/kill/signal/getuid, simple in-kernel sockets
-- Timer-driven per-process signal delivery
+### Processes & userspace
+- PCB table: pid/ppid, cwd, nice, TLS (`fs_base` / `gs_base`), heap/mmap bookkeeping
+- **Cooperative** `fork` / `vfork` / `execve` / `exit` / `wait4` (child often runs nested to completion)
+- Private **child stacks**; parent classic stack preserved across exec when possible
+- Boot handoff to userspace **`/bin/sh`** (freestanding shell); `exit` returns to kernel debug shell
+- **BusyBox** static binary on disk: many core applets work; interactive **ash** works for common cases
+- ~**80** Linux x86_64 syscall numbers handled (full / partial / stub) — see docs
 
-### Filesystem
-- ATA PIO **IDE** (primary master) + **ext2** read/write
-- Shell: `ls`, `cat`, `pwd`, `cd`, `mkdir`, `touch`, `rm`, `rmdir`
-
-### User mode
-- Ring-3 demo at `0x00400000` (code) / `0x00500000` (stack)
-- **ELF32 loader** — `run /bin/hello` loads `ET_EXEC` from ext2
-- Syscalls via **`int 0x80`**: EXIT, WRITE, READ, OPEN, CLOSE, GETPID, GETUID, FORK, WAIT, KILL, SIGNAL
-- Shell: **`user`** (embedded demo) · **`run` / `exec`** (ELF)
+### Filesystem & FDs
+- ATA PIO **IDE** + **ext2** read/write (mkdir, touch, unlink, rmdir, link, **rename**, chmod, …)
+- Virtual **`/proc`** (e.g. meminfo, mounts, pid entries) for tools like `free` / `ps` / `df`
+- **Per-process FD tables** (clone on fork): files, dirs, pipes, dup/dup2
 
 ### Console
-- VGA 80×25, 6 virtual screens (F1–F6), modest scrollback
-- PS/2 keyboard (US QWERTY), interactive shell (`kfs>` prompt in the i686 tree)
+- VGA 80×25 text, PS/2 keyboard (US QWERTY)
+- Userspace prompt **`$`**; kernel debug shell after sh exits
 
 ---
 
-## Roadmap
+## Documentation
 
-1. **x86_64 port** on `main` (long mode, 4-level paging, `syscall`)
-2. Linux-shaped **FD table**, VFS, and syscall ABI
-3. Per-process address spaces, `execve`, static musl / BusyBox
-4. Broader POSIX surface toward real-world use
+| Doc | Contents |
+|-----|----------|
+| **[docs/ROADMAP.md](docs/ROADMAP.md)** | Architecture roadmap (mm → schedule → threads → modules) |
+| **[docs/ABI.md](docs/ABI.md)** | Syscall calling convention, process model, FD rules |
+| **[docs/SYSCALL_COMPARE.md](docs/SYSCALL_COMPARE.md)** | Linux x86_64 (~385) vs munux (~80) comparison |
+| **[docs/BUSYBOX_SUITE_REPORT.md](docs/BUSYBOX_SUITE_REPORT.md)** | Strict BusyBox regression suite results |
+| **[docs/BUSYBOX_REPORT.md](docs/BUSYBOX_REPORT.md)** | Superseded zero-arg applet scan (historical) |
+| **[SMOKE.md](SMOKE.md)** | Manual smoke checklist |
 
 ---
 
@@ -68,6 +88,7 @@ Repository: [github.com/ft-mugurel/munux](https://github.com/ft-mugurel/munux)
 ```sh
 make              # build ISO + disk + boot (run-iso)
 make run          # -kernel + IDE disk (faster iteration)
+make iso          # build kernel.iso only
 make help         # all targets
 make size         # kernel / ISO size report
 ```
@@ -79,69 +100,68 @@ make size         # kernel / ISO size report
 | `build` | Release kernel → `build/kernel.bin` |
 | `build_debug` | Debug symbols |
 | `run` | QEMU `-kernel` + `disk.img` on IDE index 0 |
-| `run-iso` | GRUB ISO (index 1) + disk (index 0) |
-| `disk` | Recreate 32 MiB ext2 `build/disk.img` |
+| `run-iso` | GRUB ISO (cdrom) + disk |
+| `iso` | Produce `build/kernel.iso` |
+| `disk` | Recreate ext2 `build/disk.img` (+ rootfs tools) |
 | `debug` / `debug-gdb` | QEMU GDB stub + `gdb/kfs.gdb` |
 | `size` | Print artifact sizes |
 | `clean` / `fclean` / `re` | Cleanup / rebuild |
 
-**IDE layout:** primary master (`index=0`) = ext2 disk; ISO uses `index=1` as cdrom. Do not put two drives on unit 0.
+**IDE layout:** primary master (`index=0`) = ext2 disk; ISO uses `index=1` as cdrom.
+
+**Headless automation:** [qemu-connect](https://github.com/) (external) + `scripts/busybox_suite.py` for the strict suite.
 
 ---
 
-## Shell cheat sheet
+## Userspace cheat sheet
+
+### Freestanding `/bin/sh` (default after boot)
+
+| Input | Behavior |
+|-------|----------|
+| `help` | Builtins |
+| `cd` / `pwd` / `clear` / `exit` | Builtins |
+| `ls`, `cat`, … | `fork` + `execve` of `/bin/<cmd>` (embedded or disk) |
+| `busybox …` | Static BusyBox from rootfs |
+
+### Kernel debug shell (after `exit` from sh)
 
 | Command | Description |
 |---------|-------------|
-| `help [cmd]` | Hierarchical help |
-| `about` | Kernel / GDT / memory summary |
-| `gdt` / `idt` / `regs` / `stack` / `mem` | Debug dumps |
-| `pmm` / `vmm` / `heap` | Memory subsystems (+ `test`) |
-| `ps` / `fork` / `wait` / `kill` / `signal` | Processes |
-| `ls` `cat` `pwd` `cd` `mkdir` `touch` `rm` `rmdir` | ext2 |
-| **`user`** | Enter ring 3, demo syscalls, return |
-| `run` / `exec` | Load ELF from disk into ring 3 |
-| `reboot` / `halt` / `panic` / `fault` | Machine control / tests |
-
-Keys: **F1–F6** screens · **Shift+Up/Down** scroll · **Ctrl+Alt+Del** poweroff
+| `help` / `about` | Help / summary |
+| `ps` / `pmm` / … | Debug dumps |
+| `run sh` / `run init` | Re-enter userspace shell |
+| `ls` / `cat` / … | Kernel-side FS helpers |
 
 ---
 
-## Boot flow (i686)
+## Boot flow (x86_64)
 
 ```text
-QEMU → GRUB (or -kernel) → _start (ESP=stack_top, save Multiboot)
-  → load_gdt() → init_tss()
-  → init_idt() → exceptions → PIC → keyboard → timer
-  → sti → VGA screens
-  → PMM → paging → heap → processes → fs → init_syscalls (int 0x80)
-  → shell loop (process_signals + hlt)
+QEMU → GRUB (or -kernel) → Multiboot / long-mode entry
+  → GDT + TSS
+  → IDT + PIC + keyboard + PIT
+  → PMM → paging → heap
+  → process table + FDs + ext2 mount
+  → init_syscalls (STAR/LSTAR, syscall_entry)
+  → load /bin/sh → enter_user_mode
+  → interactive $ shell (or kernel shell after exit)
 ```
 
-### GDT (at `0x800`)
+### Syscall ABI (summary)
 
-| Index | Segment | Selector |
-|------:|---------|----------|
-| 0 | Null | `0x00` |
-| 1 | Kernel code | `0x08` |
-| 2 | Kernel data | `0x10` |
-| 3 | Kernel stack | `0x18` |
-| 4 | User code | `0x23` (RPL3) |
-| 5 | User data | `0x2B` |
-| 6 | User stack | `0x33` |
-| 7 | TSS | `0x38` |
+Same as **Linux x86_64**:
 
-### Syscall ABI (`int 0x80`, current tree)
+| Item | Value |
+|------|--------|
+| Entry | `syscall` |
+| Number | `rax` |
+| Args | `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9` |
+| Return | `rax` or `-errno` |
+| Exit | `sysret` |
 
-| EAX | Name | Args |
-|----:|------|------|
-| 0 | EXIT | EBX=status |
-| 1 | WRITE | EBX=fd, ECX=buf, EDX=len |
-| 2 | READ | (stub) |
-| 3 | OPEN | EBX=path |
-| 5 | GETPID | — |
-| 6 | GETUID | — |
-| … | FORK/WAIT/KILL/SIGNAL | see `src/syscalls/mod.rs` |
+Full table and semantics: **[docs/ABI.md](docs/ABI.md)**.  
+Coverage vs Linux: **[docs/SYSCALL_COMPARE.md](docs/SYSCALL_COMPARE.md)**.
 
 ---
 
@@ -150,21 +170,25 @@ QEMU → GRUB (or -kernel) → _start (ESP=stack_top, save Multiboot)
 ```text
 .
 ├── Makefile
-├── multiboot/          # header, exceptions, timer, syscall.asm
+├── multiboot/          # Multiboot header, exceptions, timer, syscall.asm
 ├── linker/linker.ld
 ├── grub/grub.cfg
-├── gdb/kfs.gdb
-├── SMOKE.md            # manual test checklist
+├── userland/           # freestanding asm apps (sh, ls, cat, …)
+├── scripts/            # busybox_suite.py (strict regression)
+├── docs/               # ABI, roadmap, syscall compare, suite reports
+├── SMOKE.md
 └── src/
     ├── kernel.rs
     ├── gdt/            # GDT + TSS
-    ├── interrupts/     # IDT, PIC, exceptions, keyboard, timer, signals
-    ├── memory/         # PMM, paging, heap, Multiboot parse
-    ├── process/        # PCB, fork/wait, sockets
+    ├── interrupts/     # IDT, PIC, exceptions, keyboard, timer
+    ├── memory/         # PMM, paging, heap, Multiboot
+    ├── process/        # PCB, fork, memory (brk/mmap), sys
     ├── drivers/ide.rs
-    ├── fs/             # ext2 + VFS path
-    ├── syscalls/       # int 0x80 + ring-3 demo
-    ├── shell/
+    ├── fs/             # ext2, path, procfs, vfs helpers
+    ├── fd/             # per-process FD tables, pipes
+    ├── elf/            # ELF64 load + stack/auxv
+    ├── syscalls/       # Linux x86_64 dispatch
+    ├── shell/          # kernel debug shell
     └── vga/
 ```
 
@@ -176,32 +200,37 @@ QEMU → GRUB (or -kernel) → _start (ESP=stack_top, save Multiboot)
 |------|---------|
 | Rust nightly (`rust-toolchain.toml`) | `build-std` / freestanding |
 | nasm, ld | ASM + final link |
-| grub-mkrescue + appropriate GRUB modules | ISO |
-| qemu-system-i386 (32-bit baseline) / qemu-system-x86_64 (port) | Emulation |
+| grub-mkrescue + GRUB modules | ISO |
+| **qemu-system-x86_64** | Emulation |
 | e2fsprogs (`mkfs.ext2`) | Disk image |
 
 ```sh
-# illustrative
 rustup toolchain install nightly
-# nasm binutils grub-pc-bin xorriso qemu-system-x86 e2fsprogs
+# also: nasm, binutils, grub-pc-bin, xorriso, qemu-system-x86, e2fsprogs
 ```
 
 ---
 
-## Smoke test
+## Smoke / regression
 
-See **[SMOKE.md](SMOKE.md)** for a step-by-step manual checklist (boot, FS, `user`, size).
+1. Manual checklist: **[SMOKE.md](SMOKE.md)**  
+2. Strict BusyBox suite: `scripts/busybox_suite.py` → report in `docs/BUSYBOX_SUITE_REPORT.md`  
+3. Headless: build `make iso`, then qemu-connect (or equivalent) with prompt `$`
 
 ---
 
-## Limitations
+## Known limitations (current)
 
-- Single shared address space (no per-process page tables yet)
-- `read` / full file-descriptor table are stubs
-- No preemptive multi-process scheduling beyond cooperative PCBs
-- Subset of Linux x86_64 syscalls only (missing calls return `-ENOSYS`); not a full Linux ABI yet
-- VGA only (no serial console yet)
-- US QWERTY only
+- **No per-process page tables** (shared AS; snapshot hacks around fork/exec)
+- **No preemptive scheduler** (cooperative nested user sessions)
+- **No real threads** (`clone` / futex not implemented; `gettid` ≈ `getpid`)
+- **No loadable kernel modules**
+- Signals mostly **stubs** (handlers accepted; no full delivery / `rt_sigreturn`)
+- **No networking**
+- Subset of Linux syscalls (~80 of ~385); rest **`-ENOSYS`**
+- VGA only (no serial console yet); US QWERTY only
+
+These are intentional “next foundation” items — see the roadmap.
 
 ---
 

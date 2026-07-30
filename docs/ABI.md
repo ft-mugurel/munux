@@ -3,10 +3,14 @@
 This document freezes conventions for userspace and the kernel.  
 **Change only with a deliberate version bump.**
 
-Status: **v0.2** — **Linux x86_64 syscall numbers** for implemented calls.  
-Target arch: **x86_64**.
+| Field | Value |
+|-------|--------|
+| **Status** | **v0.3** — Linux x86_64 syscall numbers; expanded surface |
+| **Arch** | **x86_64** only on `main` |
+| **Goal** | Static Linux/musl binaries use the **same numbers and register ABI** as Linux; missing calls return **`-ENOSYS`** |
 
-Goal: a static Linux binary (musl) should use the **same numbers and register ABI** as on Linux; missing syscalls return `-ENOSYS` until implemented.
+Product direction (threads, modules, per-process mm): **[ROADMAP.md](ROADMAP.md)**.  
+Full Linux vs munux matrix: **[SYSCALL_COMPARE.md](SYSCALL_COMPARE.md)**.
 
 ---
 
@@ -19,67 +23,133 @@ Same as Linux x86_64:
 | Instruction | `syscall` / return via `sysret` |
 | Number | `rax` |
 | Args | `rdi`, `rsi`, `rdx`, `r10`, `r8`, `r9` |
-| Return | `rax` (or `-errno` on failure) |
+| Return | `rax` (or `-errno` as two’s complement `u64`) |
 | Clobbered | `rcx` (RIP), `r11` (RFLAGS) |
+| Kernel entry | `LSTAR` → `syscall_entry` (NASM); TLS MSRs cleared in kernel, restored on return |
+
+**Not used on x86_64 `main`:** `int 0x80` (that was the i686 / early path).
 
 ---
 
-## 2. Syscall numbers (Linux x86_64)
+## 2. Syscall numbers (implemented)
 
-Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.
+Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.  
+~**80** numbers are dispatched (quality varies: full / partial / stub).
 
 | # | Linux name | munux status |
-|---|------------|--------------|
-| 0 | `read` | **done** (stdin or open file FD) |
-| 1 | `write` | **done** (console + ext2 file FDs) |
-| 2 | `open` | **done** (files + dirs; `O_CREAT`/`O_TRUNC`/`O_WRONLY`/`O_RDWR`) |
-| 3 | `close` | **done** |
-| 16 | `ioctl` | **done** (stub: returns `-ENOTTY`; enough for musl TIOCGWINSZ probe) |
-| 19 | `readv` | **done** (musl stdio / `fread`) |
-| 20 | `writev` | **done** (musl stdio / `printf`) |
-| 39 | `getpid` | **done** (real PCB pid) |
-| 57 | `fork` | **done** (PCB + Ready child; shared AS) |
-| 59 | `execve` | **done** (load ELF; argv up to 3 strings; envp ignored) |
-| 60 | `exit` | **done** (zombie + return to parent) |
-| 61 | `wait4` | **done** (reap; schedules Ready children) |
-| 63 | `uname` | **done** (struct utsname; sysname=munux, machine=x86_64) |
-| 72 | `fcntl` | **done** (F_GETFD/SETFD, F_GETFL/SETFL, F_DUPFD; CLOEXEC accepted as no-op) |
-| 9 | `mmap` | **done** (anonymous `MAP_PRIVATE`; `MAP_FIXED` + `PROT_NONE` for musl guards) |
-| 10 | `mprotect` | **done** (update PTE flags / `PROT_NONE` unmap) |
-| 11 | `munmap` | **done** (tracked region or best-effort page unmap) |
-| 12 | `brk` | **done** (program break / heap grow; per-process; Linux return = break addr) |
-| 96 | `gettimeofday` | **done** (wall time = fixed epoch + PIT uptime; `tz` ignored) |
-| 158 | `arch_prctl` | **done** (`ARCH_SET/GET_FS`, `ARCH_SET/GET_GS`; per-process + CPU MSRs) |
-| 218 | `set_tid_address` | **done** (return pid; clear_child_tid on exit not yet) |
-| 228 | `clock_gettime` | **done** (REALTIME / MONOTONIC from PIT ticks @ 100 Hz) |
-| 79 | `getcwd` | **done** (per-process cwd) |
-| 80 | `chdir` | **done** (per-process cwd) |
-| 110 | `getppid` | **done** |
-| 231 | `exit_group` | **done** (same as `exit` for now) |
-| 217 | `getdents64` | **done** (directory listing) |
-| 257 | `openat` | planned (modern libc) |
+|--:|------------|--------------|
+| 0 | `read` | done (stdin, files, pipes) |
+| 1 | `write` | done (console, files, pipes) |
+| 2 | `open` | done (`O_CREAT` / `O_TRUNC` / R/W) |
+| 3 | `close` | done |
+| 4 | `stat` | done |
+| 5 | `fstat` | done |
+| 6 | `lstat` | done (no real symlinks yet → like stat) |
+| 7 | `poll` | done (ash / TTY) |
+| 8 | `lseek` | done |
+| 9 | `mmap` | **partial** (anonymous `MAP_PRIVATE`; `MAP_FIXED` / `PROT_NONE` guards; offset forced 0 in entry) |
+| 10 | `mprotect` | done |
+| 11 | `munmap` | done |
+| 12 | `brk` | done (per-process break) |
+| 13 | `rt_sigaction` | **stub** (stores intent; no real delivery) |
+| 14 | `rt_sigprocmask` | **stub** (returns success) |
+| 16 | `ioctl` | **partial** (TTY probes, winsize, DSR inject) |
+| 19 | `readv` | done |
+| 20 | `writev` | done |
+| 21 | `access` | done |
+| 22 | `pipe` | done |
+| 32 | `dup` | done |
+| 33 | `dup2` | done |
+| 35 | `nanosleep` | done (PIT-based) |
+| 39 | `getpid` | done |
+| 40 | `sendfile` | partial |
+| 57 | `fork` | done (cooperative; **shared AS** + image restore) |
+| 58 | `vfork` | alias of `fork` |
+| 59 | `execve` | done (ELF64; argv; envp ignored; nested enter) |
+| 60 | `exit` | done |
+| 61 | `wait4` | done |
+| 62 | `kill` | **partial** |
+| 63 | `uname` | done (`sysname=munux`) |
+| 72 | `fcntl` | partial (GET/SET FD/FL, DUPFD) |
+| 79 | `getcwd` | done |
+| 80 | `chdir` | done |
+| 82 | `rename` | done (ext2; BusyBox `mv`) |
+| 83 | `mkdir` | done |
+| 84 | `rmdir` | done |
+| 86 | `link` | done (hard link) |
+| 87 | `unlink` | done |
+| 89 | `readlink` | **const only — still ENOSYS if called** |
+| 90 | `chmod` | done |
+| 92 | `chown` | **stub** (always success; single-user) |
+| 95 | `umask` | done |
+| 96 | `gettimeofday` | done |
+| 99 | `sysinfo` | done (`free`) |
+| 102 | `getuid` | done |
+| 104 | `getgid` | done |
+| 105 | `setuid` | **stub** |
+| 106 | `setgid` | **stub** |
+| 107 | `geteuid` | done |
+| 108 | `getegid` | done |
+| 109 | `setpgid` | **stub** |
+| 110 | `getppid` | done |
+| 111 | `getpgrp` | done |
+| 112 | `setsid` | partial |
+| 115 | `getgroups` | done |
+| 121 | `getpgid` | done |
+| 137 | `statfs` | done (`df`) |
+| 138 | `fstatfs` | done |
+| 140 | `getpriority` | done (Linux kernel nice encoding) |
+| 141 | `setpriority` | done |
+| 158 | `arch_prctl` | done (`ARCH_SET/GET_FS/GS`; TLS) |
+| 162 | `sync` | **stub** (no-op; write-through FS) |
+| 186 | `gettid` | = `getpid` (no threads yet) |
+| 217 | `getdents64` | done |
+| 218 | `set_tid_address` | done (return tid; clear_child_tid wake **not** yet) |
+| 228 | `clock_gettime` | done (REALTIME / MONOTONIC @ 100 Hz) |
+| 231 | `exit_group` | same as `exit` for now |
+| 235 | `utimes` | done |
+| 257 | `openat` | partial (`AT_FDCWD` / absolute) |
+| 258 | `mkdirat` | partial |
+| 261 | `futimesat` | partial |
+| 262 | `newfstatat` | done |
+| 263 | `unlinkat` | partial |
+| 264 | `renameat` | partial |
+| 268 | `fchmodat` | partial |
+| 269 | `faccessat` | partial |
+| 271 | `ppoll` | partial |
+| 280 | `utimensat` | partial |
+| 293 | `pipe2` | done |
 
-Unimplemented numbers return **`-ENOSYS`** (`-38`).
+Unimplemented numbers return **`-ENOSYS` (`-38`)** and log `syscall: ENOSYS n=…`.
 
-### Error returns (Linux-style)
+### Error returns
 
-- Success: `>= 0` as documented by the syscall.
-- Failure: **`rax = -errno`** as a 64-bit two's complement value  
-  (e.g. `-EBADF` = `-9`, `-EFAULT` = `-14`, `-ENOSYS` = `-38`).
+- Success: `>= 0` as documented by the call  
+- Failure: **`rax = -errno`** (e.g. `-ENOENT` = `-2`, `-ENOSYS` = `-38`)
 
-User code should check `(long)ret < 0`.
-
-Common errno values we use:
+Common errno values:
 
 | errno | Value | Meaning |
 |-------|------:|---------|
 | EPERM | 1 | Operation not permitted |
 | ENOENT | 2 | No such file |
+| ESRCH | 3 | No such process |
+| ENOEXEC | 8 | Exec format error |
 | EBADF | 9 | Bad file descriptor |
 | ECHILD | 10 | No child processes |
+| EAGAIN | 11 | Try again |
+| ENOMEM | 12 | Out of memory |
 | EFAULT | 14 | Bad address |
+| EEXIST | 17 | File exists |
+| ENOTDIR | 20 | Not a directory |
+| EISDIR | 21 | Is a directory |
 | EINVAL | 22 | Invalid argument |
+| ENOTTY | 25 | Not a TTY |
+| ENAMETOOLONG | 36 | Name too long |
 | ENOSYS | 38 | Not implemented |
+| ENOTEMPTY | 39 | Directory not empty |
+| ERANGE | 34 | Result too large |
+| EMFILE | 24 | Too many open files |
 
 ---
 
@@ -87,53 +157,77 @@ Common errno values we use:
 
 | FD | Name | Backend (today) |
 |----|------|-----------------|
-| 0 | stdin | keyboard ring buffer (`read`) |
-| 1 | stdout | VGA console (`write`) |
-| 2 | stderr | VGA console (`write`) |
+| 0 | stdin | keyboard ring (`read`); ash may `poll` |
+| 1 | stdout | VGA console / file |
+| 2 | stderr | VGA console / file |
 
-- Max FDs per table: **32**.
-- **Per-process FD tables**: each PCB slot has its own table. `fork` / user-task spawn **clone** the parent's open FDs (independent offsets afterward). Closing an FD in a child does not affect the parent.
+- Max FDs per table: **32** (see `fd` module).
+- **Per-process FD tables**: fork **clones** the parent table (independent offsets).
+- Pipes: `pipe` / `pipe2` + `dup2` for redirections / ash.
 
 ### `read` on stdin
 
-- Blocks (`sti; hlt`) until ≥1 byte is available.
-- Returns `min(available, len)` (byte stream; no kernel line discipline).
+- May block until data is available (policy depends on path).
+- Byte stream; no full line discipline.
 
 ---
 
-## 4. Process model (U5–U6)
+## 4. Process model
 
 | Item | Behavior |
 |------|----------|
-| Boot | `kinit` = pid **1** (kernel idle). U8 hands off to userspace `/bin/sh` as a child |
-| `run` / `user` | spawn child PCB, switch current → child, enter ring 3 |
-| `getpid` | current process pid |
-| `getppid` | parent pid (`0` if none) |
-| `fork` | new PCB; child gets **private stack copy**, **cloned FD table**, and `rax=0`; parent stays current. Cooperative: child runs to completion **inside** `fork` before parent resumes |
-| `execve` | load ELF into current process (path from FS or embedded); argv/envp ignored; on success never returns to old image. Kernel snapshots parent text/data so shared-AS `execve` does not destroy the waiting parent |
-| `exit` / `exit_group` | mark **zombie**, switch current → parent, `return_from_user` (nested enter stack) |
-| `wait4` | reap zombie; can also run leftover Ready children; `WNOHANG` skips schedule; `-ECHILD` if no children |
-| cwd | **per-process** (`chdir` / `getcwd` use current PCB) |
+| Boot | `kinit` = pid **1**; handoff to userspace `/bin/sh` as a child |
+| `getpid` / `getppid` | PCB fields |
+| `fork` / `vfork` | New PCB; child **private stack**; **shared page tables** today; FDs cloned; child `rax=0`. Cooperative: often runs to completion **inside** the parent’s `fork` |
+| `execve` | Load ELF64 into current task; argv copied; envp ignored. On shared AS, parent image is **snapshotted/restored** around nested exec |
+| `exit` / `exit_group` | Zombie → switch to parent → `return_from_user` (nest pop) |
+| `wait4` | Reap zombie; `WNOHANG` supported |
+| cwd | Per-process |
+| TLS | Per-process `fs_base` / `gs_base`; enter_user reinstalls MSRs with **null FS/GS selectors** (Linux long-mode convention) |
+| nice | Stored; `getpriority`/`setpriority` Linux encoding; scheduler does not weight yet |
 
-Cooperative model (no preemptive multi-process scheduler, no private page tables yet). Nested kernel stacks for wait/exec.
+**Not yet:** preemptive multi-tasking, per-process CR3, `clone` threads, futex, real signal delivery.
 
-**U7:** freestanding `/bin/sh` in userspace. Builtins: `help`, `exit`, `cd`, `pwd`, `clear`. Other words → `fork` + `execve("/bin/<cmd>")` + `wait4` (argv passed).
+**Userspace shell:** freestanding `/bin/sh` (builtins + fork/exec). BusyBox **ash** also runs for many interactive cases.
 
-**U8:** after boot, kernel loads `/bin/sh` (ext2 or embedded) and enters it as the interactive userspace init. Kernel pid 1 remains `kinit` (parent). When sh `exit`s, control returns to the **kernel debug shell** (`munux>`). Re-enter with `run sh` / `run init`.
+**Kernel debug shell:** after userspace `exit`, prompt returns to kernel-side commands (`run sh`, `ps`, …).
 
 ---
 
-## 5. What is still required for real Linux binaries
+## 5. Memory layout (userspace, typical)
 
-Numbers alone are **not** enough. Also needed over time:
+| Region | Notes |
+|--------|--------|
+| Low ET_EXEC (e.g. `0x400000`) | Static ELF load; often identity-backed today |
+| brk heap | Grows from image end |
+| mmap arena | `0x5000_0000` … `0x6000_0000` (anonymous) |
+| Fork child stacks | `0x6F00_0000` + slot stride |
+| Classic stack | Near `USER_STACK_TOP` (`0x7FFF_F000`) for initial image |
 
-- Many more syscalls (`mprotect`, file-backed `mmap`, `set_tid_address`, …)
-- Full pointer validation and signal/`rt_sigreturn` paths
-- ELF aux vector completeness for dynamic linker (later)
-- Correct `errno` coverage for each call
-- Real page-table isolation / COW on fork
+Kernel high windows used for temporary snapshots (implementation detail; will shrink once private mm lands).
 
-But using **wrong numbers guarantees** Linux binaries will never work — so munux uses Linux numbers from this version forward.
+---
+
+## 6. Filesystem
+
+- Root: **ext2** on IDE primary master.
+- Virtual **`/proc`**: kernel-generated (`meminfo`, `mounts`, pid nodes, …) — not real proc inodes on disk.
+- Writes: create/unlink/mkdir/rmdir/link/**rename**/chmod/truncate paths as implemented in `fs/ext2_write.rs`.
+
+---
+
+## 7. What is still required for fuller Linux binaries
+
+Architecture (see roadmap), then ABI polish:
+
+1. **Per-process page tables** + real fork/exec without snapshots  
+2. **Scheduler** + **`clone`** + **futex** (threads)  
+3. Real **signals** (`rt_sigreturn`, delivery, `tgkill`)  
+4. **`readlink` / `symlink`**, file-backed `mmap`, dynamic linker path  
+5. **VFS** + **kernel modules**  
+6. Broader syscall surface (network optional)
+
+Using **wrong syscall numbers** would make Linux binaries impossible — munux keeps Linux numbers from v0.2 forward.
 
 ---
 
@@ -142,13 +236,9 @@ But using **wrong numbers guarantees** Linux binaries will never work — so mun
 | Ver | Notes |
 |-----|--------|
 | 0.1 | Custom numbers (EXIT=0, WRITE=1, …) |
-| **0.2** | **Linux x86_64 numbers** + `-errno` returns |
-| 0.2+U3 | `open` / file `read` / `chdir` / `getcwd` |
-| 0.2+U4 | `getdents64` + open directory FDs |
-| 0.2+U5 | PCB, real pid/ppid, zombie exit, wait4, per-process cwd |
-| 0.2+U6 | `fork` + `execve`; wait schedules Ready children; nested enter |
-| 0.2+U7 | Freestanding `/bin/sh` (prompt, builtins, fork/exec/wait) |
-| 0.2+U8 | Boot handoff to `/bin/sh`; kernel shell is debug fallback |
-| 0.2+FD | Per-process FD tables (clone on fork/spawn) |
-| 0.2+uname | `uname` + ENOSYS logging for musl bring-up |
-| 0.2+arch_prctl | FS/GS base for TLS (`arch_prctl`) |
+| **0.2** | **Linux x86_64 numbers** + `-errno` |
+| 0.2+U3–U8 | open/read files, getdents, PCB, fork/exec, freestanding sh, boot handoff |
+| 0.2+FD | Per-process FD tables |
+| 0.2+TLS | `arch_prctl`, nest-safe enter_user TLS |
+| 0.2+BusyBox | Large static ELF, brk/mmap, many FS syscalls, ash bring-up |
+| **0.3** | Documented ~80-call surface; `rename`/`mv`; procfs; roadmap for threads/modules; accurate shared-AS caveats |

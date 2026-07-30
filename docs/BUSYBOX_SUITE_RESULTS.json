@@ -1,0 +1,338 @@
+[
+  {
+    "id": "true",
+    "cmd": "busybox true",
+    "status": "PASS",
+    "detail": "(ok empty)",
+    "canary_ok": true
+  },
+  {
+    "id": "false",
+    "cmd": "busybox false",
+    "status": "PASS",
+    "detail": "(ok empty)",
+    "canary_ok": true
+  },
+  {
+    "id": "uname",
+    "cmd": "busybox uname",
+    "status": "PASS",
+    "detail": "munux",
+    "canary_ok": true
+  },
+  {
+    "id": "arch",
+    "cmd": "busybox arch",
+    "status": "PASS",
+    "detail": "x86_64",
+    "canary_ok": true
+  },
+  {
+    "id": "id",
+    "cmd": "busybox id",
+    "status": "PASS",
+    "detail": "uid=0 gid=0 groups=0",
+    "canary_ok": true
+  },
+  {
+    "id": "pwd",
+    "cmd": "busybox pwd",
+    "status": "PASS",
+    "detail": "/",
+    "canary_ok": true
+  },
+  {
+    "id": "hostname",
+    "cmd": "busybox hostname",
+    "status": "PASS",
+    "detail": "munux",
+    "canary_ok": true
+  },
+  {
+    "id": "date",
+    "cmd": "busybox date",
+    "status": "PASS",
+    "detail": "Tue Nov 14 22:13:43 UTC 2023",
+    "canary_ok": true
+  },
+  {
+    "id": "echo_hi",
+    "cmd": "busybox echo hi",
+    "status": "PASS",
+    "detail": "hi",
+    "canary_ok": true
+  },
+  {
+    "id": "ls",
+    "cmd": "busybox ls",
+    "status": "PASS",
+    "detail": "bin\ndocs\nhello.txt\nlost+found\nmusl_out.txt\nproc\nt_copy.txt",
+    "canary_ok": true
+  },
+  {
+    "id": "ls_bin",
+    "cmd": "busybox ls bin",
+    "status": "PASS",
+    "detail": "archprctl\nbrktest\nbusybox\ncat\necho\nexectest\nfalse\nfile_musl\nforktest\nfwrite_musl\nhello\nhello_musl\nls\nmalloc_musl\nmmaptest\nprintf_musl\nreaddir_musl\nsh\ntime_musl\n",
+    "canary_ok": true
+  },
+  {
+    "id": "cal",
+    "cmd": "busybox cal",
+    "status": "PASS",
+    "detail": "November 2023\nSu Mo Tu We Th Fr Sa\n1  2  3  4\n5  6  7  8  9 10 11\n12 13 14 15 16 17 18\n19 20 21 22 23 24 25\n26 27 28 29 30",
+    "canary_ok": true
+  },
+  {
+    "id": "touch_f",
+    "cmd": "busybox touch t_suite.txt",
+    "status": "PASS",
+    "detail": "(ok empty)",
+    "canary_ok": true
+  },
+  {
+    "id": "chown_f",
+    "cmd": "busybox chown 0 t_suite.txt",
+    "status": "PASS",
+    "detail": "(ok empty)",
+    "canary_ok": true
+  },
+  {
+    "id": "ln_f",
+    "cmd": "busybox ln t_suite.txt t_link.txt",
+    "status": "PASS",
+    "detail": "(ok empty)",
+    "canary_ok": true
+  },
+  {
+    "id": "cp_f",
+    "cmd": "busybox cp t_suite.txt t_copy.txt",
+    "status": "PASS",
+    "detail": "(ok empty)",
+    "canary_ok": true
+  },
+  {
+    "id": "mv_f",
+    "cmd": "busybox mv t_copy.txt t_moved.txt",
+    "status": "FAIL_ENOSYS",
+    "detail": "syscall: ENOSYS n=82 (-38)\nmv: can't rename 't_copy.txt': Function not implemented",
+    "canary_ok": true
+  },
+  {
+    "id": "diff_f",
+    "cmd": "busybox diff t_suite.txt t_moved.txt",
+    "status": "PASS",
+    "detail": "diff: can't stat 't_moved.txt': No such file or directory",
+    "canary_ok": true
+  },
+  {
+    "id": "tar_c",
+    "cmd": "busybox tar -cf t.tar t_suite.txt",
+    "status": "PASS",
+    "detail": "(ok empty)",
+    "canary_ok": true
+  },
+  {
+    "id": "tar_t",
+    "cmd": "busybox tar -tf t.tar",
+    "status": "PASS",
+    "detail": "t_suite.txt",
+    "canary_ok": true
+  },
+  {
+    "id": "mkdir_d",
+    "cmd": "busybox mkdir t_dir",
+    "status": "PASS",
+    "detail": "(ok empty)",
+    "canary_ok": true
+  },
+  {
+    "id": "rmdir_d",
+    "cmd": "busybox rmdir t_dir",
+    "status": "PASS",
+    "detail": "(ok empty)",
+    "canary_ok": true
+  },
+  {
+    "id": "cat_f",
+    "cmd": "busybox cat hello.txt",
+    "status": "PASS",
+    "detail": "Hello from munux ext2!\nsecond line",
+    "canary_ok": true
+  },
+  {
+    "id": "wc_f",
+    "cmd": "busybox wc hello.txt",
+    "status": "PASS",
+    "detail": "2         6        35 hello.txt",
+    "canary_ok": true
+  },
+  {
+    "id": "head_f",
+    "cmd": "busybox head hello.txt",
+    "status": "PASS",
+    "detail": "Hello from munux ext2!\nsecond line",
+    "canary_ok": true
+  },
+  {
+    "id": "md5_f",
+    "cmd": "busybox md5sum hello.txt",
+    "status": "PASS",
+    "detail": "2a7a69919a7cd95c9b3d2ae0ed773783  hello.txt",
+    "canary_ok": true
+  },
+  {
+    "id": "stat_f",
+    "cmd": "busybox stat hello.txt",
+    "status": "PASS",
+    "detail": "File: hello.txt\nSize: 35            Blocks: 2          IO Block: 1024   regular file\nDevice: deadh/57005d    Inode: 37          Links: 1\nAccess: (0644/-rw-r--r-",
+    "canary_ok": true
+  },
+  {
+    "id": "rm_f",
+    "cmd": "busybox rm t_moved.txt",
+    "status": "PASS",
+    "detail": "rm: can't remove 't_moved.txt': No such file or directory",
+    "canary_ok": true
+  },
+  {
+    "id": "rm_f2",
+    "cmd": "busybox rm t_link.txt",
+    "status": "PASS",
+    "detail": "(ok empty)",
+    "canary_ok": true
+  },
+  {
+    "id": "rm_f3",
+    "cmd": "busybox rm t_suite.txt",
+    "status": "PASS",
+    "detail": "(ok empty)",
+    "canary_ok": true
+  },
+  {
+    "id": "rm_tar",
+    "cmd": "busybox rm t.tar",
+    "status": "PASS",
+    "detail": "(ok empty)",
+    "canary_ok": true
+  },
+  {
+    "id": "find_dot",
+    "cmd": "busybox find .",
+    "status": "HANG",
+    "detail": "no $ prompt",
+    "canary_ok": true
+  },
+  {
+    "id": "grep_f",
+    "cmd": "busybox grep hello hello.txt",
+    "status": "PASS",
+    "detail": "(ok empty)",
+    "canary_ok": true
+  },
+  {
+    "id": "sync",
+    "cmd": "busybox sync",
+    "status": "PASS",
+    "detail": "(ok empty)",
+    "canary_ok": true
+  },
+  {
+    "id": "nice",
+    "cmd": "busybox nice",
+    "status": "PASS",
+    "detail": "0",
+    "canary_ok": true
+  },
+  {
+    "id": "which_ls",
+    "cmd": "busybox which ls",
+    "status": "PASS",
+    "detail": "/bin/ls",
+    "canary_ok": true
+  },
+  {
+    "id": "whoami",
+    "cmd": "busybox whoami",
+    "status": "PASS",
+    "detail": "whoami: unknown uid 0",
+    "canary_ok": true
+  },
+  {
+    "id": "df",
+    "cmd": "busybox df",
+    "status": "PASS",
+    "detail": "Filesystem           1K-blocks      Used Available Use% Mounted on\ndf: /proc/mounts: No such file or directory",
+    "canary_ok": true
+  },
+  {
+    "id": "free",
+    "cmd": "busybox free",
+    "status": "PASS",
+    "detail": "total        used        free      shared  buff/cache   available\nMem:         524160       86388      437772           0           0      437760\n-/+ buffers/ca",
+    "canary_ok": true
+  },
+  {
+    "id": "ps",
+    "cmd": "busybox ps",
+    "status": "PASS",
+    "detail": "PID   USER     TIME  COMMAND",
+    "canary_ok": true
+  },
+  {
+    "id": "sleep1",
+    "cmd": "busybox sleep 1",
+    "status": "PASS",
+    "detail": "(ok empty)",
+    "canary_ok": true
+  },
+  {
+    "id": "chmod_f",
+    "cmd": "busybox chmod 644 hello.txt",
+    "status": "PASS",
+    "detail": "(ok empty)",
+    "canary_ok": true
+  },
+  {
+    "id": "seq_uname",
+    "cmd": "busybox uname",
+    "status": "PASS",
+    "detail": "munux",
+    "canary_ok": true
+  },
+  {
+    "id": "seq_after_ls",
+    "cmd": "busybox ls",
+    "status": "PASS",
+    "detail": "bin\ndocs\nhello.txt\nlost+found\nmusl_out.txt\nproc\nt_copy.txt",
+    "canary_ok": true
+  },
+  {
+    "id": "seq_after_true",
+    "cmd": "busybox true",
+    "status": "PASS",
+    "detail": "(ok empty)",
+    "canary_ok": true
+  },
+  {
+    "id": "seq_cal",
+    "cmd": "busybox cal",
+    "status": "PASS",
+    "detail": "November 2023\nSu Mo Tu We Th Fr Sa\n1  2  3  4\n5  6  7  8  9 10 11\n12 13 14 15 16 17 18\n19 20 21 22 23 24 25\n26 27 28 29 30",
+    "canary_ok": true
+  },
+  {
+    "id": "seq_echo",
+    "cmd": "busybox echo ok",
+    "status": "PASS",
+    "detail": "ok",
+    "canary_ok": true
+  },
+  {
+    "id": "seq_freestanding_ls",
+    "cmd": "ls",
+    "status": "PASS",
+    "detail": ".\n..\nlost+found\nbin\ndocs\nhello.txt\nmusl_out.txt\nt_copy.txt\nproc",
+    "canary_ok": true
+  }
+]
