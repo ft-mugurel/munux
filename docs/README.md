@@ -5,6 +5,7 @@
 | **[../README.md](../README.md)** | Project overview, build, current capabilities |
 | **[ROADMAP.md](ROADMAP.md)** | Architecture plan: mm → schedule → threads → modules |
 | **[MM.md](MM.md)** | Memory layout + phase checklist (P1–P6) |
+| **[SMOKE_VFS.md](SMOKE_VFS.md)** | VFS mounts / fops smoke (Phase 7a) |
 | **[ABI.md](ABI.md)** | Syscall calling convention, process/FD model (v0.3) |
 | **[SYSCALL_COMPARE.md](SYSCALL_COMPARE.md)** | Full Linux x86_64 vs munux syscall matrix |
 | **[SMOKE_PREEMPT.md](SMOKE_PREEMPT.md)** | IRQ preemption (`preempttest` A–G) |

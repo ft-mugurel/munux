@@ -48,15 +48,15 @@ _start:
 	cmp r12, rax
 	je .fail_ids
 
-	; wait4 schedules the Ready child (nest depth ≥2: no IRQ preempt)
+	; wait4 schedules the Ready child (nest depth ≥2: no IRQ preempt).
+	; CLONE_THREAD tasks may be auto-reaped on exit (join via futex); wait4
+	; can return -ECHILD after the child already ran — still OK if flag set.
 	mov rax, SYS_WAIT4
 	mov rdi, r12
 	lea rsi, [rel status]
 	xor rdx, rdx
 	xor r10, r10
 	syscall
-	test rax, rax
-	jle .fail
 
 	; child should have set the shared flag before exit
 	cmp dword [rel shared_flag], 1

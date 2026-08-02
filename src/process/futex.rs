@@ -1,11 +1,15 @@
-//! Minimal futex wait/wake (Phase 6 first slice).
+//! Futex wait/wake/requeue (Phase 6).
 //!
-//! Supports `FUTEX_WAIT` / `FUTEX_WAKE` (and `*_PRIVATE`). Waiters are keyed by
-//! user virtual address; `FUTEX_PRIVATE` also keys by the caller's CR3 so
-//! private futexes do not cross address spaces.
+//! Supports:
+//! - `FUTEX_WAIT` / `FUTEX_WAKE` (+ `PRIVATE`)
+//! - `FUTEX_REQUEUE` / `FUTEX_CMP_REQUEUE`
+//! - `FUTEX_WAIT_BITSET` / `FUTEX_WAKE_BITSET` (bitset ignored; MATCH_ANY)
 //!
-//! No timeout yet. The syscall layer cooperatively runs Ready peers while the
-//! waiter sleeps (same idea as `wait4`).
+//! Waiters are keyed by user virtual address; `FUTEX_PRIVATE` also keys by the
+//! caller's CR3 so private futexes do not cross address spaces.
+//!
+//! The syscall layer runs Ready peers cooperatively while waiting, and may
+//! `hlt` when idle until a peer is Ready, the word changes, or a timeout fires.
 
 use super::pcb::ProcessState;
 use super::table;
@@ -99,6 +103,49 @@ pub fn wake(uaddr: u64, n: u32, private: bool) -> u32 {
         woke += 1;
     }
     woke
+}
+
+/// `FUTEX_REQUEUE`: wake up to `nr_wake` on `uaddr`, move up to `nr_requeue`
+/// remaining waiters from `uaddr` → `uaddr2`. Returns total tasks affected
+/// (woken + requeued), matching Linux's approximate accounting.
+pub fn requeue(uaddr: u64, uaddr2: u64, nr_wake: u32, nr_requeue: u32, private: bool) -> u32 {
+    let mm_key = current_mm_key(private);
+    let w = waiters_mut();
+    let mut woke = 0u32;
+    let mut moved = 0u32;
+
+    // First pass: wake.
+    for e in w.iter_mut() {
+        if woke >= nr_wake {
+            break;
+        }
+        if !e.used || e.uaddr != uaddr || e.mm_key != mm_key {
+            continue;
+        }
+        let tid = e.tid;
+        e.used = false;
+        e.tid = 0;
+        e.uaddr = 0;
+        e.mm_key = 0;
+        let _ = super::sched::wake_up(tid);
+        woke += 1;
+    }
+
+    // Second pass: requeue remaining on uaddr to uaddr2.
+    if nr_requeue > 0 && uaddr2 != 0 {
+        for e in w.iter_mut() {
+            if moved >= nr_requeue {
+                break;
+            }
+            if !e.used || e.uaddr != uaddr || e.mm_key != mm_key {
+                continue;
+            }
+            e.uaddr = uaddr2;
+            moved += 1;
+        }
+    }
+
+    woke.saturating_add(moved)
 }
 
 /// Enqueue current task as a futex waiter and mark Sleeping.

@@ -32,6 +32,10 @@ pub fn getppid() -> Pid {
 ///
 /// For cooperative user tasks: after this returns, the kernel calls
 /// `return_from_user` so the shell/`run` launcher resumes as the parent.
+///
+/// Non-leader threads (`pid != tgid`) are **auto-reaped** (freed) after the
+/// `clear_child_tid` futex wake — join uses futex, not `wait4`. Zombie threads
+/// would leak PCB slots and `children[]` entries across multi-clone tests.
 pub fn exit_user(status: i32) {
     let pid = table::current_pid();
     // Phase 6: clear_child_tid + futex wake (musl pthread join).
@@ -47,12 +51,14 @@ pub fn exit_user(status: i32) {
         }
     }
 
-    let parent = table::with_current(|p| {
+    let (tgid, parent) = table::with_current(|p| {
+        let tgid = if p.tgid != 0 { p.tgid } else { p.pid };
         p.exit_code = status & 0xff;
+        // Mark zombie first so wait paths see us; free below if non-leader.
         p.state = ProcessState::Zombie;
-        p.parent
+        (tgid, p.parent)
     })
-    .unwrap_or(1);
+    .unwrap_or((pid, 1));
 
     if pid == 1 {
         crate::console::println("fatal: init (pid 1) exited");
@@ -63,9 +69,10 @@ pub fn exit_user(status: i32) {
         }
     }
 
+    // Switch to parent (or init) before freeing self.
+    let mut switched = false;
     if parent > 0 {
         if let Some(i) = table::find_pid(parent) {
-            // Wake parent if it was sleeping in wait/schedule.
             let _ = crate::process::sched::wake_up(parent);
             table::set_current_index(i);
             let _ = table::with_pid(parent, |p| {
@@ -73,21 +80,29 @@ pub fn exit_user(status: i32) {
                     p.state = ProcessState::Running;
                 }
             });
-            return;
+            switched = true;
         }
     }
-    // Orphan: reparent to init and switch there
-    if let Some(i) = table::find_pid(1) {
-        let _ = table::with_pid(pid, |p| {
-            p.parent = 1;
-        });
-        let _ = table::add_child(i, pid);
-        table::set_current_index(i);
-        let _ = table::with_pid(1, |p| {
-            if p.state != ProcessState::Zombie {
-                p.state = ProcessState::Running;
-            }
-        });
+    if !switched {
+        if let Some(i) = table::find_pid(1) {
+            let _ = table::with_pid(pid, |p| {
+                p.parent = 1;
+            });
+            let _ = table::add_child(i, pid);
+            table::set_current_index(i);
+            let _ = table::with_pid(1, |p| {
+                if p.state != ProcessState::Zombie {
+                    p.state = ProcessState::Running;
+                }
+            });
+        }
+    }
+
+    // Auto-reap non-leader threads (no waitable status).
+    if pid != tgid {
+        if let Some(idx) = table::find_pid(pid) {
+            table::free_index(idx);
+        }
     }
 }
 

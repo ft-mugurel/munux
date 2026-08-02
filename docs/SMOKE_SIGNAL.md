@@ -25,6 +25,11 @@ $ futextest
 $ busybox true
 ```
 
+**Note (Phase 6c):** Prefer disk refresh (`make disk`) after changing `signaltest.asm`.
+Children should `nanosleep` (or other syscalls) so pending signals are seen; a pure
+`jmp` busy-loop may never leave ring 3. If `signaltest` is flaky under nest depth ≥ 2,
+run `munux> run signaltest` after `exit` from sh.
+
 ## Ctrl-C (TTY → SIGINT)
 
 | Piece | Status |

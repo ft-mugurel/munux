@@ -32,7 +32,7 @@ See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phased plan.
 
 ## Current status (x86_64 `main`)
 
-**Foundation phases 1–6 (practical slices) are in place:** private mm, preemptive user scheduling, `clone`/threads, signals, futex join. Next major epic is **VFS + kernel modules** (roadmap P7–P8).
+**Foundation phases 1–6 are in place** (mm, preempt, clone/threads, signals, futex). **Phase 7a VFS** started: ops tables, mounts, chrdev. Next: finish P7 polish → **kernel modules (P8)**.
 
 ### Boot & build
 - Multiboot → long mode trampoline → Rust `kmain`
@@ -63,9 +63,9 @@ See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phased plan.
 - **BusyBox** static binary on disk for regression probes
 
 ### Filesystem & FDs
-- ATA PIO **IDE** + **ext2** read/write
-- Virtual **`/proc`**
-- FD tables: **clone on fork**; **share on `CLONE_FILES`** (refcount)
+- **VFS 7a:** `file_operations` + mounts (ext2 root, **ramfs** `/ram`) + **chrdev** (`/dev/null`, `/dev/zero`)
+- ATA PIO **IDE** + **ext2** behind VFS fops; virtual **`/proc`** (still ad-hoc)
+- FD tables: **clone on fork**; **share on `CLONE_FILES`** (refcount); open/read/write via VFS
 
 ### Console
 - VGA 80×25 text, PS/2 keyboard (US QWERTY)
@@ -85,6 +85,7 @@ See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phased plan.
 | **[docs/SMOKE_CLONE.md](docs/SMOKE_CLONE.md)** | `clone` / tid smoke |
 | **[docs/SMOKE_SIGNAL.md](docs/SMOKE_SIGNAL.md)** | Signals + Ctrl-C |
 | **[docs/SMOKE_FUTEX.md](docs/SMOKE_FUTEX.md)** | Futex join smoke |
+| **[docs/SMOKE_VFS.md](docs/SMOKE_VFS.md)** | VFS mounts / fops (Phase 7a) |
 | **[docs/BUSYBOX_SUITE_REPORT.md](docs/BUSYBOX_SUITE_REPORT.md)** | Strict BusyBox regression suite |
 | **[SMOKE.md](SMOKE.md)** | Manual smoke checklist |
 

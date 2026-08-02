@@ -27,11 +27,11 @@ BusyBox / musl binaries are **compatibility probes** (does `fork`/`clone`/`mmap`
 | Threads | **`clone`**, shared mm/files, gettid/tgid | OK (no full musl pthread suite yet) |
 | Signals | kill/tgkill, masks, handlers, rt_sigreturn, Ctrl-C | OK for practical use |
 | Futex | WAIT/WAKE + clear_child_tid wake | OK basic join |
-| FS | ext2 + virtual `/proc`; not a full VFS | **Yes — modules want ops tables** |
-| Drivers | Compile-time (`ide`, VGA, keyboard) | **Yes — need register/chrdev model** |
+| FS | **VFS 7a**: ops tables, mounts (ext2 + ramfs), open/read/write via fops; `/proc` still ad-hoc | Partial — deepen for modules |
+| Drivers | Compile-time + **chrdev** (`null`/`zero`); IDE still behind ext2 | Partial |
 | Modules | None | **Missing (P8)** |
 
-**Implication:** architecture foundation for threads is **landed**. Next big work is **VFS + device model → loadable modules**, not more one-off BusyBox stubs.
+**Implication:** thread foundation + **VFS first slice** landed. Next: finish P7 polish → **loadable modules (P8)**.
 
 ---
 
@@ -213,37 +213,45 @@ Smoke: `signaltest`. Not Linux-complete: full siginfo/ucontext, SA_NODEFER, RT s
 
 ## Phase 6 — Futex (makes threads actually usable)
 
-**Status (2026-08-02):** **6a/6b first slice** — `futex` WAIT/WAKE (+PRIVATE), wait queue by
-VA (+CR3), `clear_child_tid` zero+wake on exit, `futextest` join smoke. No timeout/requeue yet.
+**Status (2026-08-02):** **6a–6c practical done** — WAIT/WAKE/REQUEUE/CMP_REQUEUE (+PRIVATE),
+bitset aliases, relative timeout → ETIMEDOUT, `clear_child_tid` + auto-reap non-leader
+threads, wait runs Ready **children only**, nest-safe spurious wake. Smoke: `futextest`
+(timeout + join + mutex + requeue). Remaining: PI/robust, absolute timedwait, musl soak.
 
 ### Deliverables
 
-- `futex` wait/wake (and preferably `FUTEX_PRIVATE`). ✅ basic
+- `futex` wait/wake (and preferably `FUTEX_PRIVATE`). ✅
 - `set_tid_address` + clear TID word + wake on thread exit (musl join). ✅
 - Wait queues keyed by user VA (+ mm). ✅
+- Requeue + relative timeout. ✅ practical
+- Non-leader threads freed on exit (join via futex). ✅
 
 ### Exit criteria
 
-- `pthread_mutex` / `pthread_join` work on musl. 🟡 join path smoke via `futextest`
+- `pthread_mutex` / `pthread_join` work on musl. 🟡 path smoke via `futextest` (not full musl)
 - No busy-spin required for correctness. ✅ (cooperative schedule while waiting)
 
 ---
 
 ## Phase 7 — VFS + device model (prepares modules)
 
-Today: ext2 + ad-hoc `/proc` + IDE calls. Modules need **stable ops tables**.
+**Status (2026-08-02):** **7a first slice** — `file_operations` table, mount registry,
+`register_chrdev`, open/read/write via VFS (`fs/vcore.rs` + FD layer). Root **ext2** +
+**ramfs** (`/ram/*`) + **`/dev/null`** / **`/dev/zero`**. Kernel shell: `vfs`.
+Not yet: full dentry cache, block-device ops for IDE, unify `/proc` behind VFS.
 
 ### Deliverables
 
 - VFS objects: `super_block`, `inode`, `dentry`/`path`, `file` with `file_operations`.
-- Mount table (even if only one root).
-- Char/block device registration (`register_chrdev` style).
-- IDE/ext2 become “built-in modules” behind the same ops as loadable ones.
+  🟡 `FileData` + `FileOperations` + mounts/chrdev (inode/dentry cache later)
+- Mount table (even if only one root). ✅ multi-mount (`/` ext2, `/ram` ramfs)
+- Char/block device registration (`register_chrdev` style). ✅ chrdev; block later
+- IDE/ext2 become “built-in modules” behind the same ops as loadable ones. 🟡 ext2 via fops
 
 ### Exit criteria
 
-- Open/read/write go through VFS ops, not `ext2_*` scattered in syscalls.
-- A second FS (e.g. ramfs) can be registered without rewriting syscalls.
+- Open/read/write go through VFS ops, not `ext2_*` scattered in syscalls. ✅ FD path
+- A second FS (e.g. ramfs) can be registered without rewriting syscalls. ✅ `/ram`
 
 ---
 
@@ -329,7 +337,7 @@ Syscall coverage % is a **metric**, not a milestone by itself.
 | **M3** | **Timer preemption + schedule()** | Real multitasking | ✅ done |
 | **M4** | **clone + TID + shared mm/files** | Threads exist | ✅ done |
 | **M5** | **signals + futex + clear_child_tid** | kill/handlers/Ctrl-C; join path | ✅ practical |
-| **M6** | **VFS ops + register_chrdev** | Pluggable drivers | **next** |
+| **M6** | **VFS ops + register_chrdev** | Pluggable drivers | 🟡 7a started |
 | **M7** | **module loader + EXPORT_SYMBOL + hello module** | Loadable kernel code | planned |
 
 Everything else (more syscalls, net, polish) hangs off this spine.
@@ -377,11 +385,11 @@ munux is a **Linux-compatible teaching/research kernel in Rust** when:
 
 ## Immediate recommendation
 
-**Start Phase 7 / M6: VFS ops tables + device registration.**
+**Continue Phase 7:** deepen VFS (dentry/path cache, `/proc` behind ops, block-dev ops for IDE), then **P8 modules**.
 
-Thread foundation (P1–P6 practical) is landed. Next architecture unlock is **modules**, which needs a real VFS/device model — not more one-off syscalls.
+Thread foundation (P1–P6) + VFS 7a are landed. Next architecture unlock is **modules** on top of ops tables.
 
-Conversation-sized first slices:
+Conversation-sized follow-ups:
 
 1. Introduce `file_operations` / `inode` / open path that syscalls go through.  
 2. Move ext2 + `/proc` behind those ops (behavior unchanged).  

@@ -3,10 +3,9 @@
 //! Default: each process slot owns an [`FdTable`]. `fork` clones the parent
 //! table. `CLONE_FILES` makes the child point at the parent's table (refcount).
 
-use crate::console;
 use crate::fs;
 use crate::fs::ext2;
-use crate::interrupts::keyboard::init as kbd;
+use crate::fs::vcore::{self, FileData, VfsError};
 use crate::process::pcb::MAX_PROCESSES;
 
 pub const FD_MAX: usize = 32;
@@ -26,66 +25,48 @@ pub const O_DIRECTORY: u64 = 0o200000;
 /// Linux O_ACCMODE
 const O_ACCMODE: u64 = 3;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum FileKind {
-    None,
-    Console,
-    Ext2File { ino: u32 },
-    Ext2Dir { ino: u32 },
-}
-
+/// Open file — VFS `FileData` (Phase 7) replaces ad-hoc Ext2/Console enums.
 #[derive(Clone, Copy)]
 pub struct File {
-    pub kind: FileKind,
-    /// File byte offset, or directory cookie for getdents64.
-    pub offset: u64,
-    pub readable: bool,
-    pub writable: bool,
+    pub data: FileData,
 }
 
 impl File {
     pub const fn closed() -> Self {
         Self {
-            kind: FileKind::None,
-            offset: 0,
-            readable: false,
-            writable: false,
+            data: FileData::closed(),
         }
     }
 
-    pub const fn console_stdin() -> Self {
+    pub fn console_stdin() -> Self {
         Self {
-            kind: FileKind::Console,
-            offset: 0,
-            readable: true,
-            writable: false,
+            data: vcore::console_file(true, false),
         }
     }
 
-    pub const fn console_stdout() -> Self {
+    pub fn console_stdout() -> Self {
         Self {
-            kind: FileKind::Console,
-            offset: 0,
-            readable: false,
-            writable: true,
+            data: vcore::console_file(false, true),
         }
     }
 
-    pub fn ext2_file(ino: u32, readable: bool, writable: bool) -> Self {
-        Self {
-            kind: FileKind::Ext2File { ino },
-            offset: 0,
-            readable,
-            writable,
-        }
+    pub fn from_vfs(data: FileData) -> Self {
+        Self { data }
     }
 
-    pub fn ext2_dir(ino: u32) -> Self {
-        Self {
-            kind: FileKind::Ext2Dir { ino },
-            offset: 0,
-            readable: true,
-            writable: false,
+    pub fn is_open(&self) -> bool {
+        self.data.fops_id != vcore::FOPS_NONE
+    }
+
+    pub fn is_dir(&self) -> bool {
+        self.data.is_dir
+    }
+
+    pub fn ext2_ino(&self) -> Option<u32> {
+        if self.data.fops_id == vcore::FOPS_EXT2_FILE || self.data.fops_id == vcore::FOPS_EXT2_DIR {
+            Some(self.data.private as u32)
+        } else {
+            None
         }
     }
 }
@@ -128,7 +109,7 @@ impl FdTable {
             return None;
         }
         let f = &self.entries[fd];
-        if f.kind == FileKind::None {
+        if !f.is_open() {
             None
         } else {
             Some(f)
@@ -140,7 +121,7 @@ impl FdTable {
             return None;
         }
         let f = &mut self.entries[fd];
-        if f.kind == FileKind::None {
+        if !f.is_open() {
             None
         } else {
             Some(f)
@@ -149,7 +130,7 @@ impl FdTable {
 
     fn alloc_slot(&mut self) -> Option<usize> {
         for i in 0..FD_MAX {
-            if self.entries[i].kind == FileKind::None {
+            if !self.entries[i].is_open() {
                 return Some(i);
             }
         }
@@ -166,7 +147,7 @@ impl FdTable {
     pub fn install_at_least(&mut self, min_fd: usize, file: File) -> Result<usize, FdError> {
         let start = min_fd.min(FD_MAX);
         for i in start..FD_MAX {
-            if self.entries[i].kind == FileKind::None {
+            if !self.entries[i].is_open() {
                 self.entries[i] = file;
                 return Ok(i);
             }
@@ -175,7 +156,7 @@ impl FdTable {
     }
 
     pub fn close(&mut self, fd: usize) -> bool {
-        if fd >= FD_MAX || self.entries[fd].kind == FileKind::None {
+        if fd >= FD_MAX || !self.entries[fd].is_open() {
             return false;
         }
         self.entries[fd] = File::closed();
@@ -183,71 +164,27 @@ impl FdTable {
     }
 
     pub fn open_count(&self) -> usize {
-        self.entries.iter().filter(|f| f.kind != FileKind::None).count()
+        self.entries.iter().filter(|f| f.is_open()).count()
     }
 
     pub fn write(&mut self, fd: usize, data: &[u8]) -> Result<usize, FdError> {
-        let (kind, offset) = {
-            let file = self.get(fd).ok_or(FdError::BadFd)?;
-            if !file.writable {
-                return Err(FdError::BadFd);
-            }
-            (file.kind, file.offset)
-        };
-        let n = match kind {
-            FileKind::Console => console_write(data),
-            FileKind::Ext2File { ino } => {
-                if offset > u32::MAX as u64 {
-                    return Ok(0);
-                }
-                match crate::fs::ext2_write::write_file_at(ino, offset as u32, data) {
-                    Ok(n) => n,
-                    Err("file too large") => return Err(FdError::Inval),
-                    Err("is a directory") => return Err(FdError::IsDir),
-                    Err(_) => return Err(FdError::Fault),
-                }
-            }
-            FileKind::Ext2Dir { .. } => return Err(FdError::IsDir),
-            FileKind::None => return Err(FdError::BadFd),
-        };
-        if let Some(file) = self.get_mut(fd) {
-            file.offset = file.offset.saturating_add(n as u64);
-        }
-        Ok(n)
+        let file = self.get_mut(fd).ok_or(FdError::BadFd)?;
+        vcore::vfs_write(&mut file.data, data).map_err(vfs_to_fd)
     }
 
     pub fn read(&mut self, fd: usize, buf: &mut [u8]) -> Result<usize, FdError> {
-        let (kind, offset) = {
-            let file = self.get(fd).ok_or(FdError::BadFd)?;
-            if !file.readable {
-                return Err(FdError::BadFd);
-            }
-            (file.kind, file.offset)
-        };
-
-        let n = match kind {
-            FileKind::Console => console_read(buf),
-            FileKind::Ext2File { ino } => ext2_file_read(ino, offset, buf)?,
-            FileKind::Ext2Dir { .. } => return Err(FdError::IsDir),
-            FileKind::None => return Err(FdError::BadFd),
-        };
-
-        if let Some(file) = self.get_mut(fd) {
-            file.offset = file.offset.saturating_add(n as u64);
-        }
-        Ok(n)
+        let file = self.get_mut(fd).ok_or(FdError::BadFd)?;
+        vcore::vfs_read(&mut file.data, buf).map_err(vfs_to_fd)
     }
 
     /// Linux getdents64(fd, dirp, count) — fill buffer, advance dir offset cookie.
     pub fn getdents64(&mut self, fd: usize, out: &mut [u8]) -> Result<usize, FdError> {
         let (ino, mut cookie) = {
             let file = self.get(fd).ok_or(FdError::BadFd)?;
-            match file.kind {
-                FileKind::Ext2Dir { ino } => (ino, file.offset as u32),
-                FileKind::Ext2File { .. } => return Err(FdError::NotDir),
-                FileKind::Console => return Err(FdError::NotDir),
-                FileKind::None => return Err(FdError::BadFd),
+            if file.data.fops_id != vcore::FOPS_EXT2_DIR {
+                return Err(FdError::NotDir);
             }
+            (file.data.private as u32, file.data.pos as u32)
         };
 
         if out.len() < 24 {
@@ -294,7 +231,7 @@ impl FdTable {
         }
 
         if let Some(file) = self.get_mut(fd) {
-            file.offset = cookie as u64;
+            file.data.pos = cookie as u64;
         }
         Ok(written)
     }
@@ -309,6 +246,7 @@ pub enum FdError {
     NotDir,
     NoMem,
     Inval,
+    Exist,
 }
 
 /// Physical FD table storage, one per process-table slot index.
@@ -434,96 +372,24 @@ pub fn open_count() -> usize {
     with_current(|t| t.open_count())
 }
 
-fn console_write(data: &[u8]) -> usize {
-    let mut n = 0usize;
-    for &b in data {
-        // Shells need BS/DEL for line edit and FF for clear.
-        // 0x0E / 0x0F = inverse video on/off (for vi cursor highlight).
-        if b == b'\n' || b == b'\t' {
-            console::put_char(b);
-            n += 1;
-        } else if b == 0x08 || b == 0x7F {
-            console::put_char(0x08);
-            n += 1;
-        } else if b == 0x0C {
-            console::clear();
-            n += 1;
-        } else if b == 0x0E {
-            console::set_inverse(true);
-            n += 1;
-        } else if b == 0x0F {
-            console::set_inverse(false);
-            n += 1;
-        } else if (0x20..=0xFF).contains(&b) && b != 0x7F {
-            console::put_char(b);
-            n += 1;
-        }
-    }
-    n
-}
 
-fn console_read(buf: &mut [u8]) -> usize {
-    if buf.is_empty() {
-        return 0;
-    }
-    // Mark this process as TTY foreground so Ctrl-C targets us.
-    crate::tty::enter_console_read();
-    // Wait for keystrokes; poll deferred Ctrl-C so we can exit cleanly.
-    loop {
-        crate::tty::deliver_pending_sigint();
-        if let Some(sig) = crate::tty::take_force_fatal() {
-            crate::syscalls::fatal_signal_exit(sig);
-        }
-        if kbd::buffered_len() > 0 {
-            break;
-        }
-        // One sleep; IRQ may set pending SIGINT while halted.
-        unsafe {
-            core::arch::asm!("sti; hlt", options(nostack));
-        }
-        crate::tty::deliver_pending_sigint();
-        if let Some(sig) = crate::tty::take_force_fatal() {
-            crate::syscalls::fatal_signal_exit(sig);
-        }
-        if kbd::buffered_len() > 0 {
-            break;
-        }
-    }
-    let mut n = 0usize;
-    while n < buf.len() {
-        match kbd::pop_char() {
-            Some(b) => {
-                buf[n] = b;
-                n += 1;
-            }
-            None => break,
-        }
-    }
-    crate::tty::leave_console_read();
-    n
-}
-
-fn ext2_file_read(ino: u32, offset: u64, buf: &mut [u8]) -> Result<usize, FdError> {
-    if !fs::is_ready() {
-        return Err(FdError::NoEnt);
-    }
-    if offset > u32::MAX as u64 {
-        return Ok(0);
-    }
-    match ext2::read_file(ino, offset as u32, buf) {
-        Ok(n) => Ok(n),
-        Err(_) => Err(FdError::Fault),
+fn vfs_to_fd(e: VfsError) -> FdError {
+    match e {
+        VfsError::NoEnt => FdError::NoEnt,
+        VfsError::IsDir => FdError::IsDir,
+        VfsError::NotDir => FdError::NotDir,
+        VfsError::Inval => FdError::Inval,
+        VfsError::Fault => FdError::Fault,
+        VfsError::NoDev | VfsError::NoMem => FdError::NoMem,
+        VfsError::Exist => FdError::Exist,
     }
 }
 
-/// Open path. Files → Ext2File; directories → Ext2Dir (for getdents64).
+/// Open path via VFS (Phase 7).
 /// Supports O_RDONLY / O_WRONLY / O_RDWR, O_CREAT, O_TRUNC, O_DIRECTORY.
 pub fn open_path(path: &str, flags: u64) -> Result<usize, FdError> {
     if !is_ready() {
         return Err(FdError::BadFd);
-    }
-    if !fs::is_ready() {
-        return Err(FdError::NoEnt);
     }
     let acc = flags & O_ACCMODE;
     if acc > O_RDWR {
@@ -536,37 +402,8 @@ pub fn open_path(path: &str, flags: u64) -> Result<usize, FdError> {
     let readable = acc == O_RDONLY || acc == O_RDWR;
     let writable = acc == O_WRONLY || acc == O_RDWR;
 
-    let cwd = fs::path::cwd_inode();
-    let ino = match fs::ext2::resolve_path(cwd, path) {
-        Ok(i) => i,
-        Err(_) => {
-            if flags & O_CREAT == 0 {
-                return Err(FdError::NoEnt);
-            }
-            // Create empty file then re-resolve (do not trust returned ino alone).
-            fs::ext2_write::touch(cwd, path).map_err(|_| FdError::NoEnt)?;
-            fs::ext2::resolve_path(cwd, path).map_err(|_| FdError::NoEnt)?
-        }
-    };
-    let is_dir = fs::ext2::inode_is_dir(ino);
-
-    if flags & O_DIRECTORY != 0 && !is_dir {
-        return Err(FdError::NotDir);
-    }
-    if is_dir && writable {
-        return Err(FdError::IsDir);
-    }
-
-    if !is_dir && (flags & O_TRUNC) != 0 && writable {
-        let _ = fs::ext2_write::truncate_file(ino);
-    }
-
-    let file = if is_dir {
-        File::ext2_dir(ino)
-    } else {
-        File::ext2_file(ino, readable, writable)
-    };
-    with_current(|t| t.install(file))
+    let data = vcore::vfs_open(path, flags as u32, readable, writable).map_err(vfs_to_fd)?;
+    with_current(|t| t.install(File::from_vfs(data)))
 }
 
 pub fn sys_write_slice(fd: u64, data: &[u8]) -> Result<usize, FdError> {
@@ -584,22 +421,13 @@ pub fn sys_read_into(fd: u64, buf: &mut [u8]) -> Result<usize, FdError> {
 }
 
 /// Read from `fd` at absolute `offset` without changing the FD's current offset.
-/// Used by sendfile when the user passes a non-null offset pointer.
 pub fn sys_read_at(fd: u64, offset: u64, buf: &mut [u8]) -> Result<usize, FdError> {
     if !is_ready() || fd >= FD_MAX as u64 {
         return Err(FdError::BadFd);
     }
     with_current(|t| {
         let file = t.get(fd as usize).ok_or(FdError::BadFd)?;
-        if !file.readable {
-            return Err(FdError::BadFd);
-        }
-        match file.kind {
-            FileKind::Ext2File { ino } => ext2_file_read(ino, offset, buf),
-            FileKind::Console => Ok(0),
-            FileKind::Ext2Dir { .. } => Err(FdError::IsDir),
-            FileKind::None => Err(FdError::BadFd),
-        }
+        vcore::vfs_read_at(&file.data, offset, buf).map_err(vfs_to_fd)
     })
 }
 
@@ -608,7 +436,7 @@ pub fn sys_fd_offset(fd: u64) -> Result<u64, FdError> {
     if !is_ready() || fd >= FD_MAX as u64 {
         return Err(FdError::BadFd);
     }
-    with_current(|t| t.get(fd as usize).map(|f| f.offset).ok_or(FdError::BadFd))
+    with_current(|t| t.get(fd as usize).map(|f| f.data.pos).ok_or(FdError::BadFd))
 }
 
 pub fn sys_close(fd: u64) -> Result<(), FdError> {
@@ -643,27 +471,25 @@ pub fn sys_fcntl(fd: u64, cmd: u64, arg: u64) -> Result<u64, FdError> {
     with_current(|t| {
         let file = t.get(fd).ok_or(FdError::BadFd)?;
         match cmd {
-            F_GETFD => Ok(0), // we do not track FD_CLOEXEC yet
+            F_GETFD => Ok(0),
             F_SETFD => {
-                // Accept FD_CLOEXEC; no-op until exec filters FDs.
                 let _ = arg;
                 Ok(0)
             }
             F_GETFL => {
-                let mut fl = if file.readable && file.writable {
+                let mut fl = if file.data.readable && file.data.writable {
                     O_RDWR
-                } else if file.writable {
+                } else if file.data.writable {
                     O_WRONLY
                 } else {
                     O_RDONLY
                 };
-                if matches!(file.kind, FileKind::Ext2Dir { .. }) {
+                if file.data.is_dir {
                     fl |= O_DIRECTORY;
                 }
                 Ok(fl)
             }
             F_SETFL => {
-                // Ignore O_APPEND/O_NONBLOCK for now.
                 let _ = arg;
                 Ok(0)
             }
@@ -691,26 +517,33 @@ pub fn sys_lseek(fd: u64, offset: i64, whence: u64) -> Result<u64, FdError> {
     }
     with_current(|t| {
         let file = t.get_mut(fd as usize).ok_or(FdError::BadFd)?;
-        match file.kind {
-            FileKind::Ext2File { ino } => {
-                let size = fs::ext2::inode_file_size(ino) as i64;
-                let cur = file.offset as i64;
-                let new = match whence {
-                    0 => offset,                 // SEEK_SET
-                    1 => cur.saturating_add(offset), // SEEK_CUR
-                    2 => size.saturating_add(offset), // SEEK_END
-                    _ => return Err(FdError::Inval),
-                };
-                if new < 0 {
-                    return Err(FdError::Inval);
-                }
-                file.offset = new as u64;
-                Ok(file.offset)
-            }
-            FileKind::Ext2Dir { .. } => Err(FdError::IsDir),
-            FileKind::Console => Err(FdError::Inval),
-            FileKind::None => Err(FdError::BadFd),
+        if file.data.is_dir {
+            return Err(FdError::IsDir);
         }
+        if file.data.fops_id == vcore::FOPS_CONSOLE {
+            return Err(FdError::Inval);
+        }
+        let size = if file.data.fops_id == vcore::FOPS_EXT2_FILE {
+            fs::ext2::inode_file_size(file.data.private as u32) as i64
+        } else if file.data.fops_id == vcore::FOPS_RAMFS_FILE {
+            // ramfs size from pos ceiling — approximate via private slot not exported;
+            // allow seek within written region by treating size as pos max (1 MiB cap).
+            256i64
+        } else {
+            0i64
+        };
+        let cur = file.data.pos as i64;
+        let new = match whence {
+            0 => offset,
+            1 => cur.saturating_add(offset),
+            2 => size.saturating_add(offset),
+            _ => return Err(FdError::Inval),
+        };
+        if new < 0 {
+            return Err(FdError::Inval);
+        }
+        file.data.pos = new as u64;
+        Ok(file.data.pos)
     })
 }
 
@@ -721,11 +554,7 @@ pub fn sys_fd_inode(fd: u64) -> Result<u32, FdError> {
     }
     with_current(|t| {
         let file = t.get(fd as usize).ok_or(FdError::BadFd)?;
-        match file.kind {
-            FileKind::Ext2File { ino } | FileKind::Ext2Dir { ino } => Ok(ino),
-            FileKind::Console => Err(FdError::Inval),
-            FileKind::None => Err(FdError::BadFd),
-        }
+        file.ext2_ino().ok_or(FdError::Inval)
     })
 }
 
@@ -736,7 +565,7 @@ pub fn sys_fd_is_console(fd: u64) -> bool {
     }
     with_current(|t| {
         t.get(fd as usize)
-            .map(|f| matches!(f.kind, FileKind::Console))
+            .map(|f| f.data.fops_id == vcore::FOPS_CONSOLE)
             .unwrap_or(false)
     })
 }

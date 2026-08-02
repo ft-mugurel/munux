@@ -29,6 +29,9 @@ last_user_rsp:
 	dq 0
 last_user_rflags:
 	dq 0
+; 6th syscall arg (user r9) — avoid SysV stack arg for a6 in Rust.
+last_user_r9:
+	dq 0
 
 section .text
 
@@ -39,6 +42,7 @@ global set_syscall_kstack
 global last_user_rip
 global last_user_rsp
 global last_user_rflags
+global last_user_r9
 global get_enter_nest_depth
 global resume_user_trap
 
@@ -94,6 +98,7 @@ syscall_entry:
 	mov [rel last_user_rsp], rsp
 	mov [rel last_user_rip], rcx
 	mov [rel last_user_rflags], r11
+	mov [rel last_user_r9], r9	; 6th arg (futex val3, …)
 
 	; Save user stack pointer
 	mov [rel saved_user_rsp], rsp
@@ -124,6 +129,7 @@ syscall_entry:
 	; Stack layout (rsp → high):
 	; [0..40] r15..rbx, [48]=num, [56]=rdi, [64]=rsi, [72]=rdx,
 	; [80]=r10, [88]=r8, [96]=r9, [104]=rip, [112]=rflags
+	; Pass 6 C args in registers only (SysV). User r9 is in last_user_r9.
 	mov rdi, [rsp + 48]		; num
 	mov rsi, [rsp + 56]		; rdi user
 	mov rdx, [rsp + 64]		; rsi user

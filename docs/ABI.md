@@ -90,7 +90,7 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match`.
 | 162 | `sync` | **stub** (no-op; write-through FS) |
 | 186 | `gettid` | done (unique task id; ≠ tgid for threads) |
 | 200 | `tkill` | done (thread-directed signal) |
-| 202 | `futex` | done (`WAIT`/`WAKE` + `PRIVATE`; no timeout/requeue) |
+| 202 | `futex` | done (`WAIT`/`WAKE`/`REQUEUE`/`CMP_REQUEUE` + bitset + relative timeout; `PRIVATE`) |
 | 217 | `getdents64` | done |
 | 218 | `set_tid_address` | done (stores `clear_child_tid`; wake on exit) |
 | 228 | `clock_gettime` | done (REALTIME / MONOTONIC @ 100 Hz) |

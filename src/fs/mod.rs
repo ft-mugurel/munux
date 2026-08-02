@@ -1,8 +1,9 @@
-//! Filesystem: IDE probe + ext2 (read/write) + path helpers.
+//! Filesystem: IDE probe + ext2 (read/write) + VFS layer (Phase 7).
 
 pub mod ext2;
 pub mod ext2_write;
 pub mod path;
+pub mod vcore;
 pub mod vfs;
 
 use crate::console;
@@ -33,6 +34,8 @@ pub fn init() {
             console::print("fs: ext2 mounted root=");
             console::write_u64(ext2::ROOT_INODE as u64);
             console::println("");
+            // Phase 7: ops tables, /ram, /dev/null|zero
+            vcore::init_after_ext2();
             // Smoke: list root names on boot
             if let Ok(_) = ext2::list_dir(ext2::ROOT_INODE) {
                 console::print("fs: root: ");

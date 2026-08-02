@@ -69,6 +69,7 @@ pub fn dispatch(line: &str) {
         }
         "preempt" | "sched" => cmd_preempt_status(),
         "preempttest" => cmd_preempttest(),
+        "vfs" | "mounts" => cmd_vfs(),
         "echo" => {
             console::println(rest);
         }
@@ -817,6 +818,7 @@ fn cmd_help() {
     console::println("  cr3 / vmm       Paging info");
     console::println("  preempt/sched   Show IRQ preemption counter");
     console::println("  preempttest     Specific IRQ preempt checks (A-G)");
+    console::println("  vfs / mounts    Phase 7 VFS mounts + chrdevs");
     console::println("  reboot / halt   Machine control");
     console::println("  fault [ud2]     Trigger CPU exception");
     console::println("  panic           Rust panic");
@@ -828,6 +830,28 @@ fn cmd_help() {
     console::println("  pwd / cd        Working directory");
     console::println("  ps              Process table");
     console::println("Editing: Backspace/Del erase previous character");
+}
+
+fn cmd_vfs() {
+    let (nm, nc) = fs::vcore::stats();
+    console::print("vfs ready=");
+    console::print(if fs::vcore::is_ready() { "yes" } else { "no" });
+    console::print(" mounts=");
+    console::write_u64(nm as u64);
+    console::print(" chrdev=");
+    console::write_u64(nc as u64);
+    console::println("");
+    for i in 0..fs::vcore::MAX_MOUNTS {
+        if let Some((path, name)) = fs::vcore::mount_name_at(i) {
+            console::print("  mount ");
+            console::print(path);
+            console::print(" -> ");
+            console::println(name);
+        }
+    }
+    console::println("  chrdev: /dev/null /dev/zero");
+    console::println("  ramfs:  /ram/hello (seeded)");
+    console::println("  fops: console, ext2_file, ext2_dir, ramfs_file, null, zero");
 }
 
 fn cmd_ps() {

@@ -109,6 +109,7 @@ mod errno {
     pub const ERANGE: i64 = 34;
     pub const ENOTTY: i64 = 25;
     pub const ENOTEMPTY: i64 = 39;
+    pub const ETIMEDOUT: i64 = 110;
 
     #[inline]
     pub fn neg(e: i64) -> u64 {
@@ -125,6 +126,7 @@ fn map_fd_err(e: fd::FdError) -> u64 {
         fd::FdError::NotDir => errno::neg(errno::ENOTDIR),
         fd::FdError::NoMem => errno::neg(errno::EMFILE),
         fd::FdError::Inval => errno::neg(errno::EINVAL),
+        fd::FdError::Exist => errno::neg(errno::EEXIST),
     }
 }
 
@@ -201,6 +203,8 @@ extern "C" {
     static last_user_rip: u64;
     static last_user_rsp: u64;
     static last_user_rflags: u64;
+    /// 6th syscall argument (user r9) saved at `syscall_entry`.
+    static last_user_r9: u64;
     /// Optional user RDI for enter_user_mode (signal handler arg).
     static mut enter_user_rdi: u64;
 }
@@ -505,7 +509,10 @@ pub extern "C" fn syscall_dispatch(
         num::MPROTECT => sys_mprotect(a1, a2, a3),
         num::MUNMAP => sys_munmap(a1, a2),
         num::SET_TID_ADDRESS => sys_set_tid_address(a1),
-        num::FUTEX => sys_futex(a1, a2, a3, a4, a5),
+        num::FUTEX => {
+            let a6 = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(last_user_r9)) };
+            sys_futex(a1, a2, a3, a4, a5, a6)
+        }
         num::GETTIMEOFDAY => sys_gettimeofday(a1, a2),
         num::CLOCK_GETTIME => sys_clock_gettime(a1, a2),
         num::FCNTL => sys_fcntl(a1, a2, a3),
@@ -751,13 +758,151 @@ fn sys_rt_sigaction(sig: u64, act: u64, oldact: u64, _sigsetsize: u64) -> u64 {
 // Linux futex ops (include/uapi/linux/futex.h)
 const FUTEX_WAIT: u32 = 0;
 const FUTEX_WAKE: u32 = 1;
+const FUTEX_REQUEUE: u32 = 3;
+const FUTEX_CMP_REQUEUE: u32 = 4;
+const FUTEX_WAIT_BITSET: u32 = 9;
+const FUTEX_WAKE_BITSET: u32 = 10;
 const FUTEX_PRIVATE_FLAG: u32 = 128;
-const FUTEX_CMD_MASK: u32 = !FUTEX_PRIVATE_FLAG;
+const FUTEX_CLOCK_REALTIME: u32 = 256;
+const FUTEX_CMD_MASK: u32 = !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
 
-/// Linux futex(2) — wait/wake only (no timeout / requeue yet).
+/// Parse optional relative `struct timespec` at `timeout_ptr`.
+/// Returns `Some(deadline_tick)` or `None` for infinite wait.
+/// `Err` → already-negated errno for the syscall.
+fn futex_deadline(timeout_ptr: u64) -> Result<Option<u64>, u64> {
+    if timeout_ptr == 0 {
+        return Ok(None);
+    }
+    if !user_ptr_ok(timeout_ptr, 16) {
+        return Err(errno::neg(errno::EFAULT));
+    }
+    let sec = unsafe { core::ptr::read_volatile(timeout_ptr as *const i64) };
+    let nsec = unsafe { core::ptr::read_volatile((timeout_ptr + 8) as *const i64) };
+    if sec < 0 || nsec < 0 || nsec >= 1_000_000_000 {
+        return Err(errno::neg(errno::EINVAL));
+    }
+    let total_ns = (sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(nsec as u64);
+    // PIT 100 Hz → 10 ms ticks; at least 1 tick if any positive wait.
+    let ticks_needed = if total_ns == 0 {
+        0
+    } else {
+        ((total_ns + 9_999_999) / 10_000_000).max(1)
+    };
+    let start = crate::interrupts::ticks();
+    Ok(Some(start.wrapping_add(ticks_needed)))
+}
+
+/// Deadline is absolute tick count; expired when `ticks() >= deadline`.
+fn futex_deadline_reached(deadline: Option<u64>) -> bool {
+    match deadline {
+        None => false,
+        Some(d) => crate::interrupts::ticks() >= d,
+    }
+}
+
+/// Shared wait body for FUTEX_WAIT / FUTEX_WAIT_BITSET.
+fn futex_do_wait(uaddr: u64, expected: i32, private: bool, timeout_ptr: u64) -> u64 {
+    let deadline = match futex_deadline(timeout_ptr) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    let me = crate::process::gettid();
+    match crate::process::futex::begin_wait(uaddr, expected, private) {
+        Err(e) => return e as u64,
+        Ok(()) => {}
+    }
+
+    // Cooperatively run **Ready children** only (not arbitrary system tasks —
+    // picking shell/kinit via take_ready(-1) nest-corrupts and kills the waiter).
+    let mut idle_rounds: u32 = 0;
+    loop {
+        if !crate::process::futex::still_waiting(me) {
+            break;
+        }
+        let cur = unsafe { core::ptr::read_volatile(uaddr as *const i32) };
+        if cur != expected {
+            crate::process::futex::cancel_wait(me);
+            break;
+        }
+        if futex_deadline_reached(deadline) {
+            crate::process::futex::cancel_wait(me);
+            let _ = crate::process::with_current(|p| {
+                if p.state == crate::process::ProcessState::Sleeping {
+                    p.state = crate::process::ProcessState::Running;
+                }
+            });
+            return errno::neg(errno::ETIMEDOUT);
+        }
+
+        // Prefer any Ready task that is our child (thread or process).
+        if let Some(frame) = take_ready_child() {
+            run_user_frame(frame);
+            crate::process::futex::ensure_running_if_current();
+            idle_rounds = 0;
+        } else {
+            // Nested futex wait (shell → app → thread): if we spin forever here,
+            // the outer task never unlocks/wakes us → deadlock. Return a
+            // spurious wake so userspace rechecks; outer nest resumes.
+            let nest = unsafe {
+                extern "C" {
+                    fn get_enter_nest_depth() -> u64;
+                }
+                get_enter_nest_depth()
+            };
+            if nest >= 2 && deadline.is_none() {
+                crate::process::futex::cancel_wait(me);
+                crate::process::futex::ensure_running_if_current();
+                return 0;
+            }
+
+            idle_rounds = idle_rounds.saturating_add(1);
+            unsafe {
+                core::arch::asm!("sti; pause", options(nostack, nomem));
+            }
+            // Top-level infinite wait, nothing to run: soft-fail.
+            if deadline.is_none() && idle_rounds > 5_000_000 {
+                crate::process::futex::cancel_wait(me);
+                let _ = crate::process::with_current(|p| {
+                    if p.state == crate::process::ProcessState::Sleeping {
+                        p.state = crate::process::ProcessState::Running;
+                    }
+                });
+                return errno::neg(errno::EAGAIN);
+            }
+        }
+    }
+    if crate::process::futex::still_waiting(me) {
+        crate::process::futex::cancel_wait(me);
+    }
+    crate::process::futex::ensure_running_if_current();
+    0
+}
+
+/// Like `sched::take_ready` but **only** Ready tasks with `parent == current`.
+fn take_ready_child() -> Option<crate::process::UserFrame> {
+    let parent = crate::process::gettid();
+    let mut child = -1i32;
+    crate::process::table::for_each_process(|_i, p| {
+        if child >= 0 {
+            return;
+        }
+        if p.used && p.state == crate::process::ProcessState::Ready && p.parent == parent {
+            child = p.pid;
+        }
+    });
+    if child > 0 {
+        crate::process::sched::take_ready(child)
+    } else {
+        None
+    }
+}
+
+/// Linux futex(2) — wait/wake/requeue + bitset aliases; relative timeout on wait.
 ///
-/// Args: uaddr, op, val, timeout(ignored), uaddr2(ignored).
-fn sys_futex(uaddr: u64, op: u64, val: u64, _timeout: u64, _uaddr2: u64) -> u64 {
+/// Args: uaddr, op, val, timeout|nr_requeue, uaddr2, val3.
+fn sys_futex(uaddr: u64, op: u64, val: u64, a4: u64, uaddr2: u64, val3: u64) -> u64 {
     if !user_ptr_ok(uaddr, 4) || (uaddr & 3) != 0 {
         return errno::neg(errno::EFAULT);
     }
@@ -766,66 +911,53 @@ fn sys_futex(uaddr: u64, op: u64, val: u64, _timeout: u64, _uaddr2: u64) -> u64 
     let private = (op & FUTEX_PRIVATE_FLAG) != 0;
 
     match cmd {
-        FUTEX_WAIT => {
-            let expected = val as i32;
-            let me = crate::process::gettid();
-            match crate::process::futex::begin_wait(uaddr, expected, private) {
-                Err(e) => return e as u64, // e is already -errno
-                Ok(()) => {}
+        FUTEX_WAIT => futex_do_wait(uaddr, val as i32, private, a4),
+        FUTEX_WAIT_BITSET => {
+            // Absolute timeout + bitset in Linux; we accept relative timespec at a4
+            // when provided and ignore bitset except requiring non-zero.
+            let bitset = val3 as u32;
+            if bitset == 0 {
+                return errno::neg(errno::EINVAL);
             }
-            // Cooperatively run Ready peers until we are woken.
-            // Bound iterations so a bug cannot hang forever.
-            for _ in 0..64 {
-                if !crate::process::futex::still_waiting(me) {
-                    break;
-                }
-                // Value changed without wake?
-                let cur = unsafe { core::ptr::read_volatile(uaddr as *const i32) };
-                if cur != expected {
-                    crate::process::futex::cancel_wait(me);
-                    break;
-                }
-                if let Some(frame) = crate::process::sched::take_ready(-1) {
-                    run_user_frame(frame);
-                    // After nested task returns we may be current again, or
-                    // Ready after wake — re-check.
-                    if crate::process::gettid() != me {
-                        // Switched away permanently — should not happen for
-                        // exit-to-parent; ensure we stop waiting.
-                        if !crate::process::futex::still_waiting(me) {
-                            break;
-                        }
-                    }
-                    crate::process::futex::ensure_running_if_current();
-                } else {
-                    // No Ready peer: recheck then fail (avoid hang).
-                    let cur = unsafe { core::ptr::read_volatile(uaddr as *const i32) };
-                    if cur != expected {
-                        crate::process::futex::cancel_wait(me);
-                        break;
-                    }
-                    crate::process::futex::cancel_wait(me);
-                    let _ = crate::process::with_current(|p| {
-                        if p.state == crate::process::ProcessState::Sleeping {
-                            p.state = crate::process::ProcessState::Running;
-                        }
-                    });
-                    return errno::neg(errno::EAGAIN);
-                }
-            }
-            if crate::process::futex::still_waiting(me) {
-                crate::process::futex::cancel_wait(me);
-            }
-            crate::process::futex::ensure_running_if_current();
-            0
+            let _ = bitset; // MATCH_ANY or any non-zero: treat as plain wait
+            futex_do_wait(uaddr, val as i32, private, a4)
         }
-        FUTEX_WAKE => {
+        FUTEX_WAKE | FUTEX_WAKE_BITSET => {
+            if cmd == FUTEX_WAKE_BITSET {
+                let bitset = val3 as u32;
+                if bitset == 0 {
+                    return errno::neg(errno::EINVAL);
+                }
+            }
             let n = if val > u32::MAX as u64 {
                 u32::MAX
             } else {
                 val as u32
             };
             crate::process::futex::wake(uaddr, n, private) as u64
+        }
+        FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => {
+            if !user_ptr_ok(uaddr2, 4) || (uaddr2 & 3) != 0 {
+                return errno::neg(errno::EFAULT);
+            }
+            if cmd == FUTEX_CMP_REQUEUE {
+                let cur = unsafe { core::ptr::read_volatile(uaddr as *const i32) };
+                if cur != val3 as i32 {
+                    return errno::neg(errno::EAGAIN);
+                }
+            }
+            // Linux: val = nr_wake, a4 (timeout slot) = nr_requeue (not a pointer).
+            let nr_wake = if val > u32::MAX as u64 {
+                u32::MAX
+            } else {
+                val as u32
+            };
+            let nr_requeue = if a4 > u32::MAX as u64 {
+                u32::MAX
+            } else {
+                a4 as u32
+            };
+            crate::process::futex::requeue(uaddr, uaddr2, nr_wake, nr_requeue, private) as u64
         }
         _ => errno::neg(errno::ENOSYS),
     }
