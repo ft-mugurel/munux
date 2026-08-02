@@ -4,6 +4,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::interrupts::idt::register_interrupt_handler;
 use crate::interrupts::pic;
+use crate::process::TrapFrame;
 use crate::x86::io::outb;
 
 const PIT_CH0: u16 = 0x40;
@@ -35,11 +36,15 @@ pub fn init_timer() {
     register_interrupt_handler(32, isr_timer);
 }
 
+/// Called from `isr_timer` with `frame` pointing at the IRQ stack TrapFrame.
 #[no_mangle]
-pub extern "C" fn timer_interrupt_handler() {
+pub extern "C" fn timer_interrupt_handler(frame: *mut TrapFrame) {
     TICKS.fetch_add(1, Ordering::Relaxed);
+    crate::process::on_cpu_tick();
     unsafe {
         pic::eoi_master();
+        // May rewrite `frame` so iretq resumes a different user task.
+        crate::process::sched::try_preempt(frame);
     }
 }
 

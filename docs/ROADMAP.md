@@ -124,18 +124,20 @@ BusyBox suite stays a **regression gate** after each phase — not the work queu
 
 **Why:** Linux threads are schedulable entities. Without a real scheduler, `clone` is only “another PCB you run nested.”
 
+**Status (2026-07-31):** **Phase 3 done** — RR Ready queue; timer IRQ user→user preempt via `TrapFrame`; per-process kstacks (TSS.RSP0 ≠ nest stack); sticky `entered_via_nest` + `resume_user_trap`; nest policy depth≤1 for IRQ (depth≥2 cooperative). Verify: `munux> preempttest` (A–G PASS) + forktest/busybox. No in-kernel preemption (not required for user threads).
+
 ### Deliverables
 
-- Run queue of **tasks** (process or thread).
-- Preemption on timer IRQ (save full user/kernel frame).
-- Kernel context switch: save/restore callee-saved + stack pointer; per-task **kernel stack**.
-- States: Running / Ready / Sleeping / Zombie (you already have names).
-- `schedule()`, `wake_up()`, sleep on wait queues (even if only used by `wait`/`futex` later).
+- Run queue of **tasks** (process or thread). ✅ pick_ready RR
+- Preemption on timer IRQ (save full user frame). ✅ user→user (incl. under nest)
+- Kernel context switch: save/restore callee-saved + stack pointer; per-task **kernel stack**. 🟡 user stacks done; no in-kernel preemption
+- States: Running / Ready / Sleeping / Zombie (you already have names). ✅
+- `schedule()`, `wake_up()`, sleep on wait queues (even if only used by `wait`/`futex` later). ✅ `take_ready` / `wake_up` / `try_preempt`
 
 ### Exit criteria
 
-- Two CPU-bound user loops make progress without cooperative yield.
-- Timer tick can switch tasks safely (no stack smash, correct CR3 + TLS).
+- Two CPU-bound user loops make progress without cooperative yield. ✅ `preempttest` G
+- Timer tick can switch tasks safely (no stack smash, correct CR3 + TLS). ✅
 
 ### Nice (optional in P3)
 

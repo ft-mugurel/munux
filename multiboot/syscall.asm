@@ -39,6 +39,8 @@ global set_syscall_kstack
 global last_user_rip
 global last_user_rsp
 global last_user_rflags
+global get_enter_nest_depth
+global resume_user_trap
 
 extern syscall_dispatch
 
@@ -46,6 +48,43 @@ extern syscall_dispatch
 set_syscall_kstack:
 	mov [rel syscall_kstack], rdi
 	ret
+
+; u64 get_enter_nest_depth(void) — how many enter_user_mode frames are active
+get_enter_nest_depth:
+	mov rax, [rel saved_kernel_rsp_depth]
+	ret
+
+; resume_user_trap(rdi = *TrapFrame) — never returns; iretq into user
+; TrapFrame layout matches IRQ push order (rax first … ss last).
+resume_user_trap:
+	cli
+	; Kernel → user data segments
+	mov ax, 0x1B
+	mov ds, ax
+	mov es, ax
+	; Copy frame to stack so pops are safe if rdi points into a PCB
+	sub rsp, 160			; 20 * 8
+	mov rsi, rdi
+	mov rdi, rsp
+	mov rcx, 20
+	rep movsq
+	; Now stack top = TrapFrame
+	pop rax
+	pop rbx
+	pop rcx
+	pop rdx
+	pop rsi
+	pop rdi
+	pop rbp
+	pop r8
+	pop r9
+	pop r10
+	pop r11
+	pop r12
+	pop r13
+	pop r14
+	pop r15
+	iretq
 
 ; ---------------------------------------------------------------------------
 ; syscall_entry — LSTAR

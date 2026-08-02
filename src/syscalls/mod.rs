@@ -6,7 +6,6 @@ use crate::console;
 use crate::fd;
 use crate::gdt::{self, STAR_KERNEL_CS, STAR_USER_BASE, USER_CODE_SELECTOR, USER_DATA_SELECTOR};
 use crate::gdt::tss;
-use crate::memory::paging;
 use crate::memory::pmm::FRAME_SIZE;
 
 /// Linux **x86_64** syscall numbers (see `arch/x86/entry/syscalls/syscall_64.tbl`).
@@ -188,6 +187,7 @@ extern "C" {
     /// Enter ring 3; `user_rax` is initial RAX (0 after fork for child).
     fn enter_user_mode(entry: u64, user_rsp: u64, user_rax: u64);
     fn return_from_user() -> !;
+    fn resume_user_trap(frame: *const crate::process::TrapFrame) -> !;
     fn set_syscall_kstack(rsp: u64);
     fn syscall_entry();
     static last_user_rip: u64;
@@ -202,7 +202,11 @@ fn nest_stack_top(index: usize) -> u64 {
     }
 }
 
-/// Push a fresh syscall/IRQ kernel stack for a nested user entry.
+/// Push a fresh **syscall-only** nest stack for nested user entry.
+///
+/// Important: do **not** point TSS.RSP0 at the nest stack. IRQs from user use
+/// RSP0; if that were the nest stack they would overwrite `enter_user_mode`'s
+/// return frame. RSP0 stays on the per-process kernel stack.
 fn push_syscall_stack() {
     unsafe {
         if SYSCALL_STACK_DEPTH >= NEST_KSTACK_MAX {
@@ -211,7 +215,9 @@ fn push_syscall_stack() {
         SYSCALL_STACK_DEPTH += 1;
         let top = nest_stack_top(SYSCALL_STACK_DEPTH - 1);
         set_syscall_kstack(top);
-        tss::set_kernel_stack(top);
+        // Keep TSS.rsp0 on this process's kstack (install_for_slot).
+        let idx = crate::process::current_index();
+        crate::gdt::tss::set_kernel_stack(crate::process::kstack::top_for_slot(idx));
     }
 }
 
@@ -227,27 +233,96 @@ fn pop_syscall_stack() {
         } else {
             let top = nest_stack_top(SYSCALL_STACK_DEPTH - 1);
             set_syscall_kstack(top);
-            tss::set_kernel_stack(top);
+            let idx = crate::process::current_index();
+            crate::gdt::tss::set_kernel_stack(crate::process::kstack::top_for_slot(idx));
         }
     }
 }
 
 fn ensure_kstack_base() {
-    tss::set_kernel_stack(tss::kernel_stack_top());
-    unsafe {
-        set_syscall_kstack(tss::kernel_stack_top());
-    }
+    // Restore this process’s own kernel stack (not always the boot stack).
+    let idx = crate::process::current_index();
+    crate::process::kstack::install_for_slot(idx);
 }
 
 /// Enter user with a private syscall stack for nested sessions.
 fn enter_user_nested(entry: u64, user_rsp: u64, user_rax: u64) {
     push_syscall_stack();
+    // Always load the current process CR3 before ring 3 (Phase 1b).
+    if let Some(cr3) = crate::process::with_current(|p| p.cr3) {
+        if cr3 != 0 {
+            crate::memory::switch_mm(cr3);
+        }
+    }
+    // This task owns an enter_user_mode nest frame until exit.
+    let _ = crate::process::with_current(|p| {
+        p.entered_via_nest = true;
+        p.user_rip = entry;
+        p.user_rsp = user_rsp;
+        p.user_rax = user_rax;
+        p.user_rflags = 0x202;
+        p.trap = crate::process::TrapFrame::from_user_entry(entry, user_rsp, 0x202, user_rax);
+        p.trap_valid = true;
+    });
     // Ensure this process's TLS bases are in the CPU before ring 3.
     crate::process::apply_tls();
     unsafe {
         enter_user_mode(entry, user_rsp, user_rax);
     }
     pop_syscall_stack();
+}
+
+/// Resume the **current** process after an IRQ-resumed task exited.
+///
+/// Prefer a saved trap frame (mid-user after preempt). If none, fall back to
+/// popping an `enter_user_mode` nest frame when one exists.
+fn resume_current_from_trap() -> ! {
+    ensure_kstack_base();
+    crate::process::apply_tls();
+
+    let (trap_valid, frame) = crate::process::with_current(|p| {
+        if p.trap_valid {
+            (true, p.trap)
+        } else if p.user_rip >= 0x1000 {
+            (
+                true,
+                crate::process::TrapFrame::from_user_entry(
+                    p.user_rip,
+                    p.user_rsp,
+                    p.user_rflags,
+                    p.user_rax,
+                ),
+            )
+        } else {
+            (false, crate::process::TrapFrame::zero())
+        }
+    })
+    .unwrap_or((false, crate::process::TrapFrame::zero()));
+
+    if trap_valid && frame.rip >= 0x1000 && frame.is_user() {
+        static mut RESUME_BUF: crate::process::TrapFrame = crate::process::TrapFrame::zero();
+        unsafe {
+            RESUME_BUF = frame;
+            resume_user_trap(core::ptr::addr_of!(RESUME_BUF));
+        }
+    }
+
+    // No usable trap — try nest return (e.g. back to wait/run).
+    extern "C" {
+        fn get_enter_nest_depth() -> u64;
+    }
+    if unsafe { get_enter_nest_depth() } > 0 {
+        unsafe {
+            return_from_user();
+        }
+    }
+
+    // Last resort: stay in kernel (idle).
+    loop {
+        unsafe {
+            core::arch::asm!("cli; hlt", options(nomem, nostack));
+        }
+    }
 }
 
 /// MSR helpers
@@ -312,6 +387,12 @@ pub extern "C" fn syscall_dispatch(
     // only on the PCB until we restore it for sysret (see end of this fn).
     crate::x86::msr::set_fs_base(0);
     crate::x86::msr::set_gs_base(0);
+    // Keep software page-table root aligned with the current process (Phase 1b).
+    if let Some(cr3) = crate::process::with_current(|p| p.cr3) {
+        if cr3 != 0 {
+            crate::memory::switch_mm(cr3);
+        }
+    }
 
     let ret = match num {
         num::READ => sys_read(a1, a2, a3),
@@ -381,14 +462,28 @@ pub extern "C" fn syscall_dispatch(
         num::FCNTL => sys_fcntl(a1, a2, a3),
         num::EXIT | num::EXIT_GROUP => {
             let status = a1 as i32;
-            // Clear dying process TLS before switching to parent.
+            // Capture how this task was entered *before* we switch away.
+            let via_nest = crate::process::with_current(|p| p.entered_via_nest).unwrap_or(true);
             crate::process::clear_tls();
             crate::process::exit_user(status);
-            // Parent is current; load its TLS then leave ring 0 nest.
+            // Current is now parent (or init).
             crate::process::apply_tls();
-            unsafe {
-                return_from_user();
+            if via_nest {
+                // Owned enter_user_mode frame → pop nest and return to waiter.
+                // If nest depth is 0 (shouldn't happen), fall back to trap resume
+                // instead of hanging in return_from_user.
+                extern "C" {
+                    fn get_enter_nest_depth() -> u64;
+                }
+                if unsafe { get_enter_nest_depth() } > 0 {
+                    unsafe {
+                        return_from_user();
+                    }
+                }
             }
+            // IRQ-resumed task, or nest claimed but no frame left:
+            // resume whoever is current from its saved trap.
+            resume_current_from_trap();
         }
         _ => {
             // Always log so musl/static binary bring-up is not blind.
@@ -1496,63 +1591,16 @@ fn user_demo_bytes() -> [u8; 256] {
     out
 }
 
-/// Snapshot of low user image (shared AS): restored after child may `execve`.
-const USER_IMAGE_BASE: u64 = 0x400000;
-const USER_IMAGE_MAX: usize = 64 * 1024;
-static mut USER_IMAGE_SNAP: [u8; USER_IMAGE_MAX] = [0; USER_IMAGE_MAX];
-static mut USER_IMAGE_SNAP_LEN: usize = 0;
-
-fn snapshot_user_image() {
-    // Copy present pages in [0x400000, 0x400000+64K)
-    // Use addr_of_mut! so we never form a Rust reference to the mutable static.
-    let mut len = 0usize;
-    unsafe {
-        let snap = core::ptr::addr_of_mut!(USER_IMAGE_SNAP).cast::<u8>();
-        for off in (0..USER_IMAGE_MAX).step_by(FRAME_SIZE) {
-            let v = USER_IMAGE_BASE + off as u64;
-            if paging::virt_to_phys(v).is_none() {
-                break;
-            }
-            let n = (USER_IMAGE_MAX - off).min(FRAME_SIZE);
-            core::ptr::copy_nonoverlapping(v as *const u8, snap.add(off), n);
-            len = off + n;
-        }
-        core::ptr::write(core::ptr::addr_of_mut!(USER_IMAGE_SNAP_LEN), len);
-    }
-}
-
-fn restore_user_image() {
-    unsafe {
-        let len = core::ptr::read(core::ptr::addr_of!(USER_IMAGE_SNAP_LEN));
-        if len == 0 {
-            return;
-        }
-        let snap = core::ptr::addr_of!(USER_IMAGE_SNAP).cast::<u8>();
-        // Ensure pages exist and are user-writable, then restore bytes.
-        let mut off = 0usize;
-        while off < len {
-            let v = USER_IMAGE_BASE + off as u64;
-            let _ = map_user_page(v);
-            let n = (len - off).min(FRAME_SIZE);
-            core::ptr::copy_nonoverlapping(snap.add(off), v as *mut u8, n);
-            off += n;
-        }
-    }
-}
-
-/// Run a Ready child to completion; restore parent user image afterward
-/// (child `execve` would otherwise clobber shared code/data).
-fn run_child_frame(frame: crate::process::UserFrame) {
-    snapshot_user_image();
+/// Enter a Ready task's user context (current process must already be that task).
+fn run_user_frame(frame: crate::process::UserFrame) {
+    crate::process::sched::clear_need_resched();
     enter_user_nested(frame.rip, frame.rsp, frame.rax);
-    restore_user_image();
 }
 
-/// Linux fork() — parent returns child pid.
+/// Linux fork() — parent returns child pid; child is left **Ready**.
 ///
-/// Cooperative: the Ready child is run to completion **before** the parent
-/// resumes (avoids concurrent shared-AS mess). Parent then sees a zombie and
-/// can `wait4` to reap.
+/// Phase 3b: does **not** run the child inside fork. The parent’s `wait4`
+/// (or another schedule point) picks Ready children via [`sched::take_ready`].
 fn sys_fork() -> u64 {
     let (rip, rsp, rflags) = unsafe {
         (
@@ -1561,18 +1609,10 @@ fn sys_fork() -> u64 {
             core::ptr::read_volatile(core::ptr::addr_of!(last_user_rflags)),
         )
     };
-    let child_pid = match crate::process::fork_from_user(rip, rsp, rflags) {
-        Ok(pid) => pid,
-        Err(_) => return errno::neg(errno::EAGAIN),
-    };
-
-    // Run child now (nested enter). Child typically exits (or execve+exit).
-    if let Some(frame) = crate::process::take_ready_child(child_pid) {
-        run_child_frame(frame);
-        // After exit: current is parent again; child is zombie.
+    match crate::process::fork_from_user(rip, rsp, rflags) {
+        Ok(pid) => pid as u64,
+        Err(_) => errno::neg(errno::EAGAIN),
     }
-
-    child_pid as u64
 }
 
 /// Linux execve(path, argv, envp) — envp ignored; argv up to 3 user strings.
@@ -1663,13 +1703,26 @@ fn sys_execve(path_ptr: u64, argv_ptr: u64, _envp: u64) -> u64 {
     crate::x86::msr::set_fs_base(0);
     crate::x86::msr::set_gs_base(0);
 
-    // Nested enter: new image runs until exit, then we unwind this session.
+    // Nested enter: new image runs until exit (exit_user → parent).
+    // enter_user_nested returns after the image's exit pops *this* nest frame.
     enter_user_nested(image.entry, image.stack_top, 0);
-    // New image exited: exit_user already switched to parent. Finish the
-    // outer user session (wait4 child / shell task) — do not sysret.
-    unsafe {
-        return_from_user();
+    // Current is already the parent. Do **not** always pop another nest frame:
+    // under IRQ preemption the child may have run without a wait-nest, so the
+    // only remaining frame belongs to the shell/`run` launcher — popping it
+    // here steals that frame and causes #UD on later shell exit.
+    //
+    // depth > 1  → wait (or deeper) still owns a frame under the launcher → pop
+    // depth <= 1 → only launcher frame left (or none) → resume parent trap
+    extern "C" {
+        fn get_enter_nest_depth() -> u64;
     }
+    let depth = unsafe { get_enter_nest_depth() };
+    if depth > 1 {
+        unsafe {
+            return_from_user();
+        }
+    }
+    resume_current_from_trap();
 }
 
 fn load_exec_image(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage, &'static str> {
@@ -1753,6 +1806,12 @@ fn load_exec_image(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage,
     {
         return load(crate::embedded_mmaptest::MMAPTEST_ELF);
     }
+    if path == "preempttest"
+        || path == "/bin/preempttest"
+        || path.ends_with("/preempttest")
+    {
+        return load(crate::embedded_preempttest::PREEMPTTEST_ELF);
+    }
     let _ = argv0;
     Err("ENOENT")
 }
@@ -1786,7 +1845,8 @@ fn sys_wait4(pid: u64, status_ptr: u64, options: u64) -> u64 {
     let wait_for = pid as i32;
     let nohang = (options & WNOHANG) != 0;
 
-    for _ in 0..16 {
+    // Blocking wait: run Ready children until one zombies or none left to run.
+    for _ in 0..32 {
         let mut status = 0i32;
         let got = crate::process::waitpid(wait_for, Some(&mut status), true);
 
@@ -1808,27 +1868,36 @@ fn sys_wait4(pid: u64, status_ptr: u64, options: u64) -> u64 {
         if nohang {
             return 0;
         }
-        if let Some(frame) = crate::process::take_ready_child(wait_for) {
-            run_child_frame(frame);
+        // Schedule a Ready child (or preferred pid) to make progress.
+        if let Some(frame) = crate::process::sched::take_ready(wait_for) {
+            run_user_frame(frame);
+            // Child exited → current is parent again; loop to reap.
             continue;
         }
+        // No Ready child: nothing we can run cooperatively.
         return 0;
     }
     0
 }
 
-fn enter_and_wait(entry: u64, stack_top: u64, brk_start: u64, label: &str) {
-    enter_and_wait_opts(entry, stack_top, brk_start, label, false);
+fn enter_and_wait(entry: u64, stack_top: u64, brk_start: u64, label: &str) -> Result<(), &'static str> {
+    enter_and_wait_opts(entry, stack_top, brk_start, label, false)
 }
 
 /// `quiet`: suppress pid/entry chatter (used for clean U8 boot handoff).
-fn enter_and_wait_opts(entry: u64, stack_top: u64, brk_start: u64, label: &str, quiet: bool) {
+fn enter_and_wait_opts(
+    entry: u64,
+    stack_top: u64,
+    brk_start: u64,
+    label: &str,
+    quiet: bool,
+) -> Result<(), &'static str> {
     // U5/U6: run as a child of init (shell) so getpid/exit/wait/fork are real
     let child = match crate::process::begin_user_task(label) {
         Ok(p) => p,
         Err(_) => {
             console::println("user: process table full");
-            return;
+            return Err("process table full");
         }
     };
 
@@ -1856,6 +1925,15 @@ fn enter_and_wait_opts(entry: u64, stack_top: u64, brk_start: u64, label: &str, 
     }
 
     crate::process::apply_tls();
+    let _ = crate::process::with_current(|p| {
+        p.entered_via_nest = true;
+        p.user_rip = entry;
+        p.user_rsp = stack_top;
+        p.user_rax = 0;
+        p.user_rflags = 0x202;
+        p.trap = crate::process::TrapFrame::from_user_entry(entry, stack_top, 0x202, 0);
+        p.trap_valid = true;
+    });
     unsafe {
         enter_user_mode(entry, stack_top, 0);
     }
@@ -1884,14 +1962,14 @@ fn enter_and_wait_opts(entry: u64, stack_top: u64, brk_start: u64, label: &str, 
     } else if !quiet {
         console::println("user: returned to kernel (no zombie?)");
     }
+    Ok(())
 }
 
 /// Run the built-in hand-assembled ring-3 demo until exit.
 pub fn run_demo_user_program() -> Result<(), &'static str> {
     setup_demo_image()?;
     // Demo blob is tiny; heap starts just after the demo page.
-    enter_and_wait(DEMO_CODE, DEMO_STACK_TOP, DEMO_STACK_PAGE, "user: demo");
-    Ok(())
+    enter_and_wait(DEMO_CODE, DEMO_STACK_TOP, DEMO_STACK_PAGE, "user: demo")
 }
 
 /// Load an ELF64 image from bytes and run until exit.
@@ -1902,8 +1980,7 @@ pub fn exec_elf_bytes(file: &[u8], argv0: &str) -> Result<(), &'static str> {
         image.stack_top,
         image.brk_start,
         "exec: ELF64",
-    );
-    Ok(())
+    )
 }
 
 /// Run the embedded static `hello` ELF (built by `make userland` / `make build`).
@@ -1929,6 +2006,10 @@ pub fn run_embedded_ls() -> Result<(), &'static str> {
 /// Run embedded `forktest` (fork + wait4) — U6 test.
 pub fn run_embedded_forktest() -> Result<(), &'static str> {
     exec_elf_bytes(crate::embedded_forktest::FORKTEST_ELF, "forktest")
+}
+
+pub fn run_embedded_preempttest() -> Result<(), &'static str> {
+    exec_elf_bytes(crate::embedded_preempttest::PREEMPTTEST_ELF, "preempttest")
 }
 
 /// Run embedded `exectest` (fork + execve + wait4) — U6 test.
@@ -1959,8 +2040,7 @@ pub fn run_embedded_sh_script(script: &[u8]) -> Result<(), &'static str> {
 /// so the caller can drop into the kernel debug shell.
 pub fn run_init_sh() -> Result<(), &'static str> {
     let image = load_sh_image()?;
-    enter_and_wait_opts(image.entry, image.stack_top, image.brk_start, "sh", true);
-    Ok(())
+    enter_and_wait_opts(image.entry, image.stack_top, image.brk_start, "sh", true)
 }
 
 /// Load `/bin/sh` from the rootfs, or the embedded image if the disk path fails.

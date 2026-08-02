@@ -31,11 +31,14 @@ isr_timer:
 	push rbx
 	push rax
 
+	; rdi = pointer to TrapFrame (rax at [rsp])
+	mov rdi, rsp
 	mov rbp, rsp
 	and rsp, -16
 	call timer_interrupt_handler
 	mov rsp, rbp
 
+	; Handler may have rewritten the frame (IRQ preemption).
 	pop rax
 	pop rbx
 	pop rcx

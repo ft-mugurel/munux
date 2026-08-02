@@ -61,36 +61,7 @@ impl ProcessState {
     }
 }
 
-/// Saved CPU context for future kernel-mode switching (not used for ring-3 yet).
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub struct CpuContext {
-    pub r15: u64,
-    pub r14: u64,
-    pub r13: u64,
-    pub r12: u64,
-    pub rbx: u64,
-    pub rbp: u64,
-    pub rip: u64,
-    pub rflags: u64,
-    pub rsp: u64,
-}
-
-impl CpuContext {
-    pub const fn zero() -> Self {
-        Self {
-            r15: 0,
-            r14: 0,
-            r13: 0,
-            r12: 0,
-            rbx: 0,
-            rbp: 0,
-            rip: 0,
-            rflags: 0x202, // IF set
-            rsp: 0,
-        }
-    }
-}
+use super::trap::TrapFrame;
 
 /// Full process structure.
 #[derive(Clone, Copy)]
@@ -106,7 +77,7 @@ pub struct Process {
     /// Exit status (for zombies / wait) — raw code from exit(status)
     pub exit_code: i32,
 
-    /// Stack region (virtual) — reserved for future per-process stacks
+    /// Stack region (virtual)
     pub stack_base: u64,
     pub stack_size: u64,
     /// Heap region (virtual)
@@ -125,9 +96,22 @@ pub struct Process {
     pub fs_base: u64,
     pub gs_base: u64,
 
-    pub ctx: CpuContext,
+    /// Root of this process's page tables (PML4 physical address / CR3).
+    /// `0` means “use kernel reference CR3” (before mm is bound to the task).
+    pub cr3: u64,
 
-    /// Saved user ring-3 context (U6 fork / cooperative schedule).
+    /// Top of this process’s kernel stack (TSS RSP0 / syscall). `0` → boot stack.
+    pub kstack_top: u64,
+
+    /// Full trap frame if the task was interrupted in user mode (IRQ preempt).
+    pub trap: TrapFrame,
+    /// True after a full [`TrapFrame`] was saved (IRQ or synthetic resume).
+    pub trap_valid: bool,
+    /// Entered via `enter_user_mode` nest (wait/run). If false, was IRQ-resumed
+    /// or only Ready after fork — exit must not `return_from_user`.
+    pub entered_via_nest: bool,
+
+    /// Lightweight user entry (fork / first schedule via wait).
     pub user_rip: u64,
     pub user_rsp: u64,
     pub user_rflags: u64,
@@ -166,7 +150,11 @@ impl Process {
             cwd_inode: 2, // ext2 root
             fs_base: 0,
             gs_base: 0,
-            ctx: CpuContext::zero(),
+            cr3: 0,
+            kstack_top: 0,
+            trap: TrapFrame::zero(),
+            trap_valid: false,
+            entered_via_nest: false,
             user_rip: 0,
             user_rsp: 0,
             user_rflags: 0x202,

@@ -1,4 +1,4 @@
-//! fork — create a child PCB with copied metadata and saved user context (U6).
+//! fork — create a child PCB with private page tables and saved user context.
 
 use super::pcb::ProcessState;
 use super::table;
@@ -14,23 +14,25 @@ pub struct UserFrame {
     pub rax: u64,
 }
 
-/// Private user stacks for fork children (shared page tables ⇒ need distinct VAs).
-/// BusyBox (cal etc.) can use hundreds of KiB of stack; 16 KiB caused #PF.
-const CHILD_STACK_REGION: u64 = 0x0000_0000_6F00_0000;
-const CHILD_STACK_STRIDE: u64 = 0x0000_0000_0020_0000; // 2 MiB per slot
-const CHILD_STACK_PAGES: u64 = 256; // 1 MiB
+/// User stack window size to copy on fork (BusyBox needs ~1 MiB).
+const FORK_STACK_PAGES: u64 = 256; // 1 MiB
 
 /// Fork current process. Parent stays current and returns child PID (>0).
-/// Child is left **Ready** with `user_rax = 0` and a **private stack copy**.
+/// Child is left **Ready** with `user_rax = 0`.
 ///
-/// Shares code/data pages (no page-table clone). Child is typically run to
-/// completion inside `sys_fork` before the parent resumes (cooperative).
+/// Private CR3 via [`clone_mm`]. Stack is copied to **new frames at the same
+/// VAs** as the parent. Child is left **Ready**; caller (`wait`) schedules it.
 pub fn fork_from_user(user_rip: u64, user_rsp: u64, user_rflags: u64) -> Result<i32, i32> {
     let parent_idx = table::current_index();
     let parent_pid = table::current_pid();
 
-    let (uid, heap_base, heap_size, cwd, fs_base, gs_base, mmaps, mmap_bump) =
+    let (uid, heap_base, heap_size, cwd, fs_base, gs_base, mmaps, mmap_bump, parent_cr3) =
         match table::with_current(|p| {
+            let cr3 = if p.cr3 != 0 {
+                p.cr3
+            } else {
+                crate::memory::kernel_cr3()
+            };
             (
                 p.uid,
                 p.heap_base,
@@ -40,15 +42,24 @@ pub fn fork_from_user(user_rip: u64, user_rsp: u64, user_rflags: u64) -> Result<
                 p.gs_base,
                 p.mmaps,
                 p.mmap_bump,
+                cr3,
             )
         }) {
             Some(x) => x,
             None => return Err(-1),
         };
 
+    let child_cr3 = match crate::memory::clone_mm(parent_cr3) {
+        Some(c) => c,
+        None => return Err(-1),
+    };
+
     let child_idx = match table::alloc_slot() {
         Some(i) => i,
-        None => return Err(-1),
+        None => {
+            crate::memory::free_mm(child_cr3);
+            return Err(-1);
+        }
     };
 
     let mut child_pid = 0;
@@ -64,13 +75,17 @@ pub fn fork_from_user(user_rip: u64, user_rsp: u64, user_rflags: u64) -> Result<
         &mut child_pid,
     );
 
+    // Record CR3 immediately so free_index / free_mm can reclaim on failure.
+    let _ = table::with_pid(child_pid, |p| {
+        p.cr3 = child_cr3;
+    });
+
     // Per-process FDs: child gets a copy of parent's open table.
     crate::fd::clone_table(parent_idx, child_idx);
 
-    // Copy user stack into a private VA range so parent/child do not clobber
-    // each other under a shared address space.
+    // Private stack frames at the **same** VAs as the parent (private CR3).
     let (child_rsp, stack_base, stack_size) =
-        match clone_user_stack(user_rsp, child_idx) {
+        match clone_user_stack_same_va(user_rsp, parent_cr3, child_cr3) {
             Some(x) => x,
             None => {
                 table::free_index(child_idx);
@@ -82,14 +97,23 @@ pub fn fork_from_user(user_rip: u64, user_rsp: u64, user_rflags: u64) -> Result<
         p.cwd_inode = cwd;
         p.fs_base = fs_base;
         p.gs_base = gs_base;
+        p.cr3 = child_cr3;
         p.state = ProcessState::Ready;
         p.user_rip = user_rip;
         p.user_rsp = child_rsp;
         p.user_rflags = user_rflags | 0x200; // IF
         p.user_rax = 0; // child sees fork return 0
+        // Synthetic trap so IRQ preemption can resume the child before wait.
+        p.trap = crate::process::TrapFrame::from_user_entry(
+            p.user_rip,
+            p.user_rsp,
+            p.user_rflags,
+            p.user_rax,
+        );
+        p.trap_valid = true;
+        p.entered_via_nest = false; // Ready after fork; may be IRQ-resumed
         p.stack_base = stack_base;
         p.stack_size = stack_size;
-        // Shared AS: inherit mmap bookkeeping (pages already mapped).
         p.mmaps = mmaps;
         p.mmap_bump = mmap_bump;
         p.set_name("forked");
@@ -103,127 +127,49 @@ pub fn fork_from_user(user_rip: u64, user_rsp: u64, user_rflags: u64) -> Result<
     Ok(child_pid)
 }
 
-/// Map a full child stack (always `CHILD_STACK_PAGES`) and copy what we can
-/// from the parent. Always allocate the full stack — BusyBox needs ~1 MiB;
-/// the old "1 page if parent rsp unknown" path caused stack #PF (cal, etc.).
-fn clone_user_stack(parent_rsp: u64, slot: usize) -> Option<(u64, u64, u64)> {
+/// Copy the parent stack window into `child_cr3` at the **same virtual addresses**,
+/// using freshly allocated frames. `child_rsp == parent_rsp`.
+fn clone_user_stack_same_va(
+    parent_rsp: u64,
+    parent_cr3: u64,
+    child_cr3: u64,
+) -> Option<(u64, u64, u64)> {
     let flags = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
-    let stack_size = CHILD_STACK_PAGES * FRAME_SIZE as u64;
-    let child_base = CHILD_STACK_REGION + (slot as u64) * CHILD_STACK_STRIDE;
+    let stack_size = FORK_STACK_PAGES * FRAME_SIZE as u64;
 
-    // Prefer classic ELF stack window for the copy source.
     let elf_top = crate::elf::USER_STACK_TOP;
     let elf_base = elf_top.saturating_sub(stack_size);
-    let (parent_base, offset_in_stack) = if parent_rsp >= elf_base && parent_rsp <= elf_top {
-        (elf_base, parent_rsp - elf_base)
+    let (stack_base, stack_size, child_rsp) = if parent_rsp >= elf_base && parent_rsp <= elf_top {
+        (elf_base, stack_size, parent_rsp)
     } else if parent_rsp >= 0x1000 {
-        // Best-effort: align parent window to stack_size ending above rsp.
         let parent_top = (parent_rsp + FRAME_SIZE as u64 - 1) & !(FRAME_SIZE as u64 - 1);
-        let parent_base = parent_top.saturating_sub(stack_size).max(0x1000);
-        (parent_base, parent_rsp.saturating_sub(parent_base))
+        let base = parent_top.saturating_sub(stack_size).max(0x1000);
+        let size = parent_top.saturating_sub(base);
+        (base, size, parent_rsp)
     } else {
-        (0u64, stack_size.saturating_sub(16))
+        return None;
     };
 
-    // Always map the full child stack.
-    for i in 0..CHILD_STACK_PAGES {
-        let cv = child_base + i * FRAME_SIZE as u64;
+    let pages = (stack_size / FRAME_SIZE as u64).max(1);
+    for i in 0..pages {
+        let va = stack_base + i * FRAME_SIZE as u64;
         let frame = pmm::alloc_frame()?;
-        paging::map_page(cv, frame, flags);
-        let pv = parent_base.saturating_add(i * FRAME_SIZE as u64);
+        // Always install a private frame in the child (replace shared clone leaf).
+        paging::map_page_in(child_cr3, va, frame, flags);
+        let dst = frame.as_u64() as *mut u8;
         unsafe {
-            if parent_base != 0 && paging::virt_to_phys(pv).is_some() {
-                core::ptr::copy_nonoverlapping(
-                    pv as *const u8,
-                    cv as *mut u8,
-                    FRAME_SIZE,
-                );
+            if let Some(pp) = paging::virt_to_phys_in(parent_cr3, va) {
+                let src = (pp & !0xFFF) as *const u8;
+                core::ptr::copy_nonoverlapping(src, dst, FRAME_SIZE);
             } else {
-                core::ptr::write_bytes(cv as *mut u8, 0, FRAME_SIZE);
+                core::ptr::write_bytes(dst, 0, FRAME_SIZE);
             }
         }
     }
 
-    let child_rsp = child_base
-        + offset_in_stack.min(stack_size.saturating_sub(16));
-    Some((child_rsp, child_base, stack_size))
-}
-
-/// Legacy fork helper (kernel). Prefer [`fork_from_user`].
-pub fn fork() -> i32 {
-    fork_from_user(0, 0, 0x202).unwrap_or(-1)
-}
-
-/// Cooperative switch: make `pid` current.
-pub fn switch_to(pid: i32) -> i32 {
-    let cur = table::current_pid();
-    if cur == pid {
-        return 0;
-    }
-    let Some(idx) = table::find_pid(pid) else {
-        return -1;
-    };
-    let _ = table::with_pid(cur, |p| {
-        if p.state == ProcessState::Running {
-            p.state = ProcessState::Ready;
-        }
-    });
-    table::set_current_index(idx);
-    let _ = table::with_pid(pid, |p| {
-        p.state = ProcessState::Running;
-    });
-    0
-}
-
-/// Find a Ready child of the current process, switch current → child, return its frame.
-pub fn take_ready_child(wait_for: i32) -> Option<UserFrame> {
-    let parent = table::current_pid();
-    let mut found_pid = -1i32;
-    let mut frame = UserFrame {
-        rip: 0,
-        rsp: 0,
-        rflags: 0x202,
-        rax: 0,
-    };
-
-    table::for_each_process(|_idx, p| {
-        if found_pid != -1 {
-            return;
-        }
-        if p.used
-            && p.state == ProcessState::Ready
-            && p.parent == parent
-            && (wait_for == -1 || wait_for == 0 || p.pid == wait_for)
-        {
-            found_pid = p.pid;
-            frame = UserFrame {
-                rip: p.user_rip,
-                rsp: p.user_rsp,
-                rflags: p.user_rflags,
-                rax: p.user_rax,
-            };
-        }
-    });
-
-    if found_pid < 0 {
+    let top_page = (child_rsp.saturating_sub(8)) & !0xFFF;
+    if paging::virt_to_phys_in(child_cr3, top_page).is_none() {
         return None;
     }
-
-    let parent_idx = table::current_index();
-    let _ = table::with_pid(parent, |p| {
-        if p.state == ProcessState::Running {
-            p.state = ProcessState::Sleeping;
-        }
-    });
-    let _ = parent_idx;
-
-    if let Some(idx) = table::find_pid(found_pid) {
-        table::set_current_index(idx);
-        let _ = table::with_pid(found_pid, |p| {
-            p.state = ProcessState::Running;
-        });
-        Some(frame)
-    } else {
-        None
-    }
+    Some((child_rsp, stack_base, stack_size))
 }

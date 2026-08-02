@@ -1,19 +1,10 @@
-//! Unix-like helpers: wait, exit, getuid, signal, kill, user-task spawn.
+//! Unix-like helpers: waitpid, exit_user, getuid/getpid, user-task spawn.
 
 use super::pcb::{Pid, ProcessState, Uid};
-use super::signal_queue;
 use super::table;
 
 pub fn getuid() -> Uid {
     table::with_current(|p| p.uid).unwrap_or(0)
-}
-
-pub fn setuid(uid: Uid) -> i32 {
-    table::with_current(|p| {
-        p.uid = uid;
-        0
-    })
-    .unwrap_or(-1)
 }
 
 pub fn getpid() -> Pid {
@@ -22,14 +13,6 @@ pub fn getpid() -> Pid {
 
 pub fn getppid() -> Pid {
     table::with_current(|p| p.parent).unwrap_or(-1)
-}
-
-pub fn kill(pid: Pid, sig: u32) -> i32 {
-    signal_queue::proc_kill(pid, sig)
-}
-
-pub fn signal(sig: u32, handler: usize) -> usize {
-    signal_queue::proc_signal(sig, handler)
 }
 
 /// Terminate current process as zombie and switch to parent.
@@ -56,6 +39,8 @@ pub fn exit_user(status: i32) {
 
     if parent > 0 {
         if let Some(i) = table::find_pid(parent) {
+            // Wake parent if it was sleeping in wait/schedule.
+            let _ = crate::process::sched::wake_up(parent);
             table::set_current_index(i);
             let _ = table::with_pid(parent, |p| {
                 if p.state != ProcessState::Zombie {
@@ -78,21 +63,6 @@ pub fn exit_user(status: i32) {
             }
         });
     }
-}
-
-/// Legacy cooperative exit — marks zombie then parks (kernel paths only).
-pub fn exit(status: i32) -> ! {
-    exit_user(status);
-    loop {
-        unsafe {
-            core::arch::asm!("hlt", options(nomem, nostack));
-        }
-    }
-}
-
-/// Wait for a zombie child (non-blocking). Returns child pid or -1.
-pub fn wait(status_out: Option<&mut i32>) -> Pid {
-    waitpid(-1, status_out, false)
 }
 
 /// waitpid(pid, status): pid == -1 → any child.

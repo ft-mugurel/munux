@@ -1,12 +1,7 @@
 //! munux kernel entry (x86_64).
 //!
-//! PR1–PR4: boot, GDT/IDT, memory, IRQs
-//! PR5: heap + interactive shell
-//! PR6: syscall + ring-3 user demo
-//! PR7: ELF64 loader + embedded hello
-//! PR8: IDE + ext2 (read) + shell FS commands
-//! U1: FD table + WRITE via FDs (`docs/ABI.md`)
-//! U8: boot handoff to userspace `/bin/sh` (kernel shell is debug fallback)
+//! Boot: Multiboot → long mode → GDT/TSS/IDT → PMM/paging/heap → processes →
+//! syscalls → ext2 → userspace `/bin/sh` (kernel shell is debug fallback).
 
 #![no_std]
 #![no_main]
@@ -24,6 +19,7 @@ pub mod embedded_sh;
 pub mod embedded_archprctl;
 pub mod embedded_brktest;
 pub mod embedded_mmaptest;
+pub mod embedded_preempttest;
 pub mod embedded_uname;
 pub mod embedded_vi;
 pub mod fd;
@@ -109,7 +105,6 @@ pub extern "C" fn kmain() -> ! {
     console::write_hex64(cr3);
     console::println("");
 
-    // --- PR5: heap ---
     init_heap();
     if let Some(p) = kmalloc(32) {
         console::print("heap kmalloc OK @ ");
@@ -122,7 +117,6 @@ pub extern "C" fn kmain() -> ! {
         console::set_color(0x07);
     }
 
-    // --- PR4: IRQs ---
     init_timer();
     init_keyboard();
     unsafe {
@@ -133,19 +127,13 @@ pub extern "C" fn kmain() -> ! {
     console::write_u64(present_gate_count() as u64);
     console::println("");
 
-    // --- U1: file descriptors (stdio 0/1/2) ---
     fd::init();
     console::print("fd: stdio installed open=");
     console::write_u64(fd::open_count() as u64);
     console::println("");
 
-    // --- U5: process table (init = pid 1 = shell) ---
     process::init_processes();
-
-    // --- PR6: syscalls ---
     init_syscalls();
-
-    // --- PR8: filesystem ---
     fs::init();
 
     console::set_color(0x0A);
@@ -161,9 +149,7 @@ pub extern "C" fn kmain() -> ! {
     console::set_color(0x07);
     console::println("");
 
-    // --- U8: userspace init (/bin/sh) ---
-    // Kernel process table still has pid 1 = kinit (this idle context).
-    // /bin/sh runs as a child until exit, then we fall back to munux> for debug.
+    // Userspace init (/bin/sh). kinit remains pid 1; sh is a child.
     match syscalls::run_init_sh() {
         Ok(()) => {
             console::clear();
@@ -179,7 +165,6 @@ pub extern "C" fn kmain() -> ! {
         }
     }
 
-    // --- PR5 / debug: kernel shell (also fallback when userspace init exits) ---
     shell::init();
 
     loop {

@@ -15,6 +15,7 @@ pub use pmm::{
     total_frames, used_frames, PhysAddr, FRAME_SIZE,
 };
 pub use paging::{
-    create_page, init as init_paging, is_enabled as paging_enabled, map_page, page_directory_phys,
-    unmap_page, virt_to_phys, PAGE_KERNEL_RW, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE,
+    clone_mm, create_page, current_cr3, free_mm, init as init_paging, is_enabled as paging_enabled,
+    kernel_cr3, map_page, map_page_in, page_directory_phys, switch_mm, unmap_page, virt_to_phys,
+    virt_to_phys_in, PAGE_KERNEL_RW, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE,
 };

@@ -1,37 +1,31 @@
-//! Process management — PCBs, spawn/exit/wait, signals, sockets, memory.
-//!
-//! U5: real PIDs, zombie exit, wait4, getpid/getppid, cwd per process.
-//! User tasks (`/bin/sh` at U8 boot, or `run`/`user`) are children of kinit (pid 1).
+//! Process management — PCBs, spawn/exit/wait, signals, memory, cooperative sched.
 
 pub mod fork;
+pub mod kstack;
 pub mod memory;
 pub mod pcb;
+pub mod sched;
 pub mod signal_queue;
-pub mod socket;
 pub mod sys;
 pub mod table;
+pub mod trap;
 
-pub use fork::{fork, fork_from_user, switch_to, take_ready_child, UserFrame};
+pub use trap::TrapFrame;
+
+pub use fork::{fork_from_user, UserFrame};
 pub use memory::{
-    clear_mmaps, current_brk, proc_brk, proc_mmap, proc_mprotect, proc_munmap, proc_read_mem,
-    proc_sbrk, proc_write_mem, set_brk_start, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, PROT_READ,
-    PROT_WRITE,
+    clear_mmaps, proc_brk, proc_mmap, proc_mprotect, proc_munmap, set_brk_start, MAP_ANONYMOUS,
+    MAP_FIXED, MAP_PRIVATE, PROT_READ, PROT_WRITE,
 };
 pub use pcb::{Pid, Process, ProcessState, Uid, MAX_PROCESSES};
-pub use socket::{socket_close, socket_connect, socket_create, socket_recv, socket_send};
-pub use sys::{
-    begin_user_task, exit, exit_user, getpid, getppid, getuid, kill, reap_any_child, setuid,
-    signal, wait, waitpid,
-};
-pub use table::{
-    current_index, current_pid, for_each_process, process_count, with_current,
-};
+pub use sys::{begin_user_task, exit_user, getpid, getppid, getuid, reap_any_child, waitpid};
+pub use table::{current_index, current_pid, for_each_process, process_count, with_current};
 
 /// Private user stack region for the current process, if any.
 ///
-/// Fork children get a slot at `CHILD_STACK_REGION`; the initial shell uses the
-/// classic ELF stack (`stack_base == 0`). Exec must honour this so it does not
-/// wipe the parent's stack under a shared address space.
+/// After Phase 1 fork, children keep the classic stack VA window on a private
+/// CR3 (`stack_base` / `stack_size` set). `0` means “use default ELF stack top”
+/// (initial shell). Exec rebuilds argv in this region when set.
 pub fn current_stack_region() -> Option<(u64, u64)> {
     table::with_current(|p| {
         if p.stack_base != 0 && p.stack_size != 0 {
@@ -96,14 +90,18 @@ pub fn get_gs_base_saved() -> u64 {
 /// Boot: create process table with init (pid 1).
 pub fn init_processes() {
     table::init_table();
+    let kcr3 = crate::memory::kernel_cr3();
     crate::console::print("process: kinit pid=");
     crate::console::write_u64(current_pid() as u64);
     crate::console::print(" uid=");
     crate::console::write_u64(getuid() as u64);
+    crate::console::print(" cr3=");
+    crate::console::write_hex64(kcr3);
     crate::console::println("");
 }
 
-/// Called from timer IRQ each tick — deliver per-process signal queues.
+/// Called from timer IRQ each tick — signals + scheduler tick.
 pub fn on_cpu_tick() {
     signal_queue::deliver_pending_on_tick();
+    sched::on_timer_tick(crate::interrupts::timer::ticks());
 }

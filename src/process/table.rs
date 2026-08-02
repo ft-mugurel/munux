@@ -25,10 +25,16 @@ pub fn init_table() {
         p.heap_base = crate::memory::KERNEL_HEAP_START;
         p.heap_size = 0;
         p.cwd_inode = 2; // ext2 root inode
-        // Kernel-side init (pid 1). Userspace /bin/sh is a child (U8 handoff).
+        p.cr3 = crate::memory::kernel_cr3();
+        p.kstack_top = super::kstack::top_for_slot(0);
+        // Kernel-side init (pid 1). Userspace /bin/sh is a child (boot handoff).
         p.set_name("kinit");
         CURRENT = 0;
         NEXT_PID.store(2, Ordering::Relaxed);
+        if p.cr3 != 0 {
+            crate::memory::switch_mm(p.cr3);
+        }
+        super::kstack::install_for_slot(0);
     }
 }
 
@@ -44,6 +50,17 @@ pub fn set_current_index(i: usize) {
     unsafe {
         CURRENT = i;
     }
+    let cr3 = unsafe {
+        let p = &*slot_mut(i);
+        if p.used && p.cr3 != 0 {
+            p.cr3
+        } else {
+            crate::memory::kernel_cr3()
+        }
+    };
+    crate::memory::switch_mm(cr3);
+    // Per-task kernel stack for syscall / ring0 entry (TSS RSP0 + syscall_kstack).
+    super::kstack::install_for_slot(i);
     // Restore TLS bases for the newly current process.
     crate::process::apply_tls();
 }
@@ -117,8 +134,50 @@ pub fn free_index(i: usize) {
         return;
     }
     crate::fd::clear_table(i);
+    // Drop private page tables (Phase 1b); never free the boot kernel CR3.
+    let (cr3, pid, parent) = unsafe {
+        let p = &*slot_mut(i);
+        if p.used {
+            (p.cr3, p.pid, p.parent)
+        } else {
+            (0, 0, -1)
+        }
+    };
+    // Unlink from parent children[] so nchildren does not leak (unit tests
+    // free slots without wait/reap).
+    if parent >= 0 {
+        if let Some(pidx) = find_pid(parent) {
+            remove_child(pidx, pid);
+        }
+    }
+    let k = crate::memory::kernel_cr3();
+    if cr3 != 0 && cr3 != k {
+        crate::memory::free_mm(cr3);
+    }
     unsafe {
         *slot_mut(i) = Process::empty();
+    }
+}
+
+/// Remove `child_pid` from parent slot's children list (compact).
+pub fn remove_child(parent_idx: usize, child_pid: Pid) {
+    if parent_idx >= MAX_PROCESSES {
+        return;
+    }
+    unsafe {
+        let p = &mut *slot_mut(parent_idx);
+        let mut w = 0usize;
+        let n = p.nchildren.min(super::pcb::MAX_CHILDREN);
+        for r in 0..n {
+            if p.children[r] != child_pid {
+                p.children[w] = p.children[r];
+                w += 1;
+            }
+        }
+        p.nchildren = w;
+        for i in w..super::pcb::MAX_CHILDREN {
+            p.children[i] = 0;
+        }
     }
 }
 
@@ -148,8 +207,15 @@ pub fn init_child_slot(
         p.heap_base = heap_base;
         p.heap_size = heap_size;
         p.cwd_inode = 2;
-        p.ctx.rsp = stack_base.wrapping_add(stack_size);
-        p.ctx.rbp = p.ctx.rsp;
+        // Default to parent CR3; fork overwrites with clone_mm result.
+        p.cr3 = crate::memory::kernel_cr3();
+        if let Some(parent_cr3) = with_pid(parent_pid, |par| par.cr3) {
+            if parent_cr3 != 0 {
+                p.cr3 = parent_cr3;
+            }
+        }
+        p.trap_valid = false;
+        p.kstack_top = super::kstack::top_for_slot(child_idx);
         p.set_name("child");
     }
 }

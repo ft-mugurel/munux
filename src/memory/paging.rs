@@ -53,6 +53,8 @@ struct Table {
 }
 
 static mut PML4_PHYS: u64 = 0;
+/// Boot / reference kernel page tables. Never free; always valid after [`init`].
+static mut KERNEL_PML4: u64 = 0;
 static mut PAGING_ENABLED: bool = false;
 
 fn pml4_index(virt: u64) -> usize {
@@ -119,6 +121,317 @@ pub fn page_directory_phys() -> Option<PhysAddr> {
     }
 }
 
+/// Physical address of the boot kernel PML4 (shared kernel mapping root).
+///
+/// All process CR3 values must keep the same kernel entries as this table
+/// (Phase 1: identity window + heap). Returns `0` before [`init`].
+pub fn kernel_cr3() -> u64 {
+    unsafe { KERNEL_PML4 }
+}
+
+/// CR3 currently loaded in the CPU (PML4 physical address).
+pub fn current_cr3() -> u64 {
+    read_cr3()
+}
+
+/// Load process page tables. No-op if `cr3 == 0` or already active.
+///
+/// Also updates the software “current tables” pointer used by `map_page` /
+/// `virt_to_phys` so later mapping ops hit the same tree as the CPU.
+pub fn switch_mm(cr3: u64) {
+    if cr3 == 0 {
+        return;
+    }
+    unsafe {
+        if read_cr3() == cr3 {
+            // Keep software view in sync even if hardware already matches.
+            PML4_PHYS = cr3;
+            return;
+        }
+        write_cr3(cr3);
+        PML4_PHYS = cr3;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1: clone / free address spaces
+// ---------------------------------------------------------------------------
+
+/// Create a new address space that mirrors `src_cr3`.
+///
+/// - **Kernel leaves** (no `PAGE_USER`): shared physical frames.
+/// - **User leaves** (`PAGE_USER`): new frames + content copy (isolation).
+/// - 2 MiB user pages are split to 4 KiB and copied.
+///
+/// Returns the new PML4 physical address, or `None` on OOM.
+pub fn clone_mm(src_cr3: u64) -> Option<u64> {
+    if src_cr3 == 0 {
+        return None;
+    }
+    let dst = alloc_table();
+    if !clone_pml4(src_cr3, dst.as_u64(), 0) {
+        free_mm(dst.as_u64());
+        return None;
+    }
+    Some(dst.as_u64())
+}
+
+/// Tear down a process address space created by [`clone_mm`].
+///
+/// - Never free [`kernel_cr3`].
+/// - Free **private user** leaf frames (`PAGE_USER` and `phys != virt` page base).
+/// - Free all intermediate page-table pages for this tree.
+pub fn free_mm(cr3: u64) {
+    if cr3 == 0 {
+        return;
+    }
+    let k = unsafe { KERNEL_PML4 };
+    if cr3 == k {
+        return;
+    }
+    if current_cr3() == cr3 {
+        if k != 0 {
+            switch_mm(k);
+        }
+    }
+    free_pml4_tree(cr3);
+    pmm::free_frame(PhysAddr::new(cr3));
+}
+
+fn clone_pml4(src: u64, dst: u64, va_base: u64) -> bool {
+    unsafe {
+        let s = table_mut(src);
+        let d = table_mut(dst);
+        for i in 0..ENTRIES {
+            let e = (*s).entries[i];
+            if !e.is_present() {
+                continue;
+            }
+            let va = va_base | ((i as u64) << 39);
+            let Some(new_pdpt) = alloc_table_opt() else {
+                return false;
+            };
+            if !clone_pdpt(e.addr(), new_pdpt.as_u64(), va) {
+                pmm::free_frame(new_pdpt);
+                return false;
+            }
+            (*d).entries[i] = Entry::new(new_pdpt.as_u64(), e.flags());
+        }
+    }
+    true
+}
+
+fn clone_pdpt(src: u64, dst: u64, va_base: u64) -> bool {
+    unsafe {
+        let s = table_mut(src);
+        let d = table_mut(dst);
+        for i in 0..ENTRIES {
+            let e = (*s).entries[i];
+            if !e.is_present() {
+                continue;
+            }
+            let va = va_base | ((i as u64) << 30);
+            let Some(new_pd) = alloc_table_opt() else {
+                return false;
+            };
+            if !clone_pd(e.addr(), new_pd.as_u64(), va) {
+                pmm::free_frame(new_pd);
+                return false;
+            }
+            (*d).entries[i] = Entry::new(new_pd.as_u64(), e.flags());
+        }
+    }
+    true
+}
+
+fn clone_pd(src: u64, dst: u64, va_base: u64) -> bool {
+    unsafe {
+        let s = table_mut(src);
+        let d = table_mut(dst);
+        for i in 0..ENTRIES {
+            let e = (*s).entries[i];
+            if !e.is_present() {
+                continue;
+            }
+            let va = va_base | ((i as u64) << 21);
+            // 2 MiB leaf
+            if e.flags() & PAGE_SIZE_2M != 0 {
+                if e.flags() & PAGE_USER != 0 {
+                    // Split + copy into private 4K frames.
+                    let Some(new_pt) = alloc_table_opt() else {
+                        return false;
+                    };
+                    if !copy_2m_user_to_pt(e.addr() & !0x1F_FFFF, new_pt.as_u64(), e.flags()) {
+                        pmm::free_frame(new_pt);
+                        return false;
+                    }
+                    let need = PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+                    (*d).entries[i] = Entry::new(new_pt.as_u64(), need);
+                } else {
+                    // Kernel huge page — share.
+                    (*d).entries[i] = e;
+                }
+                continue;
+            }
+            let Some(new_pt) = alloc_table_opt() else {
+                return false;
+            };
+            if !clone_pt(e.addr(), new_pt.as_u64(), va) {
+                pmm::free_frame(new_pt);
+                return false;
+            }
+            (*d).entries[i] = Entry::new(new_pt.as_u64(), e.flags());
+        }
+    }
+    true
+}
+
+fn clone_pt(src: u64, dst: u64, va_base: u64) -> bool {
+    unsafe {
+        let s = table_mut(src);
+        let d = table_mut(dst);
+        for i in 0..ENTRIES {
+            let e = (*s).entries[i];
+            if !e.is_present() {
+                (*d).entries[i] = Entry::empty();
+                continue;
+            }
+            if e.flags() & PAGE_USER != 0 {
+                // Private copy of user page.
+                let Some(nf) = alloc_table_opt() else {
+                    // alloc_table_opt zeros; reuse as data frame.
+                    return false;
+                };
+                let src_phys = e.addr();
+                core::ptr::copy_nonoverlapping(
+                    src_phys as *const u8,
+                    nf.as_u64() as *mut u8,
+                    FRAME_SIZE,
+                );
+                (*d).entries[i] = Entry::new(nf.as_u64(), e.flags());
+                let _ = va_base; // kept for future COW / debug
+            } else {
+                // Kernel leaf — share.
+                (*d).entries[i] = e;
+            }
+        }
+    }
+    true
+}
+
+/// Expand a 2 MiB user page into 512 private 4 KiB frames with copied content.
+fn copy_2m_user_to_pt(phys_base: u64, pt_phys: u64, src_flags: u64) -> bool {
+    let leaf_flags = (src_flags & !PAGE_SIZE_2M) | PAGE_PRESENT | PAGE_USER;
+    unsafe {
+        let pt = table_mut(pt_phys);
+        for i in 0..ENTRIES {
+            let Some(nf) = alloc_table_opt() else {
+                // Best-effort: free frames we already put in this PT.
+                for j in 0..i {
+                    let e = (*pt).entries[j];
+                    if e.is_present() {
+                        pmm::free_frame(PhysAddr::new(e.addr()));
+                    }
+                }
+                return false;
+            };
+            let src = (phys_base + (i as u64) * FRAME_SIZE as u64) as *const u8;
+            core::ptr::copy_nonoverlapping(src, nf.as_u64() as *mut u8, FRAME_SIZE);
+            (*pt).entries[i] = Entry::new(nf.as_u64(), leaf_flags);
+        }
+    }
+    true
+}
+
+fn alloc_table_opt() -> Option<PhysAddr> {
+    let f = pmm::alloc_frame()?;
+    zero_frame(f);
+    Some(f)
+}
+
+/// True if this user leaf is a privately allocated frame (safe to return to PMM).
+fn user_frame_is_private(virt: u64, phys: u64) -> bool {
+    let p = phys & !0xFFF;
+    let v = virt & !0xFFF;
+    if p == v {
+        return false; // identity-backed — may still be shared kernel RAM
+    }
+    if p < 0x100000 {
+        return false;
+    }
+    true
+}
+
+fn free_pml4_tree(pml4: u64) {
+    unsafe {
+        let t4 = table_mut(pml4);
+        for i4 in 0..ENTRIES {
+            let e4 = (*t4).entries[i4];
+            if !e4.is_present() {
+                continue;
+            }
+            let va4 = (i4 as u64) << 39;
+            free_pdpt_tree(e4.addr(), va4);
+            pmm::free_frame(PhysAddr::new(e4.addr()));
+            (*t4).entries[i4] = Entry::empty();
+        }
+    }
+}
+
+fn free_pdpt_tree(pdpt: u64, va_base: u64) {
+    unsafe {
+        let t3 = table_mut(pdpt);
+        for i3 in 0..ENTRIES {
+            let e3 = (*t3).entries[i3];
+            if !e3.is_present() {
+                continue;
+            }
+            let va3 = va_base | ((i3 as u64) << 30);
+            free_pd_tree(e3.addr(), va3);
+            pmm::free_frame(PhysAddr::new(e3.addr()));
+            (*t3).entries[i3] = Entry::empty();
+        }
+    }
+}
+
+fn free_pd_tree(pd: u64, va_base: u64) {
+    unsafe {
+        let t2 = table_mut(pd);
+        for i2 in 0..ENTRIES {
+            let e2 = (*t2).entries[i2];
+            if !e2.is_present() {
+                continue;
+            }
+            let va2 = va_base | ((i2 as u64) << 21);
+            if e2.flags() & PAGE_SIZE_2M != 0 {
+                // Shared kernel 2M or (should not happen) user 2M — never free leaf.
+                (*t2).entries[i2] = Entry::empty();
+                continue;
+            }
+            free_pt_leaves(e2.addr(), va2);
+            pmm::free_frame(PhysAddr::new(e2.addr()));
+            (*t2).entries[i2] = Entry::empty();
+        }
+    }
+}
+
+fn free_pt_leaves(pt: u64, va_base: u64) {
+    unsafe {
+        let t1 = table_mut(pt);
+        for i1 in 0..ENTRIES {
+            let e1 = (*t1).entries[i1];
+            if !e1.is_present() {
+                continue;
+            }
+            let va = va_base | ((i1 as u64) << 12);
+            if e1.flags() & PAGE_USER != 0 && user_frame_is_private(va, e1.addr()) {
+                pmm::free_frame(PhysAddr::new(e1.addr()));
+            }
+            (*t1).entries[i1] = Entry::empty();
+        }
+    }
+}
+
 /// Translate virt -> phys if mapped (4K leaf or 2M page).
 pub fn virt_to_phys(virt: u64) -> Option<u64> {
     let pml4 = unsafe { PML4_PHYS };
@@ -151,16 +464,28 @@ pub fn virt_to_phys(virt: u64) -> Option<u64> {
     }
 }
 
-/// Map one 4 KiB page (creates intermediate tables as needed).
+/// Map one 4 KiB page in the **current** address space ([`PML4_PHYS`]).
 pub fn map_page(virt: u64, phys: PhysAddr, flags: u64) {
-    assert!(virt % FRAME_SIZE as u64 == 0);
-    assert!(phys.is_aligned());
     let pml4 = unsafe {
         if PML4_PHYS == 0 {
             panic_paging("map_page before init");
         }
         PML4_PHYS
     };
+    map_page_in(pml4, virt, phys, flags);
+}
+
+/// Map one 4 KiB page into a specific page-table root (may differ from active CR3).
+///
+/// Used by fork to install the child stack into `child_cr3` without switching
+/// the CPU away from the parent. Does not shoot down the other CR3's TLB; the
+/// child loads CR3 later via [`switch_mm`].
+pub fn map_page_in(pml4: u64, virt: u64, phys: PhysAddr, flags: u64) {
+    assert!(virt % FRAME_SIZE as u64 == 0);
+    assert!(phys.is_aligned());
+    if pml4 == 0 {
+        panic_paging("map_page_in: null pml4");
+    }
 
     unsafe {
         // Privilege bits that intermediate tables must allow for user pages.
@@ -173,7 +498,6 @@ pub fn map_page(virt: u64, phys: PhysAddr, flags: u64) {
             let pdpt = alloc_table();
             (*t4).entries[i4] = Entry::new(pdpt.as_u64(), need);
         } else {
-            // Upgrade U/S if mapping a user page through an existing kernel PDE path
             let e = (*t4).entries[i4];
             (*t4).entries[i4] = Entry::new(e.addr(), e.flags() | need);
         }
@@ -195,14 +519,8 @@ pub fn map_page(virt: u64, phys: PhysAddr, flags: u64) {
         let t2 = table_mut(e3.addr());
         let i2 = pd_index(virt);
         let e2 = (*t2).entries[i2];
-        let mut split_huge = false;
         if e2.is_present() && e2.flags() & PAGE_SIZE_2M != 0 {
-            // Expand huge page so we can set per-4K USER/flags (ELF at 0x400000).
-            // Phys of a 2 MiB page is aligned to 2 MiB (bits 20:12 are zero).
             let base = e2.0 & !0x1F_FFFF;
-            // Preserve U/S from the huge page on every leaf. If we drop USER here,
-            // a later brk/mmap that splits a user ET_EXEC 2 MiB mapping leaves the
-            // program text supervisor-only → user #PF (error=0x5) mid-BusyBox.
             let leaf_flags = PAGE_PRESENT
                 | PAGE_WRITABLE
                 | (e2.flags() & PAGE_USER)
@@ -214,7 +532,6 @@ pub fn map_page(virt: u64, phys: PhysAddr, flags: u64) {
                 (*pt_t).entries[i] = Entry::new(p, leaf_flags);
             }
             (*t2).entries[i2] = Entry::new(pt.as_u64(), need);
-            split_huge = true;
         } else if !e2.is_present() {
             let pt = alloc_table();
             (*t2).entries[i2] = Entry::new(pt.as_u64(), need);
@@ -223,28 +540,48 @@ pub fn map_page(virt: u64, phys: PhysAddr, flags: u64) {
             (*t2).entries[i2] = Entry::new(e.addr(), e.flags() | need);
         }
         let e2 = (*t2).entries[i2];
-        // Must not still look like a 2 MiB leaf — that would make the next walk
-        // treat a PT physical address as a huge page and corrupt translations.
         if e2.flags() & PAGE_SIZE_2M != 0 {
-            panic_paging("map_page: PD still PS after split");
+            panic_paging("map_page_in: PD still PS after split");
         }
 
         let t1 = table_mut(e2.addr());
         let i1 = pt_index(virt);
         (*t1).entries[i1] = Entry::new(phys.as_u64(), flags | PAGE_PRESENT);
-        if PAGING_ENABLED {
+
+        // Only invalidate TLB if this tree is currently loaded.
+        if PAGING_ENABLED && read_cr3() == pml4 {
             invlpg(virt);
-            // Drop any cached 2 MiB TLB covering this region.
-            if split_huge {
-                let base = virt & !0x1F_FFFF;
-                let mut v = base;
-                while v < base + 0x20_0000 {
-                    invlpg(v);
-                    v += FRAME_SIZE as u64;
-                }
-                write_cr3(read_cr3());
-            }
         }
+    }
+}
+
+/// Translate virt → phys in a specific address space.
+pub fn virt_to_phys_in(pml4: u64, virt: u64) -> Option<u64> {
+    if pml4 == 0 {
+        return None;
+    }
+    unsafe {
+        let e4 = (*table_mut(pml4)).entries[pml4_index(virt)];
+        if !e4.is_present() {
+            return None;
+        }
+        let e3 = (*table_mut(e4.addr())).entries[pdpt_index(virt)];
+        if !e3.is_present() {
+            return None;
+        }
+        let e2 = (*table_mut(e3.addr())).entries[pd_index(virt)];
+        if !e2.is_present() {
+            return None;
+        }
+        if e2.flags() & PAGE_SIZE_2M != 0 {
+            let base = e2.addr() & !0x1F_FFFF;
+            return Some(base | (virt & 0x1F_FFFF));
+        }
+        let e1 = (*table_mut(e2.addr())).entries[pt_index(virt)];
+        if !e1.is_present() {
+            return None;
+        }
+        Some(e1.addr() | (virt & 0xFFF))
     }
 }
 
@@ -419,6 +756,7 @@ pub fn init() {
     let pml4 = alloc_table();
     unsafe {
         PML4_PHYS = pml4.as_u64();
+        KERNEL_PML4 = pml4.as_u64();
     }
 
     // Map at least identity of early RAM; shrink to managed phys if smaller.
@@ -468,7 +806,3 @@ fn panic_paging(msg: &str) -> ! {
     }
 }
 
-/// Bytes identity-mapped at init (for display). Approximate via virt_to_phys scan not needed.
-pub fn identity_map_size_hint() -> u64 {
-    IDENTITY_MAP_BYTES
-}
