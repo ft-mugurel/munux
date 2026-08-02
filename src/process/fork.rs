@@ -98,6 +98,8 @@ pub fn fork_from_user(user_rip: u64, user_rsp: u64, user_rflags: u64) -> Result<
         p.fs_base = fs_base;
         p.gs_base = gs_base;
         p.cr3 = child_cr3;
+        p.mm_shared = false;
+        p.tgid = child_pid; // new process = own thread group
         p.state = ProcessState::Ready;
         p.user_rip = user_rip;
         p.user_rsp = child_rsp;
@@ -116,6 +118,7 @@ pub fn fork_from_user(user_rip: u64, user_rsp: u64, user_rflags: u64) -> Result<
         p.stack_size = stack_size;
         p.mmaps = mmaps;
         p.mmap_bump = mmap_bump;
+        p.clear_child_tid = 0;
         p.set_name("forked");
     });
 

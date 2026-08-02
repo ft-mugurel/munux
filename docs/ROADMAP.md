@@ -147,6 +147,10 @@ BusyBox suite stays a **regression gate** after each phase — not the work queu
 
 ## Phase 4 — Threads (north star #1)
 
+**Status (2026-08-02):** **4a/4b first slice** — PCB `tid`/`tgid`; `gettid`; `getpid` returns tgid;
+`clone` with `CLONE_VM` / `CLONE_THREAD` / settid flags / stack / TLS; shared-mm free only on
+last user; `clonetest` embedded smoke. Not yet: true shared FD tables, `exit_group`, futex join.
+
 Linux model (simplified):
 
 | Concept | Linux | munux target |

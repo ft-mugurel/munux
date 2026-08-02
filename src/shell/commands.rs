@@ -159,6 +159,16 @@ pub fn dispatch(line: &str) {
                 cmd_preempttest();
                 return;
             }
+            if path == "clone" || path == "clonetest" {
+                match crate::syscalls::run_embedded_clonetest() {
+                    Ok(()) => {}
+                    Err(e) => {
+                        console::print("run clonetest: ");
+                        console::println(e);
+                    }
+                }
+                return;
+            }
             if path == "exec" || path == "exectest" {
                 match crate::syscalls::run_embedded_exectest() {
                     Ok(()) => {}

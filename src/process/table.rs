@@ -17,6 +17,7 @@ pub fn init_table() {
         let p = &mut *slot_mut(0);
         p.used = true;
         p.pid = 1;
+        p.tgid = 1;
         p.parent = -1;
         p.state = ProcessState::Running;
         p.uid = 0;
@@ -135,12 +136,13 @@ pub fn free_index(i: usize) {
     }
     crate::fd::clear_table(i);
     // Drop private page tables (Phase 1b); never free the boot kernel CR3.
-    let (cr3, pid, parent) = unsafe {
+    // Shared mm (CLONE_VM): free only when no other live task still uses CR3.
+    let (cr3, pid, parent, mm_shared) = unsafe {
         let p = &*slot_mut(i);
         if p.used {
-            (p.cr3, p.pid, p.parent)
+            (p.cr3, p.pid, p.parent, p.mm_shared)
         } else {
-            (0, 0, -1)
+            (0, 0, -1, false)
         }
     };
     // Unlink from parent children[] so nchildren does not leak (unit tests
@@ -152,7 +154,24 @@ pub fn free_index(i: usize) {
     }
     let k = crate::memory::kernel_cr3();
     if cr3 != 0 && cr3 != k {
-        crate::memory::free_mm(cr3);
+        let mut others = false;
+        if mm_shared {
+            unsafe {
+                for j in 0..MAX_PROCESSES {
+                    if j == i {
+                        continue;
+                    }
+                    let o = &*slot_mut(j);
+                    if o.used && o.cr3 == cr3 {
+                        others = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if !mm_shared || !others {
+            crate::memory::free_mm(cr3);
+        }
     }
     unsafe {
         *slot_mut(i) = Process::empty();
@@ -195,18 +214,21 @@ pub fn init_child_slot(
     unsafe {
         let p = &mut *slot_mut(child_idx);
         *out_pid = p.pid;
+        // Default: new process is its own thread group (fork). CLONE_THREAD overwrites.
+        p.tgid = p.pid;
         p.parent = parent_pid;
         p.uid = uid;
-        p.state = if is_thread {
-            ProcessState::Thread
-        } else {
-            ProcessState::Ready
-        };
+        // Always Ready so the scheduler can pick the task. `is_thread` only
+        // marks intent for name/debug; CLONE_THREAD sets tgid separately.
+        let _ = is_thread;
+        p.state = ProcessState::Ready;
         p.stack_base = stack_base;
         p.stack_size = stack_size;
         p.heap_base = heap_base;
         p.heap_size = heap_size;
         p.cwd_inode = 2;
+        p.clear_child_tid = 0;
+        p.mm_shared = false;
         // Default to parent CR3; fork overwrites with clone_mm result.
         p.cr3 = crate::memory::kernel_cr3();
         if let Some(parent_cr3) = with_pid(parent_pid, |par| par.cr3) {
@@ -216,7 +238,7 @@ pub fn init_child_slot(
         }
         p.trap_valid = false;
         p.kstack_top = super::kstack::top_for_slot(child_idx);
-        p.set_name("child");
+        p.set_name(if is_thread { "thread" } else { "child" });
     }
 }
 

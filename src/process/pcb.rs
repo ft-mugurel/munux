@@ -67,7 +67,11 @@ use super::trap::TrapFrame;
 #[derive(Clone, Copy)]
 pub struct Process {
     pub used: bool,
+    /// Unique task id (Linux **tid**). Also the value returned by `gettid`.
     pub pid: Pid,
+    /// Thread-group id (Linux **tgid**). `getpid` returns this.
+    /// For a normal process `tgid == pid`. Threads share the leader's tgid.
+    pub tgid: Pid,
     pub state: ProcessState,
     /// Parent PID (−1 if none)
     pub parent: Pid,
@@ -76,6 +80,10 @@ pub struct Process {
     pub uid: Uid,
     /// Exit status (for zombies / wait) — raw code from exit(status)
     pub exit_code: i32,
+    /// User pointer for `set_tid_address` / `CLONE_CHILD_CLEARTID` (cleared on exit later).
+    pub clear_child_tid: u64,
+    /// CR3 is shared with other tasks (`CLONE_VM`) — do not free_mm until last user.
+    pub mm_shared: bool,
 
     /// Stack region (virtual)
     pub stack_base: u64,
@@ -135,12 +143,15 @@ impl Process {
         Self {
             used: false,
             pid: 0,
+            tgid: 0,
             state: ProcessState::Unused,
             parent: -1,
             children: [-1; MAX_CHILDREN],
             nchildren: 0,
             uid: 0,
             exit_code: 0,
+            clear_child_tid: 0,
+            mm_shared: false,
             stack_base: 0,
             stack_size: 0,
             heap_base: 0,

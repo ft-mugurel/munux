@@ -34,7 +34,9 @@ pub mod num {
     pub const GETEGID: u64 = 108;
     pub const GETGROUPS: u64 = 115;
     pub const GETPID: u64 = 39;
+    pub const CLONE: u64 = 56;
     pub const FORK: u64 = 57;
+    pub const GETTID: u64 = 186;
     pub const EXECVE: u64 = 59;
     pub const EXIT: u64 = 60;
     pub const WAIT4: u64 = 61;
@@ -404,6 +406,7 @@ pub extern "C" fn syscall_dispatch(
         num::CLOSE => sys_close(a1),
         num::SENDFILE => sys_sendfile(a1, a2, a3, a4),
         num::GETPID => crate::process::getpid() as u64,
+        num::GETTID => crate::process::gettid() as u64,
         num::GETUID | num::GETEUID => crate::process::getuid() as u64,
         num::GETGID | num::GETEGID => 0u64, // single-user kernel for now
         // Single-user kernel: accept setuid/setgid as no-ops (busybox drops privs).
@@ -443,6 +446,7 @@ pub extern "C" fn syscall_dispatch(
         num::FUTIMESAT => sys_futimesat(a1, a2, a3),
         num::UTIMES => sys_utimes(a1, a2),
         num::FORK => sys_fork(),
+        num::CLONE => sys_clone(a1, a2, a3, a4, a5),
         num::EXECVE => sys_execve(a1, a2, a3),
         num::WAIT4 => sys_wait4(a1, a2, a3),
         num::GETCWD => sys_getcwd(a1, a2),
@@ -568,12 +572,12 @@ fn sys_munmap(addr: u64, length: u64) -> u64 {
 
 /// Linux set_tid_address(2) — record clear_child_tid pointer; return tid.
 ///
-/// Musl calls this during crt init. We do not yet clear `*tidptr` on exit
-/// (no robust futex waiters); returning the process id is enough for single-
-/// threaded static binaries.
-fn sys_set_tid_address(_tidptr: u64) -> u64 {
-    // Optionally validate user pointer later; musl always passes a valid TLS slot.
-    crate::process::getpid() as u64
+/// Musl calls this during crt init. Clear-on-exit + futex wake is Phase 6.
+fn sys_set_tid_address(tidptr: u64) -> u64 {
+    let _ = crate::process::with_current(|p| {
+        p.clear_child_tid = tidptr;
+    });
+    crate::process::gettid() as u64
 }
 
 // Linux clockid_t (subset)
@@ -1615,6 +1619,24 @@ fn sys_fork() -> u64 {
     }
 }
 
+/// Linux clone(flags, stack, parent_tid, child_tid, tls) — Phase 4.
+///
+/// Parent returns child tid; child is **Ready** with `rax=0` (like fork).
+fn sys_clone(flags: u64, stack: u64, parent_tid: u64, child_tid: u64, tls: u64) -> u64 {
+    let (rip, rsp, rflags) = unsafe {
+        (
+            core::ptr::read_volatile(core::ptr::addr_of!(last_user_rip)),
+            core::ptr::read_volatile(core::ptr::addr_of!(last_user_rsp)),
+            core::ptr::read_volatile(core::ptr::addr_of!(last_user_rflags)),
+        )
+    };
+    match crate::process::clone_from_user(flags, stack, parent_tid, child_tid, tls, rip, rsp, rflags)
+    {
+        Ok(tid) => tid as u64,
+        Err(_) => errno::neg(errno::EAGAIN),
+    }
+}
+
 /// Linux execve(path, argv, envp) — envp ignored; argv up to 3 user strings.
 /// On success does not return to the old image (nested enter + exit chain).
 fn sys_execve(path_ptr: u64, argv_ptr: u64, _envp: u64) -> u64 {
@@ -1811,6 +1833,12 @@ fn load_exec_image(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage,
         || path.ends_with("/preempttest")
     {
         return load(crate::embedded_preempttest::PREEMPTTEST_ELF);
+    }
+    if path == "clonetest"
+        || path == "/bin/clonetest"
+        || path.ends_with("/clonetest")
+    {
+        return load(crate::embedded_clonetest::CLONETEST_ELF);
     }
     let _ = argv0;
     Err("ENOENT")
@@ -2010,6 +2038,10 @@ pub fn run_embedded_forktest() -> Result<(), &'static str> {
 
 pub fn run_embedded_preempttest() -> Result<(), &'static str> {
     exec_elf_bytes(crate::embedded_preempttest::PREEMPTTEST_ELF, "preempttest")
+}
+
+pub fn run_embedded_clonetest() -> Result<(), &'static str> {
+    exec_elf_bytes(crate::embedded_clonetest::CLONETEST_ELF, "clonetest")
 }
 
 /// Run embedded `exectest` (fork + execve + wait4) — U6 test.

@@ -54,11 +54,14 @@ Phase 3 complete: timer user→user preempt with nest-safe policy:
   (avoids IRQ vs wait/exec nest races)
 - execve does not steal the launcher nest frame after IRQ-scheduled children
 
-Kernel shell: `preempt` / `preempttest` (A–G). **Next:** Phase 4 `clone`.
-| **1c** | ELF/stack on private frames (stop identity USER promote for loads) | |
-| **1d** | Drop parent image snapshot | |
-| **1e** | Drop child-stack VA hack if possible | |
-| **1f** | free private user frames on exit (with 1b+) | |
+Kernel shell: `preempt` / `preempttest` (A–G).
+
+| **4a** | `tid`/`tgid`, `gettid`, `getpid`=tgid | done |
+| **4b** | `clone` (CLONE_VM/THREAD/settids + stack) | done (first slice) |
+| **4c** | Shared FD tables (refcount), exit_group | next |
+| **4d** | futex + clear_child_tid wake | Phase 6 |
+
+**Next:** Phase 4c shared files / exit_group, then futex for real pthread join.
 
 ---
 

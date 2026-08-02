@@ -7,7 +7,20 @@ pub fn getuid() -> Uid {
     table::with_current(|p| p.uid).unwrap_or(0)
 }
 
+/// Linux `getpid` — returns **tgid** (thread-group id).
 pub fn getpid() -> Pid {
+    table::with_current(|p| {
+        if p.tgid != 0 {
+            p.tgid
+        } else {
+            p.pid
+        }
+    })
+    .unwrap_or(1)
+}
+
+/// Linux `gettid` — returns unique task id.
+pub fn gettid() -> Pid {
     table::current_pid()
 }
 

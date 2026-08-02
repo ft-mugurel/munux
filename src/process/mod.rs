@@ -1,5 +1,6 @@
 //! Process management — PCBs, spawn/exit/wait, signals, memory, cooperative sched.
 
+pub mod clone;
 pub mod fork;
 pub mod kstack;
 pub mod memory;
@@ -12,13 +13,16 @@ pub mod trap;
 
 pub use trap::TrapFrame;
 
+pub use clone::clone_from_user;
 pub use fork::{fork_from_user, UserFrame};
 pub use memory::{
     clear_mmaps, proc_brk, proc_mmap, proc_mprotect, proc_munmap, set_brk_start, MAP_ANONYMOUS,
     MAP_FIXED, MAP_PRIVATE, PROT_READ, PROT_WRITE,
 };
 pub use pcb::{Pid, Process, ProcessState, Uid, MAX_PROCESSES};
-pub use sys::{begin_user_task, exit_user, getpid, getppid, getuid, reap_any_child, waitpid};
+pub use sys::{
+    begin_user_task, exit_user, getpid, getppid, gettid, getuid, reap_any_child, waitpid,
+};
 pub use table::{current_index, current_pid, for_each_process, process_count, with_current};
 
 /// Private user stack region for the current process, if any.
