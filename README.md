@@ -1,7 +1,7 @@
 # munux
 
 **munux** is a freestanding **x86_64** operating-system kernel written in **Rust** and **NASM**.  
-It boots via **Multiboot / GRUB**, runs under **QEMU**, and targets a **Linux-compatible** kernel ABI (syscalls, processes, memory, VFS, and later threads and modules).
+It boots via **Multiboot / GRUB**, runs under **QEMU**, and targets a **Linux-compatible** kernel ABI (syscalls, processes, threads, memory, and later VFS + modules).
 
 Started as a **42 KFS** learning kernel; development continues independently as **munux**.
 
@@ -21,9 +21,9 @@ Build a **Linux x86_64 ABI–compatible kernel in Rust** — not “run every Bu
 BusyBox / static musl binaries are **compatibility probes** and regression tests.  
 Primary architecture targets:
 
-1. **Per-process address spaces** and a real process model  
-2. **Threads** (`clone`, TID, futex, TLS)  
-3. **Loadable kernel modules** (ELF loader, symbol export, init/exit)  
+1. ~~**Per-process address spaces** and a real process model~~ ✅  
+2. ~~**Threads** (`clone`, TID, futex, TLS) + signals~~ ✅ (practical slices)  
+3. **Loadable kernel modules** (ELF loader, symbol export, init/exit) — needs VFS first  
 4. Growing syscall / VFS surface on top of that foundation  
 
 See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phased plan.
@@ -32,6 +32,8 @@ See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phased plan.
 
 ## Current status (x86_64 `main`)
 
+**Foundation phases 1–6 (practical slices) are in place:** private mm, preemptive user scheduling, `clone`/threads, signals, futex join. Next major epic is **VFS + kernel modules** (roadmap P7–P8).
+
 ### Boot & build
 - Multiboot → long mode trampoline → Rust `kmain`
 - Custom freestanding Rust target (`#![no_std]`, panic = abort)
@@ -39,30 +41,31 @@ See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phased plan.
 - IDE disk image (`build/disk.img`) with **ext2** rootfs (BusyBox, tools under `/bin`)
 
 ### CPU / interrupts
-- **GDT** + **TSS** (ring 3 → ring 0 stack)
+- **GDT** + **TSS** (per-process kernel stacks / RSP0)
 - **IDT** — exceptions, **IRQ0** (PIT 100 Hz), **IRQ1** (keyboard)
-- Userspace entry via **`syscall` / `sysret`** (STAR / LSTAR / SCE), not `int 0x80`
-- Nested `enter_user_mode` frames for cooperative fork / exec / wait
+- Userspace entry via **`syscall` / `sysret`** (STAR / LSTAR / SCE)
+- Nested `enter_user_mode` for wait/exec; IRQ preemption via `TrapFrame` (nest depth ≤ 1)
 
 ### Memory
 - Multiboot memory map → **PMM** (frame bitmap)
-- **4-level paging**, identity map + user mappings
+- **4-level paging**, identity kernel window + **per-process CR3** (`clone_mm` on fork)
 - Kernel heap (`kmalloc`)
-- **Still single shared address space** for processes (no per-process CR3 yet)  
-  → fork+exec uses parent **user-image / mmap / stack snapshots** as a temporary bridge
+- Shared mm for threads (`CLONE_VM`); free only when last user exits
 
-### Processes & userspace
-- PCB table: pid/ppid, cwd, nice, TLS (`fs_base` / `gs_base`), heap/mmap bookkeeping
-- **Cooperative** `fork` / `vfork` / `execve` / `exit` / `wait4` (child often runs nested to completion)
-- Private **child stacks**; parent classic stack preserved across exec when possible
-- Boot handoff to userspace **`/bin/sh`** (freestanding shell); `exit` returns to kernel debug shell
-- **BusyBox** static binary on disk: many core applets work; interactive **ash** works for common cases
-- ~**80** Linux x86_64 syscall numbers handled (full / partial / stub) — see docs
+### Processes, threads, signals, sync
+- PCB: **tid / tgid**, cwd, TLS, traps, signal masks/handlers, clear_child_tid
+- **`fork` / `clone` / `execve` / `exit` / `exit_group` / `wait4`**
+- **`gettid`** ≠ **`getpid`** (tgid) for threads
+- Preemptive **user→user** timer switches; cooperative wait under deep nest
+- **Signals:** `kill` / `tkill` / `tgkill`, `rt_sigaction` / `rt_sigprocmask` / `rt_sigreturn`, default terminate + user handlers; **Ctrl-C → SIGINT**
+- **Futex:** `FUTEX_WAIT` / `FUTEX_WAKE` (+ PRIVATE); clear_child_tid wake on exit
+- Boot handoff to **`/bin/sh`**; shell ignores SIGINT/SIGQUIT; `exit` → kernel debug shell
+- **BusyBox** static binary on disk for regression probes
 
 ### Filesystem & FDs
-- ATA PIO **IDE** + **ext2** read/write (mkdir, touch, unlink, rmdir, link, **rename**, chmod, …)
-- Virtual **`/proc`** (e.g. meminfo, mounts, pid entries) for tools like `free` / `ps` / `df`
-- **Per-process FD tables** (clone on fork): files, dirs, pipes, dup/dup2
+- ATA PIO **IDE** + **ext2** read/write
+- Virtual **`/proc`**
+- FD tables: **clone on fork**; **share on `CLONE_FILES`** (refcount)
 
 ### Console
 - VGA 80×25 text, PS/2 keyboard (US QWERTY)
@@ -75,10 +78,14 @@ See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phased plan.
 | Doc | Contents |
 |-----|----------|
 | **[docs/ROADMAP.md](docs/ROADMAP.md)** | Architecture roadmap (mm → schedule → threads → modules) |
+| **[docs/MM.md](docs/MM.md)** | Memory layout + phase checklist |
 | **[docs/ABI.md](docs/ABI.md)** | Syscall calling convention, process model, FD rules |
-| **[docs/SYSCALL_COMPARE.md](docs/SYSCALL_COMPARE.md)** | Linux x86_64 (~385) vs munux (~80) comparison |
-| **[docs/BUSYBOX_SUITE_REPORT.md](docs/BUSYBOX_SUITE_REPORT.md)** | Strict BusyBox regression suite results |
-| **[docs/BUSYBOX_REPORT.md](docs/BUSYBOX_REPORT.md)** | Superseded zero-arg applet scan (historical) |
+| **[docs/SYSCALL_COMPARE.md](docs/SYSCALL_COMPARE.md)** | Linux x86_64 vs munux syscall coverage |
+| **[docs/SMOKE_PREEMPT.md](docs/SMOKE_PREEMPT.md)** | IRQ preemption tests (`preempttest`) |
+| **[docs/SMOKE_CLONE.md](docs/SMOKE_CLONE.md)** | `clone` / tid smoke |
+| **[docs/SMOKE_SIGNAL.md](docs/SMOKE_SIGNAL.md)** | Signals + Ctrl-C |
+| **[docs/SMOKE_FUTEX.md](docs/SMOKE_FUTEX.md)** | Futex join smoke |
+| **[docs/BUSYBOX_SUITE_REPORT.md](docs/BUSYBOX_SUITE_REPORT.md)** | Strict BusyBox regression suite |
 | **[SMOKE.md](SMOKE.md)** | Manual smoke checklist |
 
 ---
@@ -181,11 +188,12 @@ Coverage vs Linux: **[docs/SYSCALL_COMPARE.md](docs/SYSCALL_COMPARE.md)**.
     ├── kernel.rs
     ├── gdt/            # GDT + TSS
     ├── interrupts/     # IDT, PIC, exceptions, keyboard, timer
-    ├── memory/         # PMM, paging, heap, Multiboot
-    ├── process/        # PCB, fork, memory (brk/mmap), sys
+    ├── memory/         # PMM, paging (clone_mm), heap, Multiboot
+    ├── process/        # PCB, fork, clone, sched, signals, futex, sys
+    ├── tty.rs          # Ctrl-C → SIGINT hooks
     ├── drivers/ide.rs
     ├── fs/             # ext2, path, procfs, vfs helpers
-    ├── fd/             # per-process FD tables, pipes
+    ├── fd/             # FD tables (clone / CLONE_FILES share)
     ├── elf/            # ELF64 load + stack/auxv
     ├── syscalls/       # Linux x86_64 dispatch
     ├── shell/          # kernel debug shell
@@ -214,23 +222,38 @@ rustup toolchain install nightly
 ## Smoke / regression
 
 1. Manual checklist: **[SMOKE.md](SMOKE.md)**  
-2. Strict BusyBox suite: `scripts/busybox_suite.py` → report in `docs/BUSYBOX_SUITE_REPORT.md`  
-3. Headless: build `make iso`, then qemu-connect (or equivalent) with prompt `$`
+2. Focused tests (userspace / kernel shell):
+   - `$ signaltest` · `$ clonetest` · `$ futextest` · `$ forktest`
+   - `munux> preempttest` (IRQ preemption A–G)
+3. Strict BusyBox suite: `scripts/busybox_suite.py` → `docs/BUSYBOX_SUITE_REPORT.md`  
+4. Headless: `make iso`, then **qemu-connect** with prompt `$`
+
+### Quick smoke after boot
+
+```text
+$ signaltest          # caught + parent ok
+$ clonetest
+$ futextest
+$ forktest
+$ busybox true
+$ busybox sleep 30    # optional: Ctrl+C should return to $
+$ exit
+munux> preempttest    # pass=7 fail=0
+```
 
 ---
 
 ## Known limitations (current)
 
-- **No per-process page tables** (shared AS; snapshot hacks around fork/exec)
-- **No preemptive scheduler** (cooperative nested user sessions)
-- **No real threads** (`clone` / futex not implemented; `gettid` ≈ `getpid`)
-- **No loadable kernel modules**
-- Signals mostly **stubs** (handlers accepted; no full delivery / `rt_sigreturn`)
+- **No loadable kernel modules** (next major epic after VFS ops tables)
+- **No full Linux signal frame** (`siginfo` / `ucontext` / SA_NODEFER / RT signals)
+- **No futex timeout / requeue / PI**; pthread mutex soak incomplete
+- **No in-kernel preemption**; IRQ preempt gated under deep nest (depth ≥ 2 cooperative)
 - **No networking**
-- Subset of Linux syscalls (~80 of ~385); rest **`-ENOSYS`**
+- Subset of Linux syscalls; rest **`-ENOSYS`**
 - VGA only (no serial console yet); US QWERTY only
 
-These are intentional “next foundation” items — see the roadmap.
+See **[docs/ROADMAP.md](docs/ROADMAP.md)** for P7+ (VFS → modules → broader surface).
 
 ---
 

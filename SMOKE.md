@@ -4,6 +4,10 @@ Quick checks after `make run` / `make run-iso` / `make iso` (kernel + `build/dis
 
 Prompt: userspace **`$`** after boot. Kernel debug shell appears only after `exit` from sh.
 
+**Focused feature smokes (details):**  
+[SMOKE_PREEMPT](docs/SMOKE_PREEMPT.md) · [SMOKE_CLONE](docs/SMOKE_CLONE.md) ·  
+[SMOKE_SIGNAL](docs/SMOKE_SIGNAL.md) · [SMOKE_FUTEX](docs/SMOKE_FUTEX.md)
+
 ---
 
 ## Boot
@@ -12,6 +16,23 @@ Prompt: userspace **`$`** after boot. Kernel debug shell appears only after `exi
 - [ ] VGA shows long mode / PMM / paging / IRQs / FS mount
 - [ ] Handoff to userspace shell (prompt **`$`**)
 - [ ] No immediate kernel panic on idle
+
+---
+
+## Foundation (process / threads / signals) — run after architecture work
+
+From freestanding **`$`**:
+
+- [ ] `signaltest` — prints `caught` then `parent ok`
+- [ ] `clonetest` — child + parent ok
+- [ ] `futextest` — child + parent ok (join via futex / clear_child_tid)
+- [ ] `forktest` — still green
+- [ ] `busybox true` — returns to `$`
+- [ ] Optional Ctrl-C: `busybox sleep 30` then **Ctrl+C** → back to `$` (shell stays alive)
+
+From kernel shell after `exit`:
+
+- [ ] `preempttest` — `pass=7 fail=0` (A–G)
 
 ---
 
@@ -36,15 +57,10 @@ Requires `/bin/busybox` on `disk.img`.
 - [ ] `busybox ls` / `busybox ls bin`
 - [ ] `busybox echo hi`
 - [ ] `busybox touch t_smoke.txt`
-- [ ] `busybox cp t_smoke.txt t_smoke2.txt`
-- [ ] `busybox mv t_smoke2.txt t_moved.txt` — **no ENOSYS**
-- [ ] `busybox ls t_moved.txt` — exists; `t_smoke2.txt` gone
-- [ ] `busybox rm t_moved.txt t_smoke.txt`
-- [ ] `busybox free` — Mem: line with totals
-- [ ] `busybox cat /proc/meminfo` (or `busybox free`) — proc readable
-- [ ] `busybox sh` — interactive ash starts (`/ #` or similar)
-- [ ] Inside ash: `echo hi` then `ls` then another command — **no panic (RIP=0)**
-- [ ] Inside ash: `exit` back to freestanding `$` if applicable
+- [ ] `busybox cp t_smoke.txt t_smoke2.txt` (if `cp` works without rename)
+- [ ] `busybox rm t_smoke.txt` (and cleanup)
+- [ ] `busybox cat /proc/meminfo` (or similar) — proc readable when available
+- [ ] Note: `busybox mv` may still **ENOSYS** (`rename` not dispatched) — expected until FS polish
 
 ---
 
@@ -52,6 +68,7 @@ Requires `/bin/busybox` on `disk.img`.
 
 - [ ] `ps` — at least `kinit` (pid 1)
 - [ ] `run sh` / `run init` — re-enter userspace
+- [ ] `preempttest` — see foundation section
 - [ ] `help` / `about`
 - [ ] Kernel `ls` / `cat` helpers still work
 

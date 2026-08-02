@@ -26,28 +26,43 @@ pub fn fork_from_user(user_rip: u64, user_rsp: u64, user_rflags: u64) -> Result<
     let parent_idx = table::current_index();
     let parent_pid = table::current_pid();
 
-    let (uid, heap_base, heap_size, cwd, fs_base, gs_base, mmaps, mmap_bump, parent_cr3) =
-        match table::with_current(|p| {
-            let cr3 = if p.cr3 != 0 {
-                p.cr3
-            } else {
-                crate::memory::kernel_cr3()
-            };
-            (
-                p.uid,
-                p.heap_base,
-                p.heap_size,
-                p.cwd_inode,
-                p.fs_base,
-                p.gs_base,
-                p.mmaps,
-                p.mmap_bump,
-                cr3,
-            )
-        }) {
-            Some(x) => x,
-            None => return Err(-1),
+    let (
+        uid,
+        heap_base,
+        heap_size,
+        cwd,
+        fs_base,
+        gs_base,
+        mmaps,
+        mmap_bump,
+        parent_cr3,
+        sig_handlers,
+        sig_ignore,
+        sig_blocked,
+    ) = match table::with_current(|p| {
+        let cr3 = if p.cr3 != 0 {
+            p.cr3
+        } else {
+            crate::memory::kernel_cr3()
         };
+        (
+            p.uid,
+            p.heap_base,
+            p.heap_size,
+            p.cwd_inode,
+            p.fs_base,
+            p.gs_base,
+            p.mmaps,
+            p.mmap_bump,
+            cr3,
+            p.sig_handlers,
+            p.sig_ignore,
+            p.sig_blocked,
+        )
+    }) {
+        Some(x) => x,
+        None => return Err(-1),
+    };
 
     let child_cr3 = match crate::memory::clone_mm(parent_cr3) {
         Some(c) => c,
@@ -119,6 +134,11 @@ pub fn fork_from_user(user_rip: u64, user_rsp: u64, user_rflags: u64) -> Result<
         p.mmaps = mmaps;
         p.mmap_bump = mmap_bump;
         p.clear_child_tid = 0;
+        p.sig_handlers = sig_handlers;
+        p.sig_ignore = sig_ignore;
+        p.sig_blocked = sig_blocked;
+        p.sig_in_handler = false;
+        p.force_fatal_sig = 0;
         p.set_name("forked");
     });
 

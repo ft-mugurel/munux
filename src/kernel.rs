@@ -7,6 +7,7 @@
 #![no_main]
 
 pub mod console;
+pub mod tty;
 pub mod drivers;
 pub mod elf;
 pub mod embedded_cat;
@@ -21,6 +22,8 @@ pub mod embedded_brktest;
 pub mod embedded_mmaptest;
 pub mod embedded_preempttest;
 pub mod embedded_clonetest;
+pub mod embedded_futextest;
+pub mod embedded_signaltest;
 pub mod embedded_uname;
 pub mod embedded_vi;
 pub mod fd;

@@ -34,6 +34,19 @@ pub fn getppid() -> Pid {
 /// `return_from_user` so the shell/`run` launcher resumes as the parent.
 pub fn exit_user(status: i32) {
     let pid = table::current_pid();
+    // Phase 6: clear_child_tid + futex wake (musl pthread join).
+    let ctid = table::with_current(|p| {
+        let t = p.clear_child_tid;
+        p.clear_child_tid = 0;
+        t
+    })
+    .unwrap_or(0);
+    if ctid != 0 {
+        unsafe {
+            super::futex::clear_child_tid_and_wake(ctid);
+        }
+    }
+
     let parent = table::with_current(|p| {
         p.exit_code = status & 0xff;
         p.state = ProcessState::Zombie;
@@ -76,6 +89,63 @@ pub fn exit_user(status: i32) {
             }
         });
     }
+}
+
+/// Linux `exit_group`: tear down every task in the current thread group, then
+/// zombie the caller for the parent (one waitable status).
+///
+/// Sibling threads are freed immediately (not left as extra zombies). Shared
+/// mm / FD tables drop one ref each via [`table::free_index`].
+pub fn exit_group(status: i32) {
+    let me = table::current_pid();
+    let tgid = table::with_current(|p| {
+        if p.tgid != 0 {
+            p.tgid
+        } else {
+            p.pid
+        }
+    })
+    .unwrap_or(me);
+
+    // Collect sibling tids (same tgid, not me).
+    let mut kill = [-1i32; super::pcb::MAX_PROCESSES];
+    let mut n = 0usize;
+    table::for_each_process(|_i, p| {
+        if !p.used || p.pid == me {
+            return;
+        }
+        let g = if p.tgid != 0 { p.tgid } else { p.pid };
+        if g == tgid && n < kill.len() {
+            kill[n] = p.pid;
+            n += 1;
+        }
+    });
+
+    for i in 0..n {
+        let tid = kill[i];
+        if tid <= 0 {
+            continue;
+        }
+        if let Some(idx) = table::find_pid(tid) {
+            // Clear sibling clear_child_tid before free (joiners may wait).
+            let ctid = table::with_index(idx, |p| {
+                let t = p.clear_child_tid;
+                p.clear_child_tid = 0;
+                t
+            })
+            .unwrap_or(0);
+            if ctid != 0 {
+                unsafe {
+                    super::futex::clear_child_tid_and_wake(ctid);
+                }
+            }
+            // Do not leave a waitable zombie for peer threads.
+            table::free_index(idx);
+        }
+    }
+
+    // Remaining task in the group becomes the zombie the parent waits on.
+    exit_user(status);
 }
 
 /// waitpid(pid, status): pid == -1 → any child.

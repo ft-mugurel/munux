@@ -8,6 +8,10 @@ section .text
 global _start
 
 _start:
+	; Ignore SIGINT/SIGQUIT so Ctrl-C at empty prompt does not kill the shell.
+	; (Foreground jobs still get SIGINT via kernel TTY targeting the child.)
+	call install_sig_ign
+
 	; banner
 	mov rax, 1
 	mov rdi, 1
@@ -566,6 +570,27 @@ memcpy:
 .done:
 	ret
 
+; install_sig_ign — SIG_IGN for SIGINT(2) and SIGQUIT(3)
+install_sig_ign:
+	; act.sa_handler = 1 (SIG_IGN)
+	mov qword [rel sa_act], 1
+	mov qword [rel sa_act+8], 0
+	mov qword [rel sa_act+16], 0
+	; rt_sigaction(2, &act, NULL, 8)
+	mov rax, 13
+	mov rdi, 2
+	lea rsi, [rel sa_act]
+	xor rdx, rdx
+	mov r10, 8
+	syscall
+	mov rax, 13
+	mov rdi, 3
+	lea rsi, [rel sa_act]
+	xor rdx, rdx
+	mov r10, 8
+	syscall
+	ret
+
 section .rodata
 msg_banner:	db "munux sh  |  help  exit  cd  pwd  vi  |  fork/exec /bin/<cmd>", 10
 msg_banner_len equ $ - msg_banner
@@ -597,3 +622,4 @@ argv_ptrs:	resq 7			; [arg0..arg5, NULL] — kernel execve max 6 args
 cwd_buf:	resb 256
 onebyte:	resb 1
 wait_status:	resd 1
+sa_act:		resq 4			; minimal sigaction for SIG_IGN

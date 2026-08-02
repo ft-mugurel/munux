@@ -25,7 +25,12 @@ pub mod num {
     pub const LSEEK: u64 = 8;
     /// BusyBox `cat` prefers sendfile(out, in, …) before falling back to read/write.
     pub const SENDFILE: u64 = 40;
-    pub const RT_SIGPROCMASK: u64 = 14; // busybox setuid path
+    pub const RT_SIGACTION: u64 = 13;
+    pub const RT_SIGPROCMASK: u64 = 14;
+    pub const RT_SIGRETURN: u64 = 15;
+    pub const KILL: u64 = 62;
+    pub const TKILL: u64 = 200;
+    pub const TGKILL: u64 = 234;
     pub const GETUID: u64 = 102;
     pub const GETGID: u64 = 104;
     pub const SETUID: u64 = 105;
@@ -52,6 +57,7 @@ pub mod num {
     pub const MPROTECT: u64 = 10;
     pub const MUNMAP: u64 = 11;
     pub const SET_TID_ADDRESS: u64 = 218; // musl crt TLS/thread exit hook
+    pub const FUTEX: u64 = 202;
     pub const GETTIMEOFDAY: u64 = 96;
     pub const CLOCK_GETTIME: u64 = 228;
     pub const FCNTL: u64 = 72;
@@ -195,6 +201,8 @@ extern "C" {
     static last_user_rip: u64;
     static last_user_rsp: u64;
     static last_user_rflags: u64;
+    /// Optional user RDI for enter_user_mode (signal handler arg).
+    static mut enter_user_rdi: u64;
 }
 
 fn nest_stack_top(index: usize) -> u64 {
@@ -256,17 +264,40 @@ fn enter_user_nested(entry: u64, user_rsp: u64, user_rax: u64) {
             crate::memory::switch_mm(cr3);
         }
     }
+    // Prefer a full saved trap (e.g. signal-handler inject) so rdi/etc. match.
+    let (entry, user_rsp, user_rax, user_rdi, rflags) =
+        crate::process::with_current(|p| {
+            if p.trap_valid && p.trap.rip == entry {
+                (
+                    p.trap.rip,
+                    p.trap.rsp,
+                    p.trap.rax,
+                    p.trap.rdi,
+                    p.trap.rflags | 0x200,
+                )
+            } else {
+                (entry, user_rsp, user_rax, 0u64, 0x202u64)
+            }
+        })
+        .unwrap_or((entry, user_rsp, user_rax, 0, 0x202));
+
     // This task owns an enter_user_mode nest frame until exit.
     let _ = crate::process::with_current(|p| {
         p.entered_via_nest = true;
         p.user_rip = entry;
         p.user_rsp = user_rsp;
         p.user_rax = user_rax;
-        p.user_rflags = 0x202;
-        p.trap = crate::process::TrapFrame::from_user_entry(entry, user_rsp, 0x202, user_rax);
-        p.trap_valid = true;
+        p.user_rflags = rflags;
+        if !(p.trap_valid && p.trap.rip == entry) {
+            p.trap = crate::process::TrapFrame::from_user_entry(entry, user_rsp, rflags, user_rax);
+            p.trap.rdi = user_rdi;
+            p.trap_valid = true;
+        }
     });
-    // Ensure this process's TLS bases are in the CPU before ring 3.
+    // Pass first user arg (signal number for handlers).
+    unsafe {
+        core::ptr::write_volatile(core::ptr::addr_of_mut!(enter_user_rdi), user_rdi);
+    }
     crate::process::apply_tls();
     unsafe {
         enter_user_mode(entry, user_rsp, user_rax);
@@ -396,6 +427,15 @@ pub extern "C" fn syscall_dispatch(
         }
     }
 
+    // TTY Ctrl-C + deferred fatal signals (process context only).
+    crate::tty::deliver_pending_sigint();
+    if let Some(sig) = crate::tty::take_force_fatal() {
+        fatal_signal_exit(sig);
+    }
+    // Deliver any pending fatal defaults for *this* task before handling a
+    // new syscall (cheap; user handlers not framed yet).
+    crate::process::signal_queue::deliver_pending_current();
+
     let ret = match num {
         num::READ => sys_read(a1, a2, a3),
         num::WRITE => sys_write(a1, a2, a3),
@@ -411,8 +451,12 @@ pub extern "C" fn syscall_dispatch(
         num::GETGID | num::GETEGID => 0u64, // single-user kernel for now
         // Single-user kernel: accept setuid/setgid as no-ops (busybox drops privs).
         num::SETUID | num::SETGID => 0u64,
-        // No real signals yet; pretend the mask was applied.
-        num::RT_SIGPROCMASK => 0u64,
+        num::RT_SIGACTION => sys_rt_sigaction(a1, a2, a3, a4),
+        num::RT_SIGPROCMASK => sys_rt_sigprocmask(a1, a2, a3, a4),
+        num::RT_SIGRETURN => sys_rt_sigreturn(),
+        num::KILL => sys_kill(a1, a2),
+        num::TKILL => sys_tkill(a1, a2),
+        num::TGKILL => sys_tgkill(a1, a2, a3),
         // One supplementary group (0); busybox `id` uses this.
         num::GETGROUPS => sys_getgroups(a1, a2),
         num::GETPPID => {
@@ -461,33 +505,17 @@ pub extern "C" fn syscall_dispatch(
         num::MPROTECT => sys_mprotect(a1, a2, a3),
         num::MUNMAP => sys_munmap(a1, a2),
         num::SET_TID_ADDRESS => sys_set_tid_address(a1),
+        num::FUTEX => sys_futex(a1, a2, a3, a4, a5),
         num::GETTIMEOFDAY => sys_gettimeofday(a1, a2),
         num::CLOCK_GETTIME => sys_clock_gettime(a1, a2),
         num::FCNTL => sys_fcntl(a1, a2, a3),
-        num::EXIT | num::EXIT_GROUP => {
+        num::EXIT => {
             let status = a1 as i32;
-            // Capture how this task was entered *before* we switch away.
-            let via_nest = crate::process::with_current(|p| p.entered_via_nest).unwrap_or(true);
-            crate::process::clear_tls();
-            crate::process::exit_user(status);
-            // Current is now parent (or init).
-            crate::process::apply_tls();
-            if via_nest {
-                // Owned enter_user_mode frame → pop nest and return to waiter.
-                // If nest depth is 0 (shouldn't happen), fall back to trap resume
-                // instead of hanging in return_from_user.
-                extern "C" {
-                    fn get_enter_nest_depth() -> u64;
-                }
-                if unsafe { get_enter_nest_depth() } > 0 {
-                    unsafe {
-                        return_from_user();
-                    }
-                }
-            }
-            // IRQ-resumed task, or nest claimed but no frame left:
-            // resume whoever is current from its saved trap.
-            resume_current_from_trap();
+            finish_exit(status, false);
+        }
+        num::EXIT_GROUP => {
+            let status = a1 as i32;
+            finish_exit(status, true);
         }
         _ => {
             // Always log so musl/static binary bring-up is not blind.
@@ -498,9 +526,58 @@ pub extern "C" fn syscall_dispatch(
         }
     };
 
+    // After the syscall result is known: maybe enter a user signal handler
+    // instead of returning to the interrupted rip.
+    {
+        use crate::process::signal_queue::DeliverResult;
+        use crate::process::TrapFrame;
+        let (rip, rsp, rflags) = unsafe {
+            (
+                core::ptr::read_volatile(core::ptr::addr_of!(last_user_rip)),
+                core::ptr::read_volatile(core::ptr::addr_of!(last_user_rsp)),
+                core::ptr::read_volatile(core::ptr::addr_of!(last_user_rflags)),
+            )
+        };
+        let mut restore = TrapFrame::from_user_entry(rip, rsp, rflags, ret);
+        // Preserve rax as the syscall return value for after the handler.
+        restore.rax = ret;
+        match crate::process::signal_queue::try_deliver_one(&restore) {
+            DeliverResult::Handler(frame) => {
+                crate::process::apply_tls();
+                static mut SIG_FRAME: TrapFrame = TrapFrame::zero();
+                unsafe {
+                    SIG_FRAME = frame;
+                    resume_user_trap(core::ptr::addr_of!(SIG_FRAME));
+                }
+            }
+            DeliverResult::Fatal(sig) => {
+                fatal_signal_exit(sig);
+            }
+            DeliverResult::None => {}
+        }
+    }
+
     // sysret path: put this process's TLS bases back in the CPU.
     crate::process::apply_tls();
     ret
+}
+
+/// Linux rt_sigreturn — restore context saved at signal-handler entry.
+fn sys_rt_sigreturn() -> u64 {
+    match crate::process::signal_queue::do_sigreturn() {
+        Some(frame) => {
+            crate::process::apply_tls();
+            static mut RET_FRAME: crate::process::TrapFrame = crate::process::TrapFrame::zero();
+            unsafe {
+                RET_FRAME = frame;
+                resume_user_trap(core::ptr::addr_of!(RET_FRAME));
+            }
+        }
+        None => {
+            // Bogus sigreturn — kill the process.
+            fatal_signal_exit(crate::process::signal_queue::SIGKILL);
+        }
+    }
 }
 
 /// Linux `struct utsname` — six fields of 65 bytes each (incl. Linux domainname).
@@ -572,12 +649,219 @@ fn sys_munmap(addr: u64, length: u64) -> u64 {
 
 /// Linux set_tid_address(2) — record clear_child_tid pointer; return tid.
 ///
-/// Musl calls this during crt init. Clear-on-exit + futex wake is Phase 6.
+/// Musl calls this during crt init. Clear-on-exit + futex wake on exit (Phase 6).
 fn sys_set_tid_address(tidptr: u64) -> u64 {
     let _ = crate::process::with_current(|p| {
         p.clear_child_tid = tidptr;
     });
     crate::process::gettid() as u64
+}
+
+/// Convert signal helper status (0 or -errno) to syscall return.
+fn sig_ret(r: i32) -> u64 {
+    if r < 0 {
+        r as u64
+    } else {
+        0
+    }
+}
+
+fn sys_kill(pid: u64, sig: u64) -> u64 {
+    sig_ret(crate::process::signal_queue::proc_kill(pid as i32, sig as u32))
+}
+
+fn sys_tkill(tid: u64, sig: u64) -> u64 {
+    sig_ret(crate::process::signal_queue::proc_tkill(tid as i32, sig as u32))
+}
+
+fn sys_tgkill(tgid: u64, tid: u64, sig: u64) -> u64 {
+    sig_ret(crate::process::signal_queue::proc_tgkill(
+        tgid as i32,
+        tid as i32,
+        sig as u32,
+    ))
+}
+
+/// Linux rt_sigprocmask(how, set, oldset, sigsetsize).
+fn sys_rt_sigprocmask(how: u64, set: u64, oldset: u64, sigsetsize: u64) -> u64 {
+    // Accept 8 or 16 byte sets; we only use low 64 bits.
+    if sigsetsize != 0 && sigsetsize != 8 && sigsetsize != 16 {
+        return errno::neg(errno::EINVAL);
+    }
+    let new_set = if set != 0 {
+        if !user_ptr_ok(set, 8) {
+            return errno::neg(errno::EFAULT);
+        }
+        Some(unsafe { core::ptr::read_volatile(set as *const u64) })
+    } else {
+        None
+    };
+    let old = crate::process::signal_queue::proc_sigprocmask(how as u32, new_set);
+    if oldset != 0 {
+        if !user_ptr_ok(oldset, 8) {
+            return errno::neg(errno::EFAULT);
+        }
+        unsafe {
+            core::ptr::write_volatile(oldset as *mut u64, old);
+            if sigsetsize >= 16 {
+                core::ptr::write_volatile((oldset + 8) as *mut u64, 0);
+            }
+        }
+    }
+    0
+}
+
+/// Linux rt_sigaction(sig, act, oldact, sigsetsize).
+///
+/// Reads only `sa_handler` (first 8 bytes of user `struct sigaction`).
+fn sys_rt_sigaction(sig: u64, act: u64, oldact: u64, _sigsetsize: u64) -> u64 {
+    let sig = sig as u32;
+    if sig == 0 || sig as usize >= crate::process::pcb::MAX_SIGNALS {
+        return errno::neg(errno::EINVAL);
+    }
+    if sig == crate::process::signal_queue::SIGKILL || sig == crate::process::signal_queue::SIGSTOP
+    {
+        return errno::neg(errno::EINVAL);
+    }
+
+    let old_h = crate::process::with_current(|p| p.sig_handlers[sig as usize]).unwrap_or(0);
+
+    if oldact != 0 {
+        if !user_ptr_ok(oldact, 8) {
+            return errno::neg(errno::EFAULT);
+        }
+        unsafe {
+            core::ptr::write_volatile(oldact as *mut u64, old_h as u64);
+        }
+    }
+
+    if act != 0 {
+        if !user_ptr_ok(act, 8) {
+            return errno::neg(errno::EFAULT);
+        }
+        let handler = unsafe { core::ptr::read_volatile(act as *const u64) } as usize;
+        let r = crate::process::signal_queue::proc_signal(sig, handler);
+        if r == usize::MAX {
+            return errno::neg(errno::EINVAL);
+        }
+    }
+    0
+}
+
+// Linux futex ops (include/uapi/linux/futex.h)
+const FUTEX_WAIT: u32 = 0;
+const FUTEX_WAKE: u32 = 1;
+const FUTEX_PRIVATE_FLAG: u32 = 128;
+const FUTEX_CMD_MASK: u32 = !FUTEX_PRIVATE_FLAG;
+
+/// Linux futex(2) — wait/wake only (no timeout / requeue yet).
+///
+/// Args: uaddr, op, val, timeout(ignored), uaddr2(ignored).
+fn sys_futex(uaddr: u64, op: u64, val: u64, _timeout: u64, _uaddr2: u64) -> u64 {
+    if !user_ptr_ok(uaddr, 4) || (uaddr & 3) != 0 {
+        return errno::neg(errno::EFAULT);
+    }
+    let op = op as u32;
+    let cmd = op & FUTEX_CMD_MASK;
+    let private = (op & FUTEX_PRIVATE_FLAG) != 0;
+
+    match cmd {
+        FUTEX_WAIT => {
+            let expected = val as i32;
+            let me = crate::process::gettid();
+            match crate::process::futex::begin_wait(uaddr, expected, private) {
+                Err(e) => return e as u64, // e is already -errno
+                Ok(()) => {}
+            }
+            // Cooperatively run Ready peers until we are woken.
+            // Bound iterations so a bug cannot hang forever.
+            for _ in 0..64 {
+                if !crate::process::futex::still_waiting(me) {
+                    break;
+                }
+                // Value changed without wake?
+                let cur = unsafe { core::ptr::read_volatile(uaddr as *const i32) };
+                if cur != expected {
+                    crate::process::futex::cancel_wait(me);
+                    break;
+                }
+                if let Some(frame) = crate::process::sched::take_ready(-1) {
+                    run_user_frame(frame);
+                    // After nested task returns we may be current again, or
+                    // Ready after wake — re-check.
+                    if crate::process::gettid() != me {
+                        // Switched away permanently — should not happen for
+                        // exit-to-parent; ensure we stop waiting.
+                        if !crate::process::futex::still_waiting(me) {
+                            break;
+                        }
+                    }
+                    crate::process::futex::ensure_running_if_current();
+                } else {
+                    // No Ready peer: recheck then fail (avoid hang).
+                    let cur = unsafe { core::ptr::read_volatile(uaddr as *const i32) };
+                    if cur != expected {
+                        crate::process::futex::cancel_wait(me);
+                        break;
+                    }
+                    crate::process::futex::cancel_wait(me);
+                    let _ = crate::process::with_current(|p| {
+                        if p.state == crate::process::ProcessState::Sleeping {
+                            p.state = crate::process::ProcessState::Running;
+                        }
+                    });
+                    return errno::neg(errno::EAGAIN);
+                }
+            }
+            if crate::process::futex::still_waiting(me) {
+                crate::process::futex::cancel_wait(me);
+            }
+            crate::process::futex::ensure_running_if_current();
+            0
+        }
+        FUTEX_WAKE => {
+            let n = if val > u32::MAX as u64 {
+                u32::MAX
+            } else {
+                val as u32
+            };
+            crate::process::futex::wake(uaddr, n, private) as u64
+        }
+        _ => errno::neg(errno::ENOSYS),
+    }
+}
+
+/// Common exit path: single-thread `exit` or whole-group `exit_group`.
+fn finish_exit(status: i32, group: bool) -> ! {
+    // Capture how this task was entered *before* we switch away.
+    let via_nest = crate::process::with_current(|p| p.entered_via_nest).unwrap_or(true);
+    crate::process::clear_tls();
+    if group {
+        crate::process::exit_group(status);
+    } else {
+        crate::process::exit_user(status);
+    }
+    // Current is now parent (or init).
+    crate::process::apply_tls();
+    if via_nest {
+        extern "C" {
+            fn get_enter_nest_depth() -> u64;
+        }
+        if unsafe { get_enter_nest_depth() } > 0 {
+            unsafe {
+                return_from_user();
+            }
+        }
+    }
+    resume_current_from_trap();
+}
+
+/// Nest-safe process exit from signal/TTY path (e.g. Ctrl-C mid `read`).
+///
+/// Status is encoded like a fatal signal: `128 + sig` (low 8 bits).
+pub fn fatal_signal_exit(sig: u32) -> ! {
+    let status = (128 + (sig as i32)) & 0xff;
+    finish_exit(status, true);
 }
 
 // Linux clockid_t (subset)
@@ -1441,8 +1725,14 @@ fn sys_nanosleep(req: u64, rem: u64) -> u64 {
     let ticks_needed = (total_ns + 9_999_999) / 10_000_000; // ceil to 10ms
     let start = crate::interrupts::ticks();
     while crate::interrupts::ticks().wrapping_sub(start) < ticks_needed as u64 {
+        // Ctrl-C / deferred fatal: exit nest-safely (was ignored → sleep forever).
+        crate::tty::deliver_pending_sigint();
+        if let Some(sig) = crate::tty::take_force_fatal() {
+            fatal_signal_exit(sig);
+        }
         unsafe {
-            asm!("hlt", options(nomem, nostack));
+            // Allow timer IRQ while halted; re-check force_fatal after wake.
+            asm!("sti; hlt", options(nostack));
         }
     }
     if rem != 0 && user_ptr_ok(rem, 16) {
@@ -1840,6 +2130,18 @@ fn load_exec_image(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage,
     {
         return load(crate::embedded_clonetest::CLONETEST_ELF);
     }
+    if path == "futextest"
+        || path == "/bin/futextest"
+        || path.ends_with("/futextest")
+    {
+        return load(crate::embedded_futextest::FUTEXTEST_ELF);
+    }
+    if path == "signaltest"
+        || path == "/bin/signaltest"
+        || path.ends_with("/signaltest")
+    {
+        return load(crate::embedded_signaltest::SIGNALTEST_ELF);
+    }
     let _ = argv0;
     Err("ENOENT")
 }
@@ -2042,6 +2344,14 @@ pub fn run_embedded_preempttest() -> Result<(), &'static str> {
 
 pub fn run_embedded_clonetest() -> Result<(), &'static str> {
     exec_elf_bytes(crate::embedded_clonetest::CLONETEST_ELF, "clonetest")
+}
+
+pub fn run_embedded_futextest() -> Result<(), &'static str> {
+    exec_elf_bytes(crate::embedded_futextest::FUTEXTEST_ELF, "futextest")
+}
+
+pub fn run_embedded_signaltest() -> Result<(), &'static str> {
+    exec_elf_bytes(crate::embedded_signaltest::SIGNALTEST_ELF, "signaltest")
 }
 
 /// Run embedded `exectest` (fork + execve + wait4) — U6 test.

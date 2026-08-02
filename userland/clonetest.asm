@@ -17,8 +17,8 @@ global _start
 %define SYS_GETPID  39
 %define SYS_GETTID  186
 
-; CLONE_VM | CLONE_THREAD
-%define CLONE_FLAGS 0x00010100
+; CLONE_VM | CLONE_FILES | CLONE_THREAD  (pthread-like)
+%define CLONE_FLAGS 0x00010500
 
 _start:
 	; clone(flags, stack, 0, 0, 0)

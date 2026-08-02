@@ -157,10 +157,18 @@ syscall_entry:
 	mov rsp, [rel saved_user_rsp]
 	o64 sysret
 
+; Optional first user arg (e.g. signal number for handler entry)
+global enter_user_rdi
+section .bss
+align 8
+enter_user_rdi:	resq 1
+section .text
+
 ; ---------------------------------------------------------------------------
 ; enter_user_mode(entry, user_rsp, user_rax)
 ; SysV: rdi=entry, rsi=user_rsp, rdx=initial user rax
 ; Nested: pushes kernel frame; return_from_user pops one level
+; Loads user RDI from enter_user_rdi (signal handlers need rdi=sig).
 ; ---------------------------------------------------------------------------
 enter_user_mode:
 	; Preserve callee-saved for return to kernel caller
@@ -196,13 +204,13 @@ enter_user_mode:
 	mov fs, ax
 	mov gs, ax
 
-	; Initial user rax (0 for child after fork; garbage ok for _start)
+	; Initial user regs
 	mov rax, r8
 	xor rbx, rbx
 	xor rcx, rcx
 	xor rdx, rdx
 	xor rsi, rsi
-	xor rdi, rdi
+	mov rdi, [rel enter_user_rdi]	; signal number or 0
 	xor rbp, rbp
 	xor r8, r8
 	xor r9, r9
@@ -212,6 +220,9 @@ enter_user_mode:
 	xor r13, r13
 	xor r14, r14
 	xor r15, r15
+
+	; clear sticky enter_user_rdi after consume
+	mov qword [rel enter_user_rdi], 0
 
 	iretq
 

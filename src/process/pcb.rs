@@ -84,6 +84,9 @@ pub struct Process {
     pub clear_child_tid: u64,
     /// CR3 is shared with other tasks (`CLONE_VM`) — do not free_mm until last user.
     pub mm_shared: bool,
+    /// Process-table slot of the FD table this task uses (`CLONE_FILES` share).
+    /// Usually equal to this task's own slot index.
+    pub files_slot: usize,
 
     /// Stack region (virtual)
     pub stack_base: u64,
@@ -126,13 +129,22 @@ pub struct Process {
     /// rax on (re)entry — 0 for child after fork
     pub user_rax: u64,
 
-    /// Pending signals (queue), delivered on next CPU tick
+    /// Pending signals (queue), delivered on tick / syscall return
     pub sig_queue: [u32; PROC_SIG_QUEUE],
     pub sig_head: usize,
     pub sig_tail: usize,
     pub sig_len: usize,
     pub sig_handlers: [usize; MAX_SIGNALS],
     pub sig_ignore: [bool; MAX_SIGNALS],
+    /// Blocked signal mask (bits 1..63 for signals 1..63).
+    pub sig_blocked: u64,
+    /// Deferred fatal signal (set from IRQ/TTY); processed in process context.
+    /// 0 = none; otherwise Linux signal number (e.g. SIGINT=2).
+    pub force_fatal_sig: u32,
+    /// Saved user context while running a signal handler (`rt_sigreturn`).
+    pub sig_restore: TrapFrame,
+    /// True while executing a user signal handler (not nested for this slice).
+    pub sig_in_handler: bool,
 
     /// Name for debugging
     pub name: [u8; 16],
@@ -152,6 +164,7 @@ impl Process {
             exit_code: 0,
             clear_child_tid: 0,
             mm_shared: false,
+            files_slot: 0,
             stack_base: 0,
             stack_size: 0,
             heap_base: 0,
@@ -176,6 +189,10 @@ impl Process {
             sig_len: 0,
             sig_handlers: [0; MAX_SIGNALS],
             sig_ignore: [false; MAX_SIGNALS],
+            sig_blocked: 0,
+            force_fatal_sig: 0,
+            sig_restore: TrapFrame::zero(),
+            sig_in_handler: false,
             name: [0; 16],
         }
     }

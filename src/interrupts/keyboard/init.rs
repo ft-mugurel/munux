@@ -114,6 +114,12 @@ pub fn wait_for_input() {
             compiler_fence(Ordering::SeqCst);
             return;
         }
+        // Ctrl-C may have marked us for death while idle on the console.
+        crate::tty::deliver_pending_sigint();
+        if crate::process::with_current(|p| p.force_fatal_sig != 0).unwrap_or(false) {
+            compiler_fence(Ordering::SeqCst);
+            return;
+        }
         unsafe {
             // Memory may change via IRQ handlers while halted — no `nomem`.
             core::arch::asm!("sti; hlt", options(nostack));
@@ -125,6 +131,16 @@ pub fn wait_for_input() {
 fn handle_key_press(event: KeyEvent, modifiers: Modifiers) -> bool {
     if event.key == KeyCode::Delete && modifiers.ctrl() && modifiers.alt() {
         return true;
+    }
+    // Ctrl+C → SIGINT for foreground (do not inject ^C into the buffer).
+    if modifiers.ctrl() && !modifiers.alt() && event.key == KeyCode::C {
+        crate::tty::request_sigint_from_irq();
+        return false;
+    }
+    // Ctrl+D → EOT (EOF) for line-oriented readers (optional convenience).
+    if modifiers.ctrl() && !modifiers.alt() && event.key == KeyCode::D {
+        buf_push_from_irq(0x04);
+        return false;
     }
     match event.key {
         // Delete key → DEL (shells treat like backspace). Ctrl+Alt+Del still above.

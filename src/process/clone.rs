@@ -3,7 +3,8 @@
 //! Supports a useful subset of flags for threads / shared-mm tasks:
 //! - `CLONE_VM` — share parent CR3 (no private stack copy)
 //! - `CLONE_THREAD` — same tgid as parent
-//! - `CLONE_FILES` / `CLONE_FS` — accepted (files still cloned for now)
+//! - `CLONE_FILES` — share parent FD table (refcount)
+//! - `CLONE_FS` — accepted (cwd still copied per-task for now)
 //! - `CLONE_PARENT_SETTID` / `CLONE_CHILD_SETTID` / `CLONE_CHILD_CLEARTID`
 //! - `CLONE_SETTLS` — set child `fs_base` from tls arg
 //!
@@ -132,8 +133,12 @@ pub fn clone_from_user(
         }
     });
 
-    // FDs: clone table for now (CLONE_FILES real share = later refcount).
-    crate::fd::clone_table(parent_idx, child_idx);
+    // FDs: share table when CLONE_FILES (typical with threads); else private copy.
+    if flags & CLONE_FILES != 0 {
+        crate::fd::share_table(parent_idx, child_idx);
+    } else {
+        crate::fd::clone_table(parent_idx, child_idx);
+    }
 
     if !table::add_child(parent_idx, child_pid) {
         table::free_index(child_idx);
@@ -157,6 +162,12 @@ fn apply_clone_post(
     user_rflags: u64,
 ) -> Result<(), i32> {
     let parent_tgid = table::with_current(|p| if p.tgid != 0 { p.tgid } else { p.pid }).unwrap_or(1);
+    let parent_idx = table::current_index();
+    let child_idx = table::find_pid(child).ok_or(-1)?;
+    // fork_from_user already clone_table'd; upgrade to share if requested.
+    if flags & CLONE_FILES != 0 {
+        crate::fd::share_table(parent_idx, child_idx);
+    }
     let _ = table::with_pid(child, |p| {
         if flags & CLONE_THREAD != 0 {
             p.tgid = parent_tgid;

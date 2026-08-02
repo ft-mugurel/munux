@@ -4,13 +4,16 @@
 > Product direction: Linux-compatible Rust kernel (threads, modules, mm isolation).  
 > See [ROADMAP.md](ROADMAP.md) and the root [README.md](../README.md).
 
+**Note (2026-08-02):** This report is a **snapshot of the last automated run**. Architecture work
+since then (private mm, preemption, `clone`, signals, futex) is covered by focused smokes, not a
+re-scored suite JSON. Re-run `scripts/busybox_suite.py` to refresh numbers.
+
 ## Method (corrected)
 
 - Real commands with **arguments** when needed.
 - After each case: **`busybox true` canary** (fails if next command panics).
 - Console settle + re-read (no prompt-race false PASS).
 - Kernel: user/fork stacks **1 MiB**; execve argv up to **16** words.
-- Also exercised by hand: `rename`/`mv`, interactive ash + external cmds (post-suite fixes).
 
 ## Summary (last full automated run)
 
@@ -18,18 +21,19 @@
 |--------|------:|
 | `PASS` | 46 |
 | `FAIL_PANIC` | 0 |
-| `FAIL_ENOSYS` | 1 (`mv` / `rename` — **fixed after this run**) |
+| `FAIL_ENOSYS` | 1 (`mv` / `rename`) |
 | `FAIL_ERROR` | 0 |
 | `HANG` | 1 (`find .`) |
 | **Total** | **48** |
 
-### Post-report fixes (not yet re-scored in JSON)
+### Known vs earlier “post-report” notes
 
-| Item | Status |
-|------|--------|
-| `rename` (82) + BusyBox `mv` | **Implemented** — re-run suite to clear `FAIL_ENOSYS` |
-| Interactive ash + external `ls` / `true` | **Fixed** (nest `saved_user_rsp`, image/mmap/stack snap, TLS selectors) |
+| Item | Status (2026-08-02) |
+|------|---------------------|
+| `rename` (82) + BusyBox `mv` | Still **ENOSYS** (not in syscall dispatch) |
+| Interactive ash + external cmds | Improved with nest/preempt work; re-verify if needed |
 | `find .` hang | **Still open** |
+| Threads / signals / futex | Not suite cases — use `clonetest` / `signaltest` / `futextest` |
 
 ## Full results
 

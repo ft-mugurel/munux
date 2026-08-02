@@ -1,45 +1,44 @@
 # munux roadmap — Linux-compatible kernel in Rust
 
-**Last updated:** 2026-07-30 (aligned with README / ABI v0.3).
+**Last updated:** 2026-08-02 (aligned with README; foundation P1–P6 practical slices done).
 
 **Goal:** a **Linux x86_64 ABI–compatible** kernel written in Rust, not “run every BusyBox applet.”
 
 BusyBox / musl binaries are **compatibility probes** (does `fork`/`clone`/`mmap`/ELF load match Linux?). They are not the product definition.
 
-**Related docs:** [README](../README.md) · [ABI](ABI.md) · [SYSCALL_COMPARE](SYSCALL_COMPARE.md) · [strict BusyBox suite](BUSYBOX_SUITE_REPORT.md)
+**Related docs:** [README](../README.md) · [ABI](ABI.md) · [MM](MM.md) · [SYSCALL_COMPARE](SYSCALL_COMPARE.md) · [SMOKE_PREEMPT](SMOKE_PREEMPT.md) · [SMOKE_CLONE](SMOKE_CLONE.md) · [SMOKE_SIGNAL](SMOKE_SIGNAL.md) · [SMOKE_FUTEX](SMOKE_FUTEX.md) · [BusyBox suite](BUSYBOX_SUITE_REPORT.md)
 
-**North stars you called out:**
+**North stars:**
 
-1. **Thread support** (Linux `clone` / TID model / futex)
-2. **Kernel modules** (loadable `.ko`-style objects, symbol export, init/exit)
-
-Those two force a specific foundation order. You cannot bolt real threads or safe modules onto the current “one global address space + cooperative nest” model.
+1. **Thread support** (Linux `clone` / TID model / futex) — **foundation in place**
+2. **Kernel modules** (loadable objects, symbol export, init/exit) — **next major epic**
 
 ---
 
 ## 0. Where we are today (honest baseline)
 
-| Area | Current state | Blocker for threads / modules? |
-|------|---------------|--------------------------------|
+| Area | Current state | Blocker for modules? |
+|------|---------------|----------------------|
 | Arch | x86_64 long mode, `syscall`/`sysret`, GDT/TSS/IDT | OK |
-| Syscall ABI | Linux numbers; ~80 handlers (~21% of full table) | Partial — OK to grow |
-| Memory | Single global page tables; identity map | **Critical blocker** |
-| Processes | PCB table; cooperative fork; **shared AS** + parent image snapshot hacks | **Critical blocker** |
-| Scheduling | No preemption; timer only ticks time | **Blocker for real threads** |
-| Threads | `ProcessState::Thread` exists in name only; no `clone`/futex | Missing |
-| Signals | Stubs / queues without real delivery | Needed for POSIX threads edge cases |
-| FS | ext2 + virtual `/proc`; not a full VFS | Modules later can plug FS drivers |
-| Drivers | Compile-time (`ide`, VGA, keyboard) | Modules need a driver interface |
-| Modules | None | Missing |
+| Syscall ABI | Linux numbers; growing surface | Partial — OK to grow |
+| Memory | **Per-process CR3** + `clone_mm`; identity kernel window | OK for threads; high-half later |
+| Processes | PCB tid/tgid; fork private mm; wait/exit_group | OK |
+| Scheduling | Timer user→user preempt (`TrapFrame`); nest policy depth ≤ 1 | OK for user threads |
+| Threads | **`clone`**, shared mm/files, gettid/tgid | OK (no full musl pthread suite yet) |
+| Signals | kill/tgkill, masks, handlers, rt_sigreturn, Ctrl-C | OK for practical use |
+| Futex | WAIT/WAKE + clear_child_tid wake | OK basic join |
+| FS | ext2 + virtual `/proc`; not a full VFS | **Yes — modules want ops tables** |
+| Drivers | Compile-time (`ide`, VGA, keyboard) | **Yes — need register/chrdev model** |
+| Modules | None | **Missing (P8)** |
 
-**Implication:** next big work is **architecture**, not more one-off BusyBox syscalls.
+**Implication:** architecture foundation for threads is **landed**. Next big work is **VFS + device model → loadable modules**, not more one-off BusyBox stubs.
 
 ---
 
 ## Guiding principles
 
 1. **Linux ABI first** — numbers, structs, errno, ELF, auxv, TLS (`arch_prctl`), process model.
-2. **Correct layering** — MM → isolation → schedule → threads → signals polish → VFS → modules.
+2. **Correct layering** — MM → isolation → schedule → threads → signals/futex → **VFS → modules**.
 3. **Validation without becoming BusyBox-shaped** — small Rust/C test programs + selective musl/BusyBox smoke.
 4. **Rust kernel discipline** — `no_std`, explicit unsafe boundaries, module ABI that does not require forever-unstable Rust dylibs (prefer C-compatible kernel API for modules, modules themselves can be Rust or C).
 
@@ -80,7 +79,9 @@ BusyBox suite stays a **regression gate** after each phase — not the work queu
 
 ## Phase 1 — Per-process address spaces (foundation)
 
-**Why first:** every Linux process (and every non-shared thread group member’s view of memory management) assumes private page tables. Shared AS is only for threads with `CLONE_VM`. Today *all* processes share one map, which is why fork+exec needs snapshot/restore hacks.
+**Status:** **done** (see [MM.md](MM.md)). Private CR3 on fork; shared CR3 only with `CLONE_VM`.
+
+**Why first:** every Linux process assumes private page tables. Shared AS is only for threads with `CLONE_VM`.
 
 ### Deliverables
 
@@ -106,17 +107,19 @@ BusyBox suite stays a **regression gate** after each phase — not the work queu
 
 ## Phase 2 — Process lifecycle that matches Linux
 
+**Status:** **mostly done** — `fork`/`execve`/`exit`/`wait4` on private mm; Ready + schedule; no image snap.
+`vfork` still ENOSYS (use `fork`). Reparent/WNOHANG polish may remain.
+
 ### Deliverables
 
-- `fork` / `vfork` / `execve` / `exit` / `wait4` on **private mm**.
-- `vfork`: block parent until exec/exit (Linux semantics), shared mm only for that window if you implement real vfork.
-- Zombies, reparent to init, `WNOHANG`.
-- Remove cooperative “run child to completion inside `sys_fork`” once scheduler exists (P3); until then you may still nest, but **mm must already be private**.
+- `fork` / `vfork` / `execve` / `exit` / `wait4` on **private mm**. ✅ except real `vfork`
+- Zombies, reparent to init, `WNOHANG`. 🟡 basic zombies/wait
+- Child not run to completion inside `sys_fork` — Ready + scheduler. ✅
 
 ### Exit criteria
 
-- Shell can `fork+exec` without snapshot buffers.
-- Concurrent parent/child (after P3) do not share writable pages unless COW/shared.
+- Shell can `fork+exec` without snapshot buffers. ✅
+- Concurrent parent/child do not share writable pages unless COW/`CLONE_VM`. ✅
 
 ---
 
@@ -147,9 +150,9 @@ BusyBox suite stays a **regression gate** after each phase — not the work queu
 
 ## Phase 4 — Threads (north star #1)
 
-**Status (2026-08-02):** **4a/4b first slice** — PCB `tid`/`tgid`; `gettid`; `getpid` returns tgid;
-`clone` with `CLONE_VM` / `CLONE_THREAD` / settid flags / stack / TLS; shared-mm free only on
-last user; `clonetest` embedded smoke. Not yet: true shared FD tables, `exit_group`, futex join.
+**Status (2026-08-02):** **4a–4c done** — `tid`/`tgid`, `gettid`, `clone` (VM/FILES/THREAD/settids),
+shared-mm + shared-FD refcounts, `exit_group` kills thread group. Smoke: `clonetest`.
+Join path needs Phase 6 futex (done in first slice).
 
 Linux model (simplified):
 
@@ -188,31 +191,41 @@ Linux model (simplified):
 
 ## Phase 5 — Signals (parallelizable with late P4)
 
+**Status (2026-08-02):** **Phase 5 done (practical slice)** — kill/tkill/tgkill,
+rt_sigaction/procmask/sigreturn, default terminate + user handlers (stack frame +
+restorer), TTY Ctrl-C → SIGINT (prefer current job), shell SIG_IGN for INT/QUIT.
+Smoke: `signaltest`. Not Linux-complete: full siginfo/ucontext, SA_NODEFER, RT signals.
+
 ### Deliverables
 
-- Real pending/blocked masks; deliver on return-to-user.
-- `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn`, `kill`, `tkill`/`tgkill`.
-- Default actions (terminate, ignore); minimal handler frame on user stack.
+- Real pending/blocked masks; deliver on return-to-user. ✅ basic
+- `rt_sigaction`, `rt_sigprocmask`, `rt_sigreturn`, `kill`, `tkill`/`tgkill`. ✅
+- Default actions (terminate, ignore); minimal handler frame on user stack. ✅
 
 ### Exit criteria
 
-- `kill(pid, SIGTERM)` ends process.
-- Thread-directed signals with `tgkill`.
+- `kill(pid, SIGTERM)` ends process. ✅
+- Thread-directed signals with `tgkill`. ✅
+- User handler + return. ✅
+- Interactive Ctrl-C stops foreground job, not empty shell. ✅
 
 ---
 
 ## Phase 6 — Futex (makes threads actually usable)
 
+**Status (2026-08-02):** **6a/6b first slice** — `futex` WAIT/WAKE (+PRIVATE), wait queue by
+VA (+CR3), `clear_child_tid` zero+wake on exit, `futextest` join smoke. No timeout/requeue yet.
+
 ### Deliverables
 
-- `futex` wait/wake (and preferably `FUTEX_PRIVATE`).
-- `set_tid_address` + clear TID word + wake on thread exit (musl join).
-- Wait queues keyed by user VA (+ mm).
+- `futex` wait/wake (and preferably `FUTEX_PRIVATE`). ✅ basic
+- `set_tid_address` + clear TID word + wake on thread exit (musl join). ✅
+- Wait queues keyed by user VA (+ mm). ✅
 
 ### Exit criteria
 
-- `pthread_mutex` / `pthread_join` work on musl.
-- No busy-spin required for correctness.
+- `pthread_mutex` / `pthread_join` work on musl. 🟡 join path smoke via `futextest`
+- No busy-spin required for correctness. ✅ (cooperative schedule while waiting)
 
 ---
 
@@ -307,17 +320,17 @@ Syscall coverage % is a **metric**, not a milestone by itself.
 
 ---
 
-## Suggested near-term work order (next 4–6 milestones)
+## Suggested near-term work order
 
-| # | Milestone | Outcome |
-|---|-----------|---------|
-| **M1** | **mm_struct + per-process CR3** | Isolation foundation |
-| **M2** | **fork copies page tables; drop image snap** | Honest processes |
-| **M3** | **Timer preemption + schedule()** | Real multitasking |
-| **M4** | **clone + TID + shared mm/files** | Threads exist |
-| **M5** | **futex + clear_child_tid** | musl pthreads usable |
-| **M6** | **VFS ops + register_chrdev** | Pluggable drivers |
-| **M7** | **module loader + EXPORT_SYMBOL + hello module** | Loadable kernel code |
+| # | Milestone | Outcome | Status |
+|---|-----------|---------|--------|
+| **M1** | **mm_struct + per-process CR3** | Isolation foundation | ✅ done |
+| **M2** | **fork copies page tables; drop image snap** | Honest processes | ✅ done |
+| **M3** | **Timer preemption + schedule()** | Real multitasking | ✅ done |
+| **M4** | **clone + TID + shared mm/files** | Threads exist | ✅ done |
+| **M5** | **signals + futex + clear_child_tid** | kill/handlers/Ctrl-C; join path | ✅ practical |
+| **M6** | **VFS ops + register_chrdev** | Pluggable drivers | **next** |
+| **M7** | **module loader + EXPORT_SYMBOL + hello module** | Loadable kernel code | planned |
 
 Everything else (more syscalls, net, polish) hangs off this spine.
 
@@ -326,13 +339,13 @@ Everything else (more syscalls, net, polish) hangs off this spine.
 ## What to stop optimizing for
 
 - One-off applets that only need another ENOSYS stub.
-- Growing parent-image snapshot size (wrong direction once P1 lands).
-- Treating “% of Linux syscalls implemented” as the main KPI before threads/modules.
+- Growing shared-AS workarounds (image snap is **deleted** — keep it that way).
+- Treating “% of Linux syscalls implemented” as the main KPI before modules land.
 
 What **to** keep:
 
 - Linux syscall numbers and struct layouts.
-- Headless qemu-connect tests.
+- Headless qemu-connect tests + focused smokes (`preempttest`, `clonetest`, `signaltest`, `futextest`).
 - Small, reviewable phases with clear exit criteria.
 
 ---
@@ -341,11 +354,11 @@ What **to** keep:
 
 | Risk | Mitigation |
 |------|------------|
-| Identity-map kernel forever blocks high-half / modules | Decide kernel VA plan in M1 |
-| Cooperative nest + preemption races | Finish mm isolation before enabling preemption on all paths |
+| Identity-map kernel forever blocks high-half / modules | Plan kernel VA when modules need it; identity is OK for P7 start |
+| Nest depth ≥ 2 stays cooperative | Document; only deepen nest preempt with careful testing |
 | Rust module ABI fragility | C ABI boundary for all module exports |
-| Too many goals at once | Only one of {mm, schedule, clone, modules} as the active epic |
-| BusyBox regressions demoralize | Gate: suite must pass after each M*, not drive design |
+| Too many goals at once | Active epic: **VFS → modules** (not more BusyBox stubs) |
+| BusyBox regressions demoralize | Gate: suite + focused smokes after each M*, not drive design |
 
 ---
 
@@ -358,17 +371,19 @@ munux is a **Linux-compatible teaching/research kernel in Rust** when:
 3. The kernel can **load and unload a driver module** that registers a device under VFS.
 4. Syscall surface grows deliberately behind that architecture — not ahead of it.
 
+**Today:** (1) partial (threads foundation + basic futex/signals), (2) yes, (3) not started, (4) intentional.
+
 ---
 
 ## Immediate recommendation
 
-**Start Phase 1 / M1: per-process page tables.**
+**Start Phase 7 / M6: VFS ops tables + device registration.**
 
-Everything you want (threads with `CLONE_VM`, safe exec, modules that map code, real scheduling) either requires it or becomes dangerously hard without it.
+Thread foundation (P1–P6 practical) is landed. Next architecture unlock is **modules**, which needs a real VFS/device model — not more one-off syscalls.
 
-Next conversation-sized implementation slice after plan buy-in:
+Conversation-sized first slices:
 
-1. Introduce `Mm` / `cr3` on PCB.  
-2. Clone page tables on fork (full copy).  
-3. Switch CR3 in `switch_to` / enter-user paths.  
-4. Delete parent-image snapshot path when green.
+1. Introduce `file_operations` / `inode` / open path that syscalls go through.  
+2. Move ext2 + `/proc` behind those ops (behavior unchanged).  
+3. `register_chrdev`-style hook (even if only for a built-in null/zero).  
+4. Keep focused smokes green after each step.

@@ -1,7 +1,7 @@
-//! File descriptors (U1–U4 + per-process tables).
+//! File descriptors (U1–U4 + per-process / shared tables).
 //!
-//! Each process slot has its own [`FdTable`]. `fork` / `begin_user_task` clone
-//! the parent's table; `open`/`close` affect only the current process.
+//! Default: each process slot owns an [`FdTable`]. `fork` clones the parent
+//! table. `CLONE_FILES` makes the child point at the parent's table (refcount).
 
 use crate::console;
 use crate::fs;
@@ -311,17 +311,21 @@ pub enum FdError {
     Inval,
 }
 
-/// One FD table per process table slot (same index as PCB).
+/// Physical FD table storage, one per process-table slot index.
 static mut TABLES: [FdTable; MAX_PROCESSES] = [FdTable::new(); MAX_PROCESSES];
+/// How many tasks currently use `TABLES[i]` (`CLONE_FILES` share).
+static mut FILES_REFS: [u16; MAX_PROCESSES] = [0; MAX_PROCESSES];
 static mut READY: bool = false;
 
 pub fn init() {
     unsafe {
         for i in 0..MAX_PROCESSES {
             TABLES[i] = FdTable::new();
+            FILES_REFS[i] = 0;
         }
         // kinit (slot 0) gets stdio; children inherit via clone.
         TABLES[0].install_stdio();
+        FILES_REFS[0] = 1;
         READY = true;
     }
 }
@@ -335,32 +339,95 @@ fn table_mut(slot: usize) -> &'static mut FdTable {
     unsafe { &mut *core::ptr::addr_of_mut!(TABLES[i]) }
 }
 
-/// Operate on the current process's FD table.
+/// Resolve which FD table slot the current task uses.
+fn current_files_slot() -> usize {
+    crate::process::with_current(|p| {
+        if p.files_slot < MAX_PROCESSES {
+            p.files_slot
+        } else {
+            0
+        }
+    })
+    .unwrap_or(0)
+}
+
+/// Operate on the current process's FD table (may be shared).
 pub fn with_current<F, R>(f: F) -> R
 where
     F: FnOnce(&mut FdTable) -> R,
 {
-    let idx = crate::process::current_index();
-    f(table_mut(idx))
+    f(table_mut(current_files_slot()))
 }
 
-/// Clone parent's open FDs into a new child process slot (after PCB alloc).
+/// Clone parent's open FDs into a new child process slot (private table).
+/// Sets child `files_slot = child_idx` and refcount 1 on the child's table.
 pub fn clone_table(parent_idx: usize, child_idx: usize) {
     if parent_idx >= MAX_PROCESSES || child_idx >= MAX_PROCESSES {
         return;
     }
+    let parent_files = crate::process::table::with_index(parent_idx, |p| p.files_slot)
+        .unwrap_or(parent_idx);
+    let parent_files = if parent_files < MAX_PROCESSES {
+        parent_files
+    } else {
+        parent_idx
+    };
     unsafe {
-        let parent = *core::ptr::addr_of!(TABLES[parent_idx]);
+        let parent = *core::ptr::addr_of!(TABLES[parent_files]);
         TABLES[child_idx].clone_from(&parent);
+        FILES_REFS[child_idx] = 1;
+    }
+    let _ = crate::process::table::with_index(child_idx, |p| {
+        p.files_slot = child_idx;
+    });
+}
+
+/// `CLONE_FILES`: child shares the parent's open-file table (refcount++).
+pub fn share_table(parent_idx: usize, child_idx: usize) {
+    if parent_idx >= MAX_PROCESSES || child_idx >= MAX_PROCESSES {
+        return;
+    }
+    let parent_files = crate::process::table::with_index(parent_idx, |p| p.files_slot)
+        .unwrap_or(parent_idx);
+    let parent_files = if parent_files < MAX_PROCESSES {
+        parent_files
+    } else {
+        parent_idx
+    };
+    unsafe {
+        // Child's private table (if any) is unused.
+        TABLES[child_idx].close_all();
+        FILES_REFS[child_idx] = 0;
+        if FILES_REFS[parent_files] < u16::MAX {
+            FILES_REFS[parent_files] = FILES_REFS[parent_files].saturating_add(1);
+        }
+    }
+    let _ = crate::process::table::with_index(child_idx, |p| {
+        p.files_slot = parent_files;
+    });
+}
+
+/// Drop one reference to the FD table used by process slot `proc_slot`.
+/// Clears the underlying table only when the last user exits.
+pub fn release_files(proc_slot: usize) {
+    if proc_slot >= MAX_PROCESSES {
+        return;
+    }
+    let files = crate::process::table::with_index(proc_slot, |p| p.files_slot).unwrap_or(proc_slot);
+    let files = if files < MAX_PROCESSES { files } else { proc_slot };
+    unsafe {
+        if FILES_REFS[files] > 0 {
+            FILES_REFS[files] -= 1;
+        }
+        if FILES_REFS[files] == 0 {
+            TABLES[files].close_all();
+        }
     }
 }
 
-/// Reset FD table when a process slot is freed.
+/// Reset FD table when a process slot is freed (legacy name → release_files).
 pub fn clear_table(slot: usize) {
-    if slot >= MAX_PROCESSES {
-        return;
-    }
-    table_mut(slot).close_all();
+    release_files(slot);
 }
 
 pub fn open_count() -> usize {
@@ -399,8 +466,29 @@ fn console_read(buf: &mut [u8]) -> usize {
     if buf.is_empty() {
         return 0;
     }
-    // IRQ-safe wait: re-checks buffer after every hlt wake (see keyboard::wait_for_input).
-    kbd::wait_for_input();
+    // Mark this process as TTY foreground so Ctrl-C targets us.
+    crate::tty::enter_console_read();
+    // Wait for keystrokes; poll deferred Ctrl-C so we can exit cleanly.
+    loop {
+        crate::tty::deliver_pending_sigint();
+        if let Some(sig) = crate::tty::take_force_fatal() {
+            crate::syscalls::fatal_signal_exit(sig);
+        }
+        if kbd::buffered_len() > 0 {
+            break;
+        }
+        // One sleep; IRQ may set pending SIGINT while halted.
+        unsafe {
+            core::arch::asm!("sti; hlt", options(nostack));
+        }
+        crate::tty::deliver_pending_sigint();
+        if let Some(sig) = crate::tty::take_force_fatal() {
+            crate::syscalls::fatal_signal_exit(sig);
+        }
+        if kbd::buffered_len() > 0 {
+            break;
+        }
+    }
     let mut n = 0usize;
     while n < buf.len() {
         match kbd::pop_char() {
@@ -411,6 +499,7 @@ fn console_read(buf: &mut [u8]) -> usize {
             None => break,
         }
     }
+    crate::tty::leave_console_read();
     n
 }
 

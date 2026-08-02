@@ -1,6 +1,6 @@
 # Linux x86_64 syscalls vs munux
 
-**Last updated:** 2026-07-30.  
+**Last updated:** 2026-08-02.  
 Source of Linux names/numbers: host `/usr/include/asm/unistd_64.h`.  
 Source of munux set: `src/syscalls/mod.rs` dispatch `match` (not merely `num` constants).
 
@@ -9,9 +9,9 @@ Source of munux set: `src/syscalls/mod.rs` dispatch `match` (not merely `num` co
 | Metric | Value |
 |--------|------:|
 | Linux (unistd_64.h) | **385** |
-| munux dispatched | **80** |
-| Coverage | **~20.8%** |
-| Declared but not dispatched | `readlink` (89) → still ENOSYS |
+| munux dispatched | **~65** |
+| Coverage | **~17%** |
+| Notable ENOSYS | `pipe`/`dup`/`rename`/`link`/`readlink`/`poll`/… |
 
 Legend in the tables below: implemented rows list munux notes; “NOT in munux” means **`-ENOSYS`**.
 
@@ -26,85 +26,97 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 4 | `stat` | STAT | implemented |
 | 5 | `fstat` | FSTAT | implemented |
 | 6 | `lstat` | LSTAT | implemented |
-| 7 | `poll` | POLL | implemented |
 | 8 | `lseek` | LSEEK | implemented |
 | 9 | `mmap` | MMAP | partial (anon mmap; offset always 0) |
 | 10 | `mprotect` | MPROTECT | implemented |
 | 11 | `munmap` | MUNMAP | implemented |
 | 12 | `brk` | BRK | implemented |
-| 13 | `rt_sigaction` | RT_SIGACTION | stub (no real delivery) |
-| 14 | `rt_sigprocmask` | RT_SIGPROCMASK | stub (mask ignored) |
+| 13 | `rt_sigaction` | RT_SIGACTION | done (handler / IGN / DFL) |
+| 14 | `rt_sigprocmask` | RT_SIGPROCMASK | done (64-bit mask) |
+| 15 | `rt_sigreturn` | RT_SIGRETURN | done (restorer) |
 | 16 | `ioctl` | IOCTL | partial (TTY probes) |
 | 19 | `readv` | READV | implemented |
 | 20 | `writev` | WRITEV | implemented |
 | 21 | `access` | ACCESS | implemented |
-| 22 | `pipe` | PIPE | implemented |
-| 32 | `dup` | DUP | implemented |
-| 33 | `dup2` | DUP2 | implemented |
 | 35 | `nanosleep` | NANOSLEEP | implemented |
-| 39 | `getpid` | GETPID | implemented |
+| 39 | `getpid` | GETPID | implemented (returns **tgid**) |
 | 40 | `sendfile` | SENDFILE | partial |
-| 57 | `fork` | FORK | implemented |
-| 58 | `vfork` | VFORK | implemented |
+| 56 | `clone` | CLONE | done (VM/FILES/THREAD/settids/TLS/stack) |
+| 57 | `fork` | FORK | done (private CR3 `clone_mm`) |
 | 59 | `execve` | EXECVE | implemented |
-| 60 | `exit` | EXIT | implemented |
+| 60 | `exit` | EXIT | implemented (+ clear_child_tid wake) |
 | 61 | `wait4` | WAIT4 | implemented |
-| 62 | `kill` | KILL | partial (limited kill) |
+| 62 | `kill` | KILL | done (process-directed) |
 | 63 | `uname` | UNAME | implemented |
 | 72 | `fcntl` | FCNTL | partial |
 | 79 | `getcwd` | GETCWD | implemented |
 | 80 | `chdir` | CHDIR | implemented |
-| 82 | `rename` | RENAME | implemented |
 | 83 | `mkdir` | MKDIR | implemented |
 | 84 | `rmdir` | RMDIR | implemented |
-| 86 | `link` | LINK | implemented |
 | 87 | `unlink` | UNLINK | implemented |
 | 90 | `chmod` | CHMOD | implemented |
 | 92 | `chown` | CHOWN | stub (always success) |
 | 95 | `umask` | UMASK | implemented |
 | 96 | `gettimeofday` | GETTIMEOFDAY | implemented |
-| 99 | `sysinfo` | SYSINFO | implemented |
 | 102 | `getuid` | GETUID | implemented |
-| 104 | `getgid` | GETGID | implemented |
+| 104 | `getgid` | GETGID | implemented (0) |
 | 105 | `setuid` | SETUID | stub |
 | 106 | `setgid` | SETGID | stub |
 | 107 | `geteuid` | GETEUID | implemented |
-| 108 | `getegid` | GETEGID | implemented |
-| 109 | `setpgid` | SETPGID | stub |
+| 108 | `getegid` | GETEGID | implemented (0) |
 | 110 | `getppid` | GETPPID | implemented |
-| 111 | `getpgrp` | GETPGRP | implemented |
-| 112 | `setsid` | SETSID | partial (returns pid) |
 | 115 | `getgroups` | GETGROUPS | implemented |
-| 121 | `getpgid` | GETPGID | implemented |
-| 137 | `statfs` | STATFS | implemented |
-| 138 | `fstatfs` | FSTATFS | implemented |
-| 140 | `getpriority` | GETPRIORITY | implemented |
-| 141 | `setpriority` | SETPRIORITY | implemented |
 | 158 | `arch_prctl` | ARCH_PRCTL | implemented |
 | 162 | `sync` | SYNC | stub (no-op) |
-| 186 | `gettid` | GETTID | alias getpid |
+| 186 | `gettid` | GETTID | done (unique tid) |
+| 200 | `tkill` | TKILL | done |
+| 202 | `futex` | FUTEX | done (WAIT/WAKE + PRIVATE) |
 | 217 | `getdents64` | GETDENTS64 | implemented |
-| 218 | `set_tid_address` | SET_TID_ADDRESS | implemented |
+| 218 | `set_tid_address` | SET_TID_ADDRESS | done (+ clear wake on exit) |
 | 228 | `clock_gettime` | CLOCK_GETTIME | implemented |
-| 231 | `exit_group` | EXIT_GROUP | implemented |
+| 231 | `exit_group` | EXIT_GROUP | done (thread group) |
+| 234 | `tgkill` | TGKILL | done |
 | 235 | `utimes` | UTIMES | implemented |
 | 257 | `openat` | OPENAT | partial (AT_FDCWD/abs) |
 | 258 | `mkdirat` | MKDIRAT | partial |
 | 261 | `futimesat` | FUTIMESAT | partial |
 | 262 | `newfstatat` | NEWFSTATAT | implemented |
 | 263 | `unlinkat` | UNLINKAT | partial |
-| 264 | `renameat` | RENAMEAT | partial |
 | 268 | `fchmodat` | FCHMODAT | partial |
 | 269 | `faccessat` | FACCESSAT | partial |
-| 271 | `ppoll` | PPOLL | partial |
 | 280 | `utimensat` | UTIMENSAT | partial |
-| 293 | `pipe2` | PIPE2 | implemented |
 
 ## Linux syscalls NOT in munux (ENOSYS)
 
+Among many others, these were previously over-claimed as implemented in older docs:
+
+| # | name | note |
+|--:|------|------|
+| 7 | `poll` | not dispatched |
+| 22 | `pipe` | not dispatched |
+| 32 | `dup` | not dispatched |
+| 33 | `dup2` | not dispatched |
+| 58 | `vfork` | not dispatched (use `fork`) |
+| 82 | `rename` | not dispatched (BusyBox `mv` fails) |
+| 86 | `link` | not dispatched |
+| 99 | `sysinfo` | not dispatched |
+| 109 | `setpgid` | not dispatched |
+| 111 | `getpgrp` | not dispatched |
+| 112 | `setsid` | not dispatched |
+| 121 | `getpgid` | not dispatched |
+| 137 | `statfs` | not dispatched |
+| 138 | `fstatfs` | not dispatched |
+| 140 | `getpriority` | not dispatched |
+| 141 | `setpriority` | not dispatched |
+| 264 | `renameat` | not dispatched |
+| 271 | `ppoll` | not dispatched |
+| 293 | `pipe2` | not dispatched |
+
+Full remaining list (alphabetical by number):
+
+
 | # | name |
 |--:|------|
-| 15 | `rt_sigreturn` |
 | 17 | `pread64` |
 | 18 | `pwrite64` |
 | 23 | `select` |
@@ -135,7 +147,6 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 53 | `socketpair` |
 | 54 | `setsockopt` |
 | 55 | `getsockopt` |
-| 56 | `clone` |
 | 64 | `semget` |
 | 65 | `semop` |
 | 66 | `semctl` |
@@ -240,9 +251,7 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 197 | `removexattr` |
 | 198 | `lremovexattr` |
 | 199 | `fremovexattr` |
-| 200 | `tkill` |
 | 201 | `time` |
-| 202 | `futex` |
 | 203 | `sched_setaffinity` |
 | 204 | `sched_getaffinity` |
 | 205 | `set_thread_area` |
@@ -270,7 +279,6 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 230 | `clock_nanosleep` |
 | 232 | `epoll_wait` |
 | 233 | `epoll_ctl` |
-| 234 | `tgkill` |
 | 236 | `vserver` |
 | 237 | `mbind` |
 | 238 | `set_mempolicy` |

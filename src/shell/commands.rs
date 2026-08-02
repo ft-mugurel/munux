@@ -169,6 +169,26 @@ pub fn dispatch(line: &str) {
                 }
                 return;
             }
+            if path == "futex" || path == "futextest" {
+                match crate::syscalls::run_embedded_futextest() {
+                    Ok(()) => {}
+                    Err(e) => {
+                        console::print("run futextest: ");
+                        console::println(e);
+                    }
+                }
+                return;
+            }
+            if path == "signal" || path == "signaltest" {
+                match crate::syscalls::run_embedded_signaltest() {
+                    Ok(()) => {}
+                    Err(e) => {
+                        console::print("run signaltest: ");
+                        console::println(e);
+                    }
+                }
+                return;
+            }
             if path == "exec" || path == "exectest" {
                 match crate::syscalls::run_embedded_exectest() {
                     Ok(()) => {}

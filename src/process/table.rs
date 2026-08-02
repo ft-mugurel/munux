@@ -28,6 +28,7 @@ pub fn init_table() {
         p.cwd_inode = 2; // ext2 root inode
         p.cr3 = crate::memory::kernel_cr3();
         p.kstack_top = super::kstack::top_for_slot(0);
+        p.files_slot = 0;
         // Kernel-side init (pid 1). Userspace /bin/sh is a child (boot handoff).
         p.set_name("kinit");
         CURRENT = 0;
@@ -96,9 +97,20 @@ where
     F: FnOnce(&mut Process) -> R,
 {
     let i = find_pid(pid)?;
+    with_index(i, f)
+}
+
+/// Mutate process at a known table slot (used by FD share setup).
+pub fn with_index<F, R>(i: usize, f: F) -> Option<R>
+where
+    F: FnOnce(&mut Process) -> R,
+{
+    if i >= MAX_PROCESSES {
+        return None;
+    }
     unsafe {
-        let p = &mut *slot_mut(i);
-        Some(f(p))
+        // Slot may be mid-init; caller owns the index.
+        Some(f(&mut *slot_mut(i)))
     }
 }
 
@@ -229,6 +241,8 @@ pub fn init_child_slot(
         p.cwd_inode = 2;
         p.clear_child_tid = 0;
         p.mm_shared = false;
+        // Own FD table by default; CLONE_FILES overwrites via fd::share_table.
+        p.files_slot = child_idx;
         // Default to parent CR3; fork overwrites with clone_mm result.
         p.cr3 = crate::memory::kernel_cr3();
         if let Some(parent_cr3) = with_pid(parent_pid, |par| par.cr3) {

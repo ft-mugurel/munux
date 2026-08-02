@@ -2,6 +2,7 @@
 
 pub mod clone;
 pub mod fork;
+pub mod futex;
 pub mod kstack;
 pub mod memory;
 pub mod pcb;
@@ -21,7 +22,8 @@ pub use memory::{
 };
 pub use pcb::{Pid, Process, ProcessState, Uid, MAX_PROCESSES};
 pub use sys::{
-    begin_user_task, exit_user, getpid, getppid, gettid, getuid, reap_any_child, waitpid,
+    begin_user_task, exit_group, exit_user, getpid, getppid, gettid, getuid, reap_any_child,
+    waitpid,
 };
 pub use table::{current_index, current_pid, for_each_process, process_count, with_current};
 
@@ -106,6 +108,8 @@ pub fn init_processes() {
 
 /// Called from timer IRQ each tick — signals + scheduler tick.
 pub fn on_cpu_tick() {
+    // Ctrl-C from keyboard IRQ is deferred here (not delivered in IRQ).
+    crate::tty::deliver_pending_sigint();
     signal_queue::deliver_pending_on_tick();
     sched::on_timer_tick(crate::interrupts::timer::ticks());
 }
