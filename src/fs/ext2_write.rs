@@ -1,6 +1,5 @@
 //! ext2 write support: mkdir, touch/create, unlink (rm), rmdir.
 
-use crate::drivers::ide;
 use crate::fs::ext2::{
     self, read_block, read_inode, Ext2GroupDesc, Ext2Inode, Ext2Superblock, ROOT_INODE,
 };
@@ -72,7 +71,8 @@ fn write_fs_block(block: u32, buf: &[u8]) -> Result<(), &'static str> {
     }
     let sectors = bs / 512;
     let lba = block * sectors;
-    ide::write_sectors(lba, sectors, &buf[..bs as usize]).map_err(|_| "IDE write block")?;
+    crate::fs::blockdev::write_sectors(lba, sectors, &buf[..bs as usize])
+        .map_err(|_| "IDE write block")?;
     // Keep the read cache coherent with on-disk data.
     crate::fs::ext2::cache_write_block(block, &buf[..bs as usize]);
     Ok(())
@@ -93,15 +93,15 @@ static mut SB_SCRATCH: [u8; 1024] = [0; 1024];
 fn write_superblock() -> Result<(), &'static str> {
     // Superblock lives at byte offset 1024 (sectors 2..3 for first 1024 bytes of SB area)
     let buf = unsafe { &mut *core::ptr::addr_of_mut!(SB_SCRATCH) };
-    ide::read_sector(2, &mut buf[0..512]).map_err(|_| "IDE r")?;
-    ide::read_sector(3, &mut buf[512..1024]).map_err(|_| "IDE r")?;
+    crate::fs::blockdev::read_sector(2, &mut buf[0..512]).map_err(|_| "IDE r")?;
+    crate::fs::blockdev::read_sector(3, &mut buf[512..1024]).map_err(|_| "IDE r")?;
     unsafe {
         let sb = crate::fs::ext2::fs_superblock_ptr();
         let n = core::mem::size_of::<Ext2Superblock>();
         core::ptr::copy_nonoverlapping(sb as *const u8, buf.as_mut_ptr(), n.min(1024));
     }
-    ide::write_sector(2, &buf[0..512]).map_err(|_| "IDE w sb")?;
-    ide::write_sector(3, &buf[512..1024]).map_err(|_| "IDE w sb2")?;
+    crate::fs::blockdev::write_sector(2, &buf[0..512]).map_err(|_| "IDE w sb")?;
+    crate::fs::blockdev::write_sector(3, &buf[512..1024]).map_err(|_| "IDE w sb2")?;
     Ok(())
 }
 

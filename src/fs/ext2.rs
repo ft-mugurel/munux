@@ -1,6 +1,6 @@
 //! ext2 filesystem reader (kernel-side structures + path lookup + file read).
 
-use crate::drivers::ide;
+use crate::fs::blockdev;
 use crate::fs::vfs::{self, FsNode, NodeType};
 
 pub const ROOT_INODE: u32 = 2;
@@ -312,8 +312,8 @@ fn load_superblock(sb: &mut Ext2Superblock) -> Result<(), &'static str> {
     // Superblock at byte 1024 → sector 2 if 512-byte sectors
     let mut buf = [0u8; 1024];
     // Read 2 sectors starting at LBA 2
-    ide::read_sector(2, &mut buf[0..512]).map_err(|_| "IDE read sb")?;
-    ide::read_sector(3, &mut buf[512..1024]).map_err(|_| "IDE read sb2")?;
+    crate::fs::blockdev::read_sector(2, &mut buf[0..512]).map_err(|_| "IDE read sb")?;
+    crate::fs::blockdev::read_sector(3, &mut buf[512..1024]).map_err(|_| "IDE read sb2")?;
     unsafe {
         core::ptr::copy_nonoverlapping(
             buf.as_ptr(),
@@ -446,7 +446,7 @@ pub fn read_block(block: u32, bs: u32, buf: &mut [u8]) -> Result<(), &'static st
 
     let sectors_per = bs / 512;
     let lba = block * sectors_per;
-    ide::read_sectors(lba, sectors_per, &mut buf[..bs_usize])?;
+    blockdev::read_sectors(lba, sectors_per, &mut buf[..bs_usize])?;
 
     if use_cache {
         bcache_store(block, &buf[..bs_usize], bs_usize);

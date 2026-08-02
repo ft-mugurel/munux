@@ -1,8 +1,10 @@
-//! Filesystem: IDE probe + ext2 (read/write) + VFS layer (Phase 7).
+//! Filesystem: IDE probe + blockdev + ext2 + VFS (Phase 7).
 
+pub mod blockdev;
 pub mod ext2;
 pub mod ext2_write;
 pub mod path;
+pub mod procfs;
 pub mod vcore;
 pub mod vfs;
 
@@ -24,6 +26,8 @@ pub fn init() {
     console::print("OK sectors=");
     console::write_u64(ide::sector_count() as u64);
     console::println("");
+    // Phase 7b: IDE → registered block device `hda`
+    blockdev::init_from_ide();
 
     match ext2::mount() {
         Ok(()) => {
@@ -34,7 +38,7 @@ pub fn init() {
             console::print("fs: ext2 mounted root=");
             console::write_u64(ext2::ROOT_INODE as u64);
             console::println("");
-            // Phase 7: ops tables, /ram, /dev/null|zero
+            // Phase 7: ops tables, /ram, /proc, /dev/null|zero
             vcore::init_after_ext2();
             // Smoke: list root names on boot
             if let Ok(_) = ext2::list_dir(ext2::ROOT_INODE) {

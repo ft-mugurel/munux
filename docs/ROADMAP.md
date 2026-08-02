@@ -235,23 +235,23 @@ threads, wait runs Ready **children only**, nest-safe spurious wake. Smoke: `fut
 
 ## Phase 7 — VFS + device model (prepares modules)
 
-**Status (2026-08-02):** **7a first slice** — `file_operations` table, mount registry,
-`register_chrdev`, open/read/write via VFS (`fs/vcore.rs` + FD layer). Root **ext2** +
-**ramfs** (`/ram/*`) + **`/dev/null`** / **`/dev/zero`**. Kernel shell: `vfs`.
-Not yet: full dentry cache, block-device ops for IDE, unify `/proc` behind VFS.
+**Status (2026-08-02):** **7a–7c** — fops + mounts + chrdev + blkdev + procfs +
+**Linux-like dir visibility**: `ls /` shows `proc`/`dev`/`ram`; `ls /proc` lists
+files; `chdir`/`getcwd` understand virtual mounts. Userspace `ls` takes a path.
+Not yet: full dentry cache, `/dev/hda` node, mount syscalls, inode_ops for mkdir/unlink.
 
 ### Deliverables
 
 - VFS objects: `super_block`, `inode`, `dentry`/`path`, `file` with `file_operations`.
-  🟡 `FileData` + `FileOperations` + mounts/chrdev (inode/dentry cache later)
-- Mount table (even if only one root). ✅ multi-mount (`/` ext2, `/ram` ramfs)
-- Char/block device registration (`register_chrdev` style). ✅ chrdev; block later
-- IDE/ext2 become “built-in modules” behind the same ops as loadable ones. 🟡 ext2 via fops
+  🟡 `FileData` + `FileOperations` + mounts (inode/dentry cache later)
+- Mount table. ✅ `/` ext2, `/ram` ramfs, `/proc` proc
+- Char/block device registration. ✅ chrdev + **blkdev**
+- IDE/ext2 behind ops. ✅ fops + blockdev for IDE
 
 ### Exit criteria
 
-- Open/read/write go through VFS ops, not `ext2_*` scattered in syscalls. ✅ FD path
-- A second FS (e.g. ramfs) can be registered without rewriting syscalls. ✅ `/ram`
+- Open/read/write go through VFS ops. ✅ FD path
+- A second FS can be registered without rewriting syscalls. ✅ ramfs + proc
 
 ---
 
@@ -337,7 +337,7 @@ Syscall coverage % is a **metric**, not a milestone by itself.
 | **M3** | **Timer preemption + schedule()** | Real multitasking | ✅ done |
 | **M4** | **clone + TID + shared mm/files** | Threads exist | ✅ done |
 | **M5** | **signals + futex + clear_child_tid** | kill/handlers/Ctrl-C; join path | ✅ practical |
-| **M6** | **VFS ops + register_chrdev** | Pluggable drivers | 🟡 7a started |
+| **M6** | **VFS ops + register_chrdev** | Pluggable drivers | 🟡 7a–7c |
 | **M7** | **module loader + EXPORT_SYMBOL + hello module** | Loadable kernel code | planned |
 
 Everything else (more syscalls, net, polish) hangs off this spine.

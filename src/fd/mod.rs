@@ -4,7 +4,6 @@
 //! table. `CLONE_FILES` makes the child point at the parent's table (refcount).
 
 use crate::fs;
-use crate::fs::ext2;
 use crate::fs::vcore::{self, FileData, VfsError};
 use crate::process::pcb::MAX_PROCESSES;
 
@@ -178,50 +177,55 @@ impl FdTable {
     }
 
     /// Linux getdents64(fd, dirp, count) — fill buffer, advance dir offset cookie.
+    ///
+    /// Supports ext2 dirs, virtual dirs (`/proc`, `/dev`, `/ram`), and injects
+    /// mount-point names into the root listing so `ls /` shows `proc`/`dev`/`ram`.
     pub fn getdents64(&mut self, fd: usize, out: &mut [u8]) -> Result<usize, FdError> {
-        let (ino, mut cookie) = {
+        let (mut cookie, is_dir) = {
             let file = self.get(fd).ok_or(FdError::BadFd)?;
-            if file.data.fops_id != vcore::FOPS_EXT2_DIR {
+            let ok = file.data.fops_id == vcore::FOPS_EXT2_DIR
+                || file.data.fops_id == vcore::FOPS_VDIR;
+            if !ok {
                 return Err(FdError::NotDir);
             }
-            (file.data.private as u32, file.data.pos as u32)
+            (file.data.pos, file.data.is_dir)
         };
-
+        if !is_dir {
+            return Err(FdError::NotDir);
+        }
         if out.len() < 24 {
             return Err(FdError::Inval);
         }
 
         let mut written = 0usize;
         loop {
-            let ent = match ext2::dir_next_entry(ino, cookie) {
+            let snap = {
+                let file = self.get(fd).ok_or(FdError::BadFd)?;
+                file.data
+            };
+            let ent = match vcore::vfs_dir_next(&snap, cookie) {
                 Ok(Some(e)) => e,
                 Ok(None) => break,
+                Err(VfsError::NotDir) => return Err(FdError::NotDir),
                 Err(_) => return Err(FdError::Fault),
             };
 
-            // linux_dirent64: ino u64, off i64, reclen u16, type u8, name...
             let name_len = ent.name_len as usize;
-            let reclen = (19 + name_len + 1 + 7) & !7; // align 8, include NUL
+            let reclen = (19 + name_len + 1 + 7) & !7;
             if written + reclen > out.len() {
                 if written == 0 {
-                    return Err(FdError::Inval); // buffer too small for one entry
+                    return Err(FdError::Inval);
                 }
                 break;
             }
 
             let base = written;
-            // d_ino
-            out[base..base + 8].copy_from_slice(&(ent.ino as u64).to_le_bytes());
-            // d_off = next cookie
+            out[base..base + 8].copy_from_slice(&ent.ino.to_le_bytes());
             out[base + 8..base + 16].copy_from_slice(&(ent.next_off as i64).to_le_bytes());
-            // d_reclen
             out[base + 16..base + 18].copy_from_slice(&(reclen as u16).to_le_bytes());
-            // d_type
             out[base + 18] = ent.d_type;
-            // d_name + NUL
             out[base + 19..base + 19 + name_len].copy_from_slice(&ent.name[..name_len]);
             out[base + 19 + name_len] = 0;
-            // pad
             for b in out.iter_mut().take(base + reclen).skip(base + 20 + name_len) {
                 *b = 0;
             }
@@ -231,7 +235,7 @@ impl FdTable {
         }
 
         if let Some(file) = self.get_mut(fd) {
-            file.data.pos = cookie as u64;
+            file.data.pos = cookie;
         }
         Ok(written)
     }

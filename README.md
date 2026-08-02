@@ -63,8 +63,8 @@ See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phased plan.
 - **BusyBox** static binary on disk for regression probes
 
 ### Filesystem & FDs
-- **VFS 7a:** `file_operations` + mounts (ext2 root, **ramfs** `/ram`) + **chrdev** (`/dev/null`, `/dev/zero`)
-- ATA PIO **IDE** + **ext2** behind VFS fops; virtual **`/proc`** (still ad-hoc)
+- **VFS 7a/7b:** `file_operations` + mounts (ext2, **ramfs**, **proc**) + chrdev + **blkdev `hda`**
+- ATA PIO **IDE** via blockdev; **ext2** via VFS fops; **`/proc`** synthetic files
 - FD tables: **clone on fork**; **share on `CLONE_FILES`** (refcount); open/read/write via VFS
 
 ### Console

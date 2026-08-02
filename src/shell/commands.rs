@@ -851,7 +851,16 @@ fn cmd_vfs() {
     }
     console::println("  chrdev: /dev/null /dev/zero");
     console::println("  ramfs:  /ram/hello (seeded)");
-    console::println("  fops: console, ext2_file, ext2_dir, ramfs_file, null, zero");
+    console::println("  proc:   /proc/meminfo mounts version uptime self/status");
+    console::print("  blkdev: ");
+    console::write_u64(fs::blockdev::count() as u64);
+    if let Some(n) = fs::blockdev::name_at(0) {
+        console::print(" (");
+        console::print(n);
+        console::print(")");
+    }
+    console::println("");
+    console::println("  fops: console, ext2, ramfs, null, zero, proc");
 }
 
 fn cmd_ps() {
@@ -991,93 +1000,83 @@ fn require_fs() -> bool {
 }
 
 fn cmd_ls(rest: &str) {
-    if !require_fs() {
-        return;
-    }
     let path = rest.split_whitespace().next().unwrap_or(".");
-    let cwd = fs::path::cwd_inode();
-    let ino = match fs::ext2::resolve_path(cwd, path) {
-        Ok(i) => i,
-        Err(e) => {
-            console::print("ls: ");
-            console::println(e);
+    // VFS so /proc, /dev, /ram and mount points appear (Linux-like).
+    let f = match fs::vcore::vfs_open(path, 0o200000, true, false) {
+        Ok(f) if f.is_dir => f,
+        Ok(_) => {
+            console::println("ls: not a directory");
+            return;
+        }
+        Err(_) => {
+            console::println("ls: not found");
             return;
         }
     };
-    if !fs::ext2::inode_is_dir(ino) {
-        console::println("ls: not a directory");
-        return;
-    }
-    match fs::ext2::list_dir(ino) {
-        Ok(n) => {
-            for i in 0..fs::vfs::cache_len() {
-                if let Some(node) = fs::vfs::cache_get(i) {
-                    let name = node.name_str();
-                    if name == "." || name == ".." {
-                        continue;
-                    }
-                    if node.kind == fs::vfs::NodeType::Directory {
+    let mut pos = 0u64;
+    loop {
+        match fs::vcore::vfs_dir_next(&f, pos) {
+            Ok(None) => break,
+            Err(_) => {
+                console::println("ls: read error");
+                break;
+            }
+            Ok(Some(e)) => {
+                let name =
+                    core::str::from_utf8(&e.name[..e.name_len as usize]).unwrap_or("?");
+                if name != "." && name != ".." {
+                    if e.d_type == fs::vcore::DT_DIR {
                         console::print("d ");
+                    } else if e.d_type == fs::vcore::DT_CHR {
+                        console::print("c ");
                     } else {
                         console::print("- ");
                     }
                     console::print(name);
                     console::println("");
                 }
+                pos = e.next_off;
             }
-            let _ = n;
-        }
-        Err(e) => {
-            console::print("ls: ");
-            console::println(e);
         }
     }
 }
 
 fn cmd_cat(rest: &str) {
-    if !require_fs() {
-        return;
-    }
+    // Allow /proc and /dev even when ext2 is up; VFS routes virtual mounts.
     let path = rest.split_whitespace().next().unwrap_or("");
     if path.is_empty() {
         console::println("usage: cat <path>");
         return;
     }
-    let cwd = fs::path::cwd_inode();
-    let ino = match fs::ext2::resolve_path(cwd, path) {
-        Ok(i) => i,
-        Err(e) => {
-            console::print("cat: ");
-            console::println(e);
+    let mut f = match fs::vcore::vfs_open(path, 0, true, false) {
+        Ok(f) => f,
+        Err(_) => {
+            console::println("cat: not found");
             return;
         }
     };
-    if fs::ext2::inode_is_dir(ino) {
+    if f.is_dir {
         console::println("cat: is a directory");
         return;
     }
     let mut buf = [0u8; 512];
-    let mut off = 0u32;
     loop {
-        match fs::ext2::read_file(ino, off, &mut buf) {
+        match fs::vcore::vfs_read(&mut f, &mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 for &b in &buf[..n] {
-                    if b == 0 {
-                        break;
-                    }
                     console::put_char(b);
                 }
-                off += n as u32;
             }
-            Err(e) => {
-                console::print("cat: ");
-                console::println(e);
+            Err(_) => {
+                console::println("cat: read error");
                 break;
             }
         }
     }
-    console::println("");
+    if !buf.iter().any(|&b| b == b'\n') {
+        console::println("");
+    }
 }
 
 fn cmd_pwd() {

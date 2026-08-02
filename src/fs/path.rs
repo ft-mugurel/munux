@@ -1,6 +1,7 @@
 //! Working directory and path helpers (per-process cwd via process table).
 
 use crate::fs::ext2;
+use crate::fs::vcore::{self, VINO_DEV, VINO_PROC, VINO_PROC_SELF, VINO_RAM};
 use crate::process;
 
 /// Fallback when process table is not yet initialized.
@@ -25,6 +26,22 @@ pub fn set_cwd_inode(ino: u32) {
 }
 
 pub fn chdir(path: &str) -> Result<(), &'static str> {
+    // Prefer VFS so /proc, /dev, /ram work like Linux mount points.
+    const O_RDONLY: u32 = 0;
+    const O_DIRECTORY: u32 = 0o200000;
+    match vcore::vfs_open(path, O_RDONLY | O_DIRECTORY, true, false) {
+        Ok(f) if f.is_dir => {
+            // Virtual dirs store VINO_* in private; ext2 dirs store real ino.
+            set_cwd_inode(f.private as u32);
+            return Ok(());
+        }
+        Ok(_) => return Err("not a directory"),
+        Err(_) => {}
+    }
+    // Fallback: pure ext2 (relative under ext2 cwd).
+    if vcore::is_virtual_ino(cwd_inode()) {
+        return Err("not found");
+    }
     let cur = cwd_inode();
     let ino = ext2::resolve_path(cur, path)?;
     if !ext2::inode_is_dir(ino) {
@@ -37,6 +54,22 @@ pub fn chdir(path: &str) -> Result<(), &'static str> {
 /// Write absolute path of cwd into `out` (NUL-terminated). Returns length.
 pub fn getcwd_pretty(out: &mut [u8]) -> usize {
     let target = cwd_inode();
+    if vcore::is_virtual_ino(target) {
+        let s = match target {
+            VINO_PROC => "/proc",
+            VINO_DEV => "/dev",
+            VINO_RAM => "/ram",
+            VINO_PROC_SELF => "/proc/self",
+            _ => "/?",
+        };
+        let b = s.as_bytes();
+        let n = b.len().min(out.len().saturating_sub(1));
+        out[..n].copy_from_slice(&b[..n]);
+        if n < out.len() {
+            out[n] = 0;
+        }
+        return n;
+    }
     if target == ext2::ROOT_INODE {
         if !out.is_empty() {
             out[0] = b'/';

@@ -76,8 +76,30 @@ pub const FOPS_EXT2_DIR: u8 = 3;
 pub const FOPS_RAMFS_FILE: u8 = 4;
 pub const FOPS_NULL: u8 = 5;
 pub const FOPS_ZERO: u8 = 6;
+pub const FOPS_PROC: u8 = 7;
+/// Virtual directory (mount point or synthetic folder).
+pub const FOPS_VDIR: u8 = 8;
 
-static FOPS_TABLE: [FileOperations; 7] = [
+/// Synthetic inodes for virtual directories (not on ext2).
+pub const VINO_PROC: u32 = 0xF000_0001;
+pub const VINO_DEV: u32 = 0xF000_0002;
+pub const VINO_RAM: u32 = 0xF000_0003;
+pub const VINO_PROC_SELF: u32 = 0xF000_0004;
+
+pub fn is_virtual_ino(ino: u32) -> bool {
+    (ino & 0xF000_0000) == 0xF000_0000
+}
+
+// getdents cookie phases for root (inject mount-point names).
+const COOKIE_VIRT: u64 = 0x8000_0000;
+const COOKIE_EXT2_BEGIN: u64 = 0x4000_0000;
+
+/// Linux dirent d_type
+pub const DT_DIR: u8 = 4;
+pub const DT_REG: u8 = 8;
+pub const DT_CHR: u8 = 2;
+
+static FOPS_TABLE: [FileOperations; 9] = [
     FileOperations {
         name: "none",
         read: None,
@@ -118,6 +140,18 @@ static FOPS_TABLE: [FileOperations; 7] = [
         name: "zero",
         read: Some(zero_read_op),
         write: Some(null_write_op),
+        release: None,
+    },
+    FileOperations {
+        name: "proc",
+        read: Some(proc_read_op),
+        write: None,
+        release: None,
+    },
+    FileOperations {
+        name: "vdir",
+        read: None,
+        write: None,
         release: None,
     },
 ];
@@ -283,6 +317,7 @@ fn chrdev_name_str(e: &ChrdevEntry) -> &str {
 pub fn init_after_ext2() {
     let _ = register_mount("", "ext2", ext2::ROOT_INODE);
     let _ = register_mount("/ram", "ramfs", 0);
+    let _ = register_mount("/proc", "proc", 0);
     let _ = register_chrdev("null", FOPS_NULL);
     let _ = register_chrdev("zero", FOPS_ZERO);
     ramfs_init();
@@ -305,6 +340,8 @@ pub fn init_after_ext2() {
         }
     }
     console::write_u64(n);
+    console::print(" blkdev=");
+    console::write_u64(crate::fs::blockdev::count() as u64);
     console::println("");
 }
 
@@ -338,6 +375,7 @@ pub fn mount_name_at(i: usize) -> Option<(&'static str, &'static str)> {
     let path = match mount_path_str(&m[i]) {
         "" => "/",
         "/ram" => "/ram",
+        "/proc" => "/proc",
         _ => "?",
     };
     Some((path, m[i].fs_name))
@@ -352,19 +390,379 @@ pub fn vfs_open(path: &str, flags: u32, readable: bool, writable: bool) -> Resul
     if path.is_empty() {
         return Err(VfsError::NoEnt);
     }
+    const O_DIRECTORY: u32 = 0o200000;
+
+    // Relative open while cwd is a virtual directory.
+    let cwd = path::cwd_inode();
+    if !path.starts_with('/') && is_virtual_ino(cwd) {
+        return open_under_vdir(cwd, path, flags, readable, writable);
+    }
+
+    // Directory open for mount points (Linux: these show up under /).
+    if path == "/proc" || path == "/proc/" {
+        if writable {
+            return Err(VfsError::IsDir);
+        }
+        return Ok(vdir_file(VINO_PROC));
+    }
+    if path == "/dev" || path == "/dev/" {
+        if writable {
+            return Err(VfsError::IsDir);
+        }
+        return Ok(vdir_file(VINO_DEV));
+    }
+    if path == "/ram" || path == "/ram/" {
+        if writable {
+            return Err(VfsError::IsDir);
+        }
+        return Ok(vdir_file(VINO_RAM));
+    }
+    if path == "/proc/self" || path == "/proc/self/" {
+        if writable {
+            return Err(VfsError::IsDir);
+        }
+        return Ok(vdir_file(VINO_PROC_SELF));
+    }
 
     // Virtual /dev nodes (chrdev registry).
     if let Some(name) = strip_dev_prefix(path) {
         return open_chrdev(name, readable, writable);
     }
 
+    // /proc/... → procfs files
+    if path.starts_with("/proc/") || path.starts_with("proc/") {
+        return crate::fs::procfs::open(path, readable, writable);
+    }
+
     // /ram/... → ramfs
-    if path == "/ram" || path.starts_with("/ram/") {
+    if path.starts_with("/ram/") {
         return ramfs_open(path, flags, readable, writable);
     }
 
+    // Relative names that match mount points when cwd is root
+    if cwd == ext2::ROOT_INODE || cwd == 0 {
+        match path {
+            "proc" | "./proc" => {
+                if writable {
+                    return Err(VfsError::IsDir);
+                }
+                return Ok(vdir_file(VINO_PROC));
+            }
+            "dev" | "./dev" => {
+                if writable {
+                    return Err(VfsError::IsDir);
+                }
+                return Ok(vdir_file(VINO_DEV));
+            }
+            "ram" | "./ram" => {
+                if writable {
+                    return Err(VfsError::IsDir);
+                }
+                return Ok(vdir_file(VINO_RAM));
+            }
+            _ => {}
+        }
+    }
+
     // Default: ext2 root mount
-    ext2_open(path, flags, readable, writable)
+    let f = ext2_open(path, flags, readable, writable)?;
+    if (flags & O_DIRECTORY) != 0 && !f.is_dir {
+        return Err(VfsError::NotDir);
+    }
+    Ok(f)
+}
+
+fn vdir_file(vino: u32) -> FileData {
+    FileData {
+        pos: 0,
+        readable: true,
+        writable: false,
+        private: vino as u64,
+        is_dir: true,
+        fops_id: FOPS_VDIR,
+    }
+}
+
+fn open_under_vdir(
+    vino: u32,
+    name: &str,
+    flags: u32,
+    readable: bool,
+    writable: bool,
+) -> Result<FileData, VfsError> {
+    // strip ./
+    let name = name.strip_prefix("./").unwrap_or(name);
+    if name.is_empty() || name == "." {
+        return Ok(vdir_file(vino));
+    }
+    if name == ".." {
+        // parent of mount points is root
+        if vino == VINO_PROC_SELF {
+            return Ok(vdir_file(VINO_PROC));
+        }
+        return ext2_open("/", flags, true, false);
+    }
+    match vino {
+        VINO_PROC => {
+            if name == "self" {
+                return Ok(vdir_file(VINO_PROC_SELF));
+            }
+            crate::fs::procfs::open_name(name, readable, writable)
+        }
+        VINO_PROC_SELF => {
+            if name == "status" {
+                crate::fs::procfs::open("/proc/self/status", readable, writable)
+            } else {
+                Err(VfsError::NoEnt)
+            }
+        }
+        VINO_DEV => open_chrdev(name, readable, writable),
+        VINO_RAM => ramfs_open_name(name, flags, readable, writable),
+        _ => Err(VfsError::NoEnt),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Directory listing (getdents)
+// ---------------------------------------------------------------------------
+
+/// One directory entry for getdents64 packing.
+pub struct VfsDirEnt {
+    pub ino: u64,
+    pub next_off: u64,
+    pub d_type: u8,
+    pub name: [u8; 32],
+    pub name_len: u8,
+}
+
+fn make_dent(ino: u64, next_off: u64, d_type: u8, name: &str) -> VfsDirEnt {
+    let mut d = VfsDirEnt {
+        ino,
+        next_off,
+        d_type,
+        name: [0; 32],
+        name_len: 0,
+    };
+    let b = name.as_bytes();
+    let n = b.len().min(31);
+    d.name[..n].copy_from_slice(&b[..n]);
+    d.name_len = n as u8;
+    d
+}
+
+/// Next dirent for an open directory `f` at cookie `pos`.
+/// Returns `None` when the listing is finished.
+pub fn vfs_dir_next(f: &FileData, pos: u64) -> Result<Option<VfsDirEnt>, VfsError> {
+    if f.fops_id == FOPS_VDIR {
+        return Ok(vdir_next(f.private as u32, pos));
+    }
+    if f.fops_id == FOPS_EXT2_DIR {
+        let ino = f.private as u32;
+        // Root: inject mount-point names so `ls /` matches Linux.
+        if ino == ext2::ROOT_INODE {
+            return root_dir_next(pos);
+        }
+        return ext2_dir_next(ino, pos);
+    }
+    Err(VfsError::NotDir)
+}
+
+fn root_dir_next(pos: u64) -> Result<Option<VfsDirEnt>, VfsError> {
+    // Phase 1: virtual mount points
+    // pos==0 → first virt; COOKIE_VIRT|i → virt i; COOKIE_EXT2_BEGIN → start ext2
+    const VNAMES: &[&str] = &["proc", "dev", "ram"];
+    const VINOS: &[u32] = &[VINO_PROC, VINO_DEV, VINO_RAM];
+
+    if pos == 0 || (pos & COOKIE_VIRT) != 0 {
+        let idx = if pos == 0 {
+            0u64
+        } else {
+            pos & !COOKIE_VIRT
+        };
+        if (idx as usize) < VNAMES.len() {
+            let i = idx as usize;
+            let next = if i + 1 < VNAMES.len() {
+                COOKIE_VIRT | ((i as u64) + 1)
+            } else {
+                COOKIE_EXT2_BEGIN
+            };
+            return Ok(Some(make_dent(
+                VINOS[i] as u64,
+                next,
+                DT_DIR,
+                VNAMES[i],
+            )));
+        }
+    }
+
+    let ext2_cookie = if pos == COOKIE_EXT2_BEGIN {
+        0
+    } else if pos & COOKIE_VIRT == 0 && pos != 0 {
+        pos
+    } else if pos == 0 {
+        // should have been handled
+        0
+    } else {
+        return Ok(None);
+    };
+
+    // Skip ext2 entries that collide with our virtual names (if any).
+    let mut cookie = ext2_cookie as u32;
+    loop {
+        match ext2::dir_next_entry(ext2::ROOT_INODE, cookie) {
+            Ok(None) => return Ok(None),
+            Err(_) => return Err(VfsError::Fault),
+            Ok(Some(e)) => {
+                let name = core::str::from_utf8(&e.name[..e.name_len as usize]).unwrap_or("");
+                cookie = e.next_off;
+                if name == "proc" || name == "dev" || name == "ram" {
+                    continue; // prefer virtual mounts
+                }
+                let d_type = e.d_type;
+                return Ok(Some(make_dent(
+                    e.ino as u64,
+                    e.next_off as u64,
+                    d_type,
+                    name,
+                )));
+            }
+        }
+    }
+}
+
+fn ext2_dir_next(ino: u32, pos: u64) -> Result<Option<VfsDirEnt>, VfsError> {
+    match ext2::dir_next_entry(ino, pos as u32) {
+        Ok(None) => Ok(None),
+        Err(_) => Err(VfsError::Fault),
+        Ok(Some(e)) => {
+            let name = core::str::from_utf8(&e.name[..e.name_len as usize]).unwrap_or("");
+            Ok(Some(make_dent(
+                e.ino as u64,
+                e.next_off as u64,
+                e.d_type,
+                name,
+            )))
+        }
+    }
+}
+
+fn vdir_next(vino: u32, pos: u64) -> Option<VfsDirEnt> {
+    // pos is sequential index 0,1,2,...
+    let idx = pos as usize;
+    match vino {
+        VINO_PROC => {
+            const NAMES: &[&str] = &[".", "..", "meminfo", "mounts", "version", "uptime", "self"];
+            const TYPES: &[u8] = &[DT_DIR, DT_DIR, DT_REG, DT_REG, DT_REG, DT_REG, DT_DIR];
+            const INOS: &[u64] = &[
+                VINO_PROC as u64,
+                ext2::ROOT_INODE as u64,
+                0xF000_0101,
+                0xF000_0102,
+                0xF000_0103,
+                0xF000_0104,
+                VINO_PROC_SELF as u64,
+            ];
+            if idx >= NAMES.len() {
+                return None;
+            }
+            Some(make_dent(
+                INOS[idx],
+                (idx as u64) + 1,
+                TYPES[idx],
+                NAMES[idx],
+            ))
+        }
+        VINO_PROC_SELF => {
+            const NAMES: &[&str] = &[".", "..", "status"];
+            const TYPES: &[u8] = &[DT_DIR, DT_DIR, DT_REG];
+            const INOS: &[u64] = &[
+                VINO_PROC_SELF as u64,
+                VINO_PROC as u64,
+                0xF000_0105,
+            ];
+            if idx >= NAMES.len() {
+                return None;
+            }
+            Some(make_dent(
+                INOS[idx],
+                (idx as u64) + 1,
+                TYPES[idx],
+                NAMES[idx],
+            ))
+        }
+        VINO_DEV => {
+            // ., .., then registered chrdevs
+            if idx == 0 {
+                return Some(make_dent(VINO_DEV as u64, 1, DT_DIR, "."));
+            }
+            if idx == 1 {
+                return Some(make_dent(ext2::ROOT_INODE as u64, 2, DT_DIR, ".."));
+            }
+            let mut n = 0usize;
+            for e in chrdevs_mut().iter() {
+                if !e.used {
+                    continue;
+                }
+                if n + 2 == idx {
+                    let name = chrdev_name_str(e);
+                    return Some(make_dent(
+                        0xF000_0200 + n as u64,
+                        (idx as u64) + 1,
+                        DT_CHR,
+                        name,
+                    ));
+                }
+                n += 1;
+            }
+            None
+        }
+        VINO_RAM => {
+            if idx == 0 {
+                return Some(make_dent(VINO_RAM as u64, 1, DT_DIR, "."));
+            }
+            if idx == 1 {
+                return Some(make_dent(ext2::ROOT_INODE as u64, 2, DT_DIR, ".."));
+            }
+            let mut n = 0usize;
+            let r = ramfs_mut();
+            for slot in r.iter() {
+                if !slot.used {
+                    continue;
+                }
+                if n + 2 == idx {
+                    let name =
+                        core::str::from_utf8(&slot.name[..slot.name_len as usize]).unwrap_or("?");
+                    return Some(make_dent(
+                        0xF000_0300 + n as u64,
+                        (idx as u64) + 1,
+                        DT_REG,
+                        name,
+                    ));
+                }
+                n += 1;
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn ramfs_open_name(
+    name: &str,
+    flags: u32,
+    readable: bool,
+    writable: bool,
+) -> Result<FileData, VfsError> {
+    // reuse path form
+    let mut path_buf = [0u8; 32];
+    let p = b"/ram/";
+    if p.len() + name.len() >= path_buf.len() {
+        return Err(VfsError::NoEnt);
+    }
+    path_buf[..p.len()].copy_from_slice(p);
+    path_buf[p.len()..p.len() + name.len()].copy_from_slice(name.as_bytes());
+    let path = core::str::from_utf8(&path_buf[..p.len() + name.len()]).unwrap_or("");
+    ramfs_open(path, flags, readable, writable)
 }
 
 fn strip_dev_prefix(path: &str) -> Option<&str> {
@@ -542,6 +940,10 @@ fn zero_read_op(_f: &mut FileData, buf: &mut [u8]) -> Result<usize, VfsError> {
         *b = 0;
     }
     Ok(buf.len())
+}
+
+fn proc_read_op(f: &mut FileData, buf: &mut [u8]) -> Result<usize, VfsError> {
+    crate::fs::procfs::read_op(f, buf)
 }
 
 // ---------------------------------------------------------------------------
