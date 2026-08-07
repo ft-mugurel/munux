@@ -64,7 +64,7 @@ Canonical user half ends at `0x0000_8000_0000_0000` (non-canonical gap).
 
 Kernel shell: `preempt` / `preempttest` (A–G). Userspace: `clonetest`, `signaltest`, `futextest`.
 
-**Next (not mm):** leftover P8 (IDE-as-module) or Phase 9 (file-backed mmap, symlink/statx, epoll). Optional mm polish: COW fork, higher-half, demand paging.
+**Next (not mm):** Phase 9 Linux surface (file-backed mmap, symlink/statx, epoll). Optional mm polish: COW fork, higher-half, demand paging. P8 is closed; IDE remains built-in.
 
 ---
 

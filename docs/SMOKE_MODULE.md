@@ -90,11 +90,11 @@ Expected:
 |---------|--------|
 | Mainline Linux **vermagic / ksymtab / GPL** | Our `.ko` is ET_REL + munux exports only |
 | `depmod`, dependencies, signing, livepatch | Explicit non-goals |
-| IDE as a loadable module | Still built-in `hda` (disk is where `.ko` lives) |
+| IDE as a `.ko` on ext2 | **Not a bug / not unfinished P8.** Root is on `hda`; `insmod` needs that disk. IDE stays **built-in**. Initrd + optional ATA module is later boot work. |
 | Shared kernel PDPT / `vmalloc` | Heap dual-map + trampolines for PC32 |
 | Module-loaded filesystems | VFS can register; no example FS module yet |
 
-**Next:** leftover P8 (IDE-as-module) or Phase 9 Linux surface. See ROADMAP.
+**Phase 8 is complete.** Next epic is Phase 9 (see ROADMAP). Do not restart P8 for IDE-as-`.ko`.
 
 ## Sources
 

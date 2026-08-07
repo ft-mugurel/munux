@@ -23,4 +23,4 @@
 1. **New contributor** → README → ROADMAP → ABI  
 2. **Implementing a syscall** → ABI + SYSCALL_COMPARE  
 3. **Regression after a change** → SMOKE + focused SMOKE_* + BusyBox suite  
-4. **Planning next architecture** → ROADMAP (P8c ET_REL done; leftover IDE-as-module or Phase 9)
+4. **Planning next architecture** → ROADMAP (P8 closed; Phase 9 next; IDE stays built-in)

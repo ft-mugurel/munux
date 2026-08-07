@@ -1,6 +1,6 @@
 # munux roadmap — Linux-compatible kernel in Rust
 
-**Last updated:** 2026-08-07 (P1–P8c landed: MNX1 + ELF ET_REL `.ko`).
+**Last updated:** 2026-08-07 (P8 **closed**; IDE stays built-in — not a P8 gap. Next is Phase 9).
 
 **Goal:** a **Linux x86_64 ABI–compatible** kernel written in Rust, not “run every BusyBox applet.”
 
@@ -28,11 +28,11 @@ BusyBox / musl binaries are **compatibility probes** (does `fork`/`clone`/`mmap`
 | Signals | kill/tgkill, masks, handlers, rt_sigreturn, Ctrl-C | OK for practical use |
 | Futex | WAIT/WAKE/REQUEUE + timeout + clear_child_tid | OK basic join |
 | FS | **VFS P7 practical**: fops, mounts, proc, mutations, pipes | OK for modules |
-| Drivers | chrdev + blkdev; IDE as `hda` | OK for modules |
-| Modules | **P8a–8c**: MNX1 + ELF ET_REL `.ko`, syscalls, `/dev/echo` | IDE-as-module still open |
+| Drivers | chrdev + blkdev; **IDE `hda` is built-in** (root disk) | OK — must stay built-in |
+| Modules | **P8a–8c done**: MNX1 + ELF ET_REL `.ko`, `/dev/echo` | Not blocked |
 
-**Implication:** P7 + **P8a–8c** landed (hello/echo as `.mnx` and `.ko`).  
-**Next:** leftover P8 (IDE-as-module) or Phase 9 Linux surface.
+**Implication:** P7 + **P8 complete** (hello/echo as `.mnx` and `.ko`).  
+**Next epic: Phase 9** (broader Linux surface). Do **not** treat “IDE as a `.ko` on ext2” as unfinished P8.
 
 ---
 
@@ -261,7 +261,7 @@ threads, wait runs Ready **children only**, nest-safe spurious wake. Smoke: `fut
 
 ## Phase 8 — Kernel modules (north star #2)
 
-**Status (2026-08-07):** **8a–8c done** — MNX1 + ELF64 ET_REL `.ko` + echo chardev.
+**Status (2026-08-07):** **done (8a–8c).** Phase 8 is **closed**.
 
 - MNX1 container **and** ELF64 ET_REL `.ko` (not mainline vermagic / GPL ksymtab)
 - Export table + PC32 trampolines so `call munux_*` from high-heap images works
@@ -269,7 +269,7 @@ threads, wait runs Ready **children only**, nest-safe spurious wake. Smoke: `fut
 - `hello.mnx` / `hello.ko`; `echo.mnx` / `echo.ko` → `/dev/echo` + EBUSY unload
 - `/proc/modules`
 
-Still open in P8: vermagic, depmod, **IDE-as-module** (root disk chicken/egg).
+Vermagic, `depmod`, signing, and mainline `.ko` ABI were **non-goals**, not leftover P8 work.
 
 ### What “Linux-compatible modules” means for munux
 
@@ -305,12 +305,30 @@ Recommended approach:
 
 - Load `hello.ko` (or `hello.mnx`) that prints on init and unloads cleanly. ✅ both
 - Load a **char device module** that creates `/dev/echo` and works with `open`/`read`/`write`. ✅ `.mnx` + `.ko`
-- Built-in IDE driver can later be recompiled as a module without API rewrite. ❌ still built-in `hda`
+- ~~Built-in IDE driver shipped only as a module~~ **withdrawn** — see below.
 
-### Non-goals early (still not done)
+### Why “IDE as a loadable module” is not a P8 exit item
+
+**IDE/ATA** is the **boot disk** protocol (`hda` → ext2 `/` → `/lib/modules`).  
+`insmod` reads files **from that disk**. If the IDE driver were *only* a `.ko` on ext2:
+
+1. You need IDE to read `/lib/modules/ide.ko`
+2. You need `ide.ko` to have IDE  
+→ chicken-and-egg.
+
+Linux only loads a disk driver as a module when there is **initramfs** (or the driver is built-in, `=y`). munux has no initrd and no second boot device. **`hda` must stay linked into `kernel.bin`.** Echo-as-module already proves the VFS/device registration story; the root disk driver is a **boot** problem, not a module-loader gap.
+
+Optional later (not P8, not a Phase 9 gate):
+
+- Keep IDE **built-in** (correct default).
+- Optionally put `register_blkdev` on the C export table so a *second* block driver could be a module — API hygiene only.
+- Initrd + optional ATA `.ko` is **boot architecture**, same bucket as SMP/ACPI.
+
+### Non-goals (not “unfinished P8”)
 
 - Livepatch, module signing, full mainline vermagic, dependency trees (`depmod`)
 - Binary compatibility with Linux `.ko` files
+- Unloading `hda` while `/` is mounted on it
 
 ---
 
@@ -325,7 +343,7 @@ Prioritize by **kernel completeness**, not applet count:
 | Medium | `epoll`/`select`, `pipe` polish | Evented programs |
 | Medium | `mount`/`umount`, ramfs, better `/proc`/`sys` | Module-loaded FS |
 | Later | Sockets / TCP | Only if networking is a goal |
-| Later | SMP, ACPI, userspace drivers | Scale-out |
+| Later | SMP, ACPI, initrd / optional disk `.ko` | Boot + scale-out — not unfinished P8 |
 
 Syscall coverage % is a **metric**, not a milestone by itself.
 
@@ -363,7 +381,8 @@ Everything else (more syscalls, net, polish) hangs off this spine.
 
 - One-off applets that only need another ENOSYS stub.
 - Growing shared-AS workarounds (image snap is **deleted** — keep it that way).
-- Treating “% of Linux syscalls implemented” as the main KPI before modules land.
+- Treating “% of Linux syscalls implemented” as the main KPI.
+- Reopening P8 to turn the **root IDE disk** into a `.ko` on that same disk.
 
 What **to** keep:
 
@@ -380,7 +399,7 @@ What **to** keep:
 | Identity-map kernel forever blocks high-half / modules | Plan kernel VA when modules need it; identity is OK for P7 start |
 | Nest depth ≥ 2 stays cooperative | Document; only deepen nest preempt with careful testing |
 | Rust module ABI fragility | C ABI boundary for all module exports |
-| Too many goals at once | Finish P8 leftovers deliberately, then Phase 9 — not BusyBox stubs |
+| Too many goals at once | P8 is closed; next epic is Phase 9 — not BusyBox stubs or IDE-as-`.ko` |
 | BusyBox regressions demoralize | Gate: suite + focused smokes after each M*, not drive design |
 
 ---
@@ -395,20 +414,19 @@ munux is a **Linux-compatible teaching/research kernel in Rust** when:
 4. Syscall surface grows deliberately behind that architecture — not ahead of it.
 
 **Today:** (1) partial (threads + basic futex/signals; no full musl pthread),
-(2) yes, (3) **yes for MNX1 echo chardev**, (4) intentional.
+(2) yes, (3) **yes** (`echo.ko` / `echo.mnx` chardev), (4) intentional.
 
 ---
 
 ## Immediate recommendation (handoff for next session)
 
-**Phase 8c (ELF ET_REL) landed.** Remaining P8: IDE-as-module (optional), vermagic/depmod (non-goals).
+**Phase 8 is complete.** Do not reopen it for “make IDE a `.ko` on ext2.”
 
-**Next:** finish leftover P8 (IDE API / module) **or** start Phase 9 Linux surface:
+**Start Phase 9** — pick one high-value Linux-surface slice:
 
-1. **File-backed `mmap` + ELF polish**
-2. **`readlink` / `symlink` / `statx`**
-3. **`epoll`/`select`**
-4. IDE-as-module (needs initrd or keep IDE built-in)
+1. **File-backed `mmap` + ELF polish** (unlocks more musl/dynamic later)
+2. **`readlink` / `symlink` / `statx`** (real tooling)
+3. **`epoll`/`select`** (evented programs; pipes already exist)
 
 Keep qemu-connect smokes green: `signaltest`, `clonetest`, `futextest`, `echotest`,
 `insmod …/hello.ko`, `preempttest`.

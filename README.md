@@ -37,7 +37,7 @@ VFS (incl. pipes/vops), and **loadable modules** (MNX1 **and** ELF64 ET_REL `.ko
 + Linux `init_module` / `delete_module` / `finit_module`, `/bin/insmod|rmmod|lsmod`,
 `hello.{mnx,ko}`, `echo.{mnx,ko}` → `/dev/echo` with unload refcount).
 
-**Next:** leftover P8 (IDE-as-module) or **Phase 9** Linux surface.
+**Next epic: Phase 9** (broader Linux surface). IDE stays a **built-in** (`hda` is the root disk — not a P8 leftover).
 
 ### Boot & build
 - Multiboot → long mode trampoline → Rust `kmain`
@@ -283,7 +283,7 @@ Need **`make disk`** so `/lib/modules/*.mnx` and `/bin/insmod` are on the image.
 **Modules (P8a–8c — conceptual LKMs, not mainline-complete)**
 - Formats: **MNX1** and ELF64 **ET_REL** `.ko` (no vermagic, GPL ksymtab, or Linux `.ko` ABI)
 - No `depmod` / module dependency tree, signing, livepatch
-- IDE is still a **built-in**, not a loadable driver
+- IDE/`hda` is **intentionally built-in** (root filesystem lives on that disk; a disk `.ko` would need initrd)
 - Heap dual-map + PC32 trampolines (not Linux `vmalloc` + shared kernel PDPT)
 
 **Process / MM**
