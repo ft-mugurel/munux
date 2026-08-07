@@ -63,6 +63,8 @@ Requires `/bin/busybox` on `disk.img`.
 - [ ] `busybox ln t_smoke.txt t_link.txt` — **expected PASS** (`link` 86)
 - [ ] `busybox rm t_smoke.txt t_moved.txt t_link.txt` (cleanup)
 - [ ] `busybox cat /proc/meminfo` — proc readable
+- [ ] `busybox ln -s hello.txt t_link` then `busybox readlink t_link` → `hello.txt`
+- [ ] `busybox cat t_link` follows the symlink
 - [ ] Freestanding `sh` does **not** parse `|` (not a kernel ENOSYS)
 
 ---

@@ -5,7 +5,7 @@ This document freezes conventions for userspace and the kernel.
 
 | Field | Value |
 |-------|--------|
-| **Status** | **v0.3.1** — Linux x86_64 syscall numbers; table matches dispatch after P7d/P8 |
+| **Status** | **v0.3.2** — P9a symlink/readlink/statx |
 | **Arch** | **x86_64** only on `main` |
 | **Goal** | Static Linux/musl binaries use the **same numbers and register ABI** as Linux; missing calls return **`-ENOSYS`** |
 
@@ -34,8 +34,8 @@ Same as Linux x86_64:
 ## 2. Syscall numbers (implemented)
 
 Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.  
-Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` constants — e.g. `READLINK` is defined but **not** dispatched).  
-**76** numbers are dispatched (quality varies: full / partial / stub). Guest `uname` strings are still `sysname=munux`, `release=0.2.0`, `version=munux 0.2 x86_64` (independent of this ABI doc version).
+Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` constants).  
+**81** numbers are dispatched (quality varies: full / partial / stub). Guest `uname` strings are still `sysname=munux`, `release=0.2.0`, `version=munux 0.2 x86_64` (independent of this ABI doc version).
 
 | # | Linux name | munux status |
 |--:|------------|--------------|
@@ -45,7 +45,7 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` consta
 | 3 | `close` | done |
 | 4 | `stat` | done |
 | 5 | `fstat` | done |
-| 6 | `lstat` | done (no real symlinks yet → like stat) |
+| 6 | `lstat` | done (does **not** follow last symlink) |
 | 8 | `lseek` | done |
 | 9 | `mmap` | **partial** (anonymous `MAP_PRIVATE`; offset forced 0 in entry) |
 | 10 | `mprotect` | done |
@@ -77,8 +77,10 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` consta
 | 82 | `rename` | done (vops) |
 | 83 | `mkdir` | done |
 | 84 | `rmdir` | done |
-| 86 | `link` | done (vops; hard link, not symlink) |
+| 86 | `link` | done (vops; hard link; last symlink not followed) |
 | 87 | `unlink` | done |
+| 88 | `symlink` | done (ext2; fast ≤60 B or one block) |
+| 89 | `readlink` | done |
 | 90 | `chmod` | done |
 | 92 | `chown` | **stub** (always success; single-user) |
 | 95 | `umask` | done |
@@ -110,14 +112,17 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` consta
 | 262 | `newfstatat` | done |
 | 263 | `unlinkat` | partial |
 | 264 | `renameat` | partial |
+| 266 | `symlinkat` | partial (`AT_FDCWD` / abs) |
+| 267 | `readlinkat` | partial (`AT_FDCWD` / abs) |
 | 268 | `fchmodat` | partial |
 | 269 | `faccessat` | partial |
 | 280 | `utimensat` | partial |
 | 293 | `pipe2` | done (flags ignored) |
-| 313 | `finit_module` | done (load from fd; MNX1) |
+| 313 | `finit_module` | done (load from fd; MNX1 or ELF ET_REL) |
+| 332 | `statx` | done (basic stats; `AT_SYMLINK_NOFOLLOW`) |
 
 **Notable still ENOSYS** (among others): `poll`/`ppoll`/`select`/`epoll_*`,
-`readlink`/`symlink`/`statx`, `vfork`, `dup3`, `statfs`, `getpriority`/`setpriority`,
+`vfork`, `dup3`, `statfs`, `getpriority`/`setpriority`,
 `setpgid`/`getpgrp`/`setsid`, `prctl`, `execveat`, sockets. Full matrix: **[SYSCALL_COMPARE.md](SYSCALL_COMPARE.md)**.
 
 Unimplemented numbers return **`-ENOSYS` (`-38`)** and log `syscall: ENOSYS n=…`.
@@ -152,6 +157,7 @@ Common errno values:
 | ENAMETOOLONG | 36 | Name too long |
 | ENOSYS | 38 | Not implemented |
 | ENOTEMPTY | 39 | Directory not empty |
+| ELOOP | 40 | Too many symbolic links |
 | ETIMEDOUT | 110 | Futex relative wait timed out |
 
 ---
@@ -223,7 +229,8 @@ See **[MM.md](MM.md)** for kernel windows and isolation rules.
 - Virtual **`/ram`**: ramfs.
 - Live `/proc/mounts` (qemu-connect 2026-08-07): `/dev/hda / ext2`, `ramfs /ram`, `proc /proc`, `devtmpfs /dev`.
 - Writes: create/unlink/mkdir/rmdir/chmod/rename/link as wired in syscalls → vops → ext2.
-- **Not yet:** `symlink`/`readlink`/`statx`; `mount`/`umount` syscalls; full dentry cache.
+- Symlinks: `symlink`/`readlink`/`lstat` vs `stat` follow; max 8 hops (`ELOOP`).
+- **Not yet:** `mount`/`umount` syscalls; full dentry cache; file-backed `mmap`.
 
 ---
 
@@ -235,8 +242,8 @@ Foundation for threads is in; polish and next architecture:
 2. ~~Scheduler + `clone` + futex~~ ✅ (practical slices)  
 3. ~~Signals (`rt_sigreturn`, delivery, `tgkill`, Ctrl-C)~~ ✅ (practical slices)  
 4. Full signal frames (`siginfo`/`ucontext`), absolute/PI futex, musl pthread soak  
-5. ~~`pipe`/`dup`, `rename`/`link`, VFS + modules~~ ✅ P7–P8c (MNX1 + ELF ET_REL `.ko`); still missing `readlink`/`symlink`, file-backed `mmap`  
-6. Broader syscall surface (Phase 9); network optional
+5. ~~`pipe`/`dup`, `rename`/`link`, VFS + modules~~ ✅ P7–P8c  
+6. ~~`readlink`/`symlink`/`statx`~~ ✅ P9a; still missing file-backed `mmap`, `epoll`/`select`
 
 Using **wrong syscall numbers** would make Linux binaries impossible — munux keeps Linux numbers from v0.2 forward.
 
@@ -253,4 +260,5 @@ Using **wrong syscall numbers** would make Linux binaries impossible — munux k
 | 0.2+TLS | `arch_prctl`, nest-safe enter_user TLS |
 | 0.2+BusyBox | Large static ELF, brk/mmap, FS syscalls, ash bring-up |
 | **0.3** | Private mm, preempt, `clone`/tid, signals, futex (2026-08) |
-| **0.3.1** | Doc sync with P7d/P8 dispatch: **76** numbers including pipe/dup/rename/link/modules (2026-08-07) |
+| **0.3.1** | Doc sync with P7d/P8 dispatch: pipe/dup/rename/link/modules (2026-08-07) |
+| **0.3.2** | P9a: `symlink`/`readlink`/`statx`; **81** dispatched (2026-08-07) |

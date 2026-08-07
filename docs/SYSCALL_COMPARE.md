@@ -9,9 +9,9 @@ Source of munux set: `src/syscalls/mod.rs` dispatch `match` (not merely `num` co
 | Metric | Value |
 |--------|------:|
 | Linux (unistd_64.h) | **385** |
-| munux dispatched | **76** |
-| Coverage | **19.7%** |
-| Notable ENOSYS | `readlink`/`symlink`/`poll`/`epoll`/`statx`/`vfork`/… |
+| munux dispatched | **81** |
+| Coverage | **21.0%** |
+| Notable ENOSYS | `poll`/`epoll`/`vfork`/`prctl`/sockets/… |
 
 Legend in the tables below: implemented rows list munux notes; “NOT in munux” means **`-ENOSYS`**.
 
@@ -57,8 +57,10 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 82 | `rename` | RENAME | done (vops) |
 | 83 | `mkdir` | MKDIR | implemented |
 | 84 | `rmdir` | RMDIR | implemented |
-| 86 | `link` | LINK | done (vops; hard link) |
+| 86 | `link` | LINK | done (vops; hard link; last symlink not followed) |
 | 87 | `unlink` | UNLINK | implemented |
+| 88 | `symlink` | SYMLINK | done (P9a; ext2 fast + block) |
+| 89 | `readlink` | READLINK | done |
 | 90 | `chmod` | CHMOD | implemented |
 | 92 | `chown` | CHOWN | stub (always success) |
 | 95 | `umask` | UMASK | implemented |
@@ -90,11 +92,14 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 262 | `newfstatat` | NEWFSTATAT | implemented |
 | 263 | `unlinkat` | UNLINKAT | partial |
 | 264 | `renameat` | RENAMEAT | partial |
+| 266 | `symlinkat` | SYMLINKAT | partial (AT_FDCWD / abs) |
+| 267 | `readlinkat` | READLINKAT | partial (AT_FDCWD / abs) |
 | 268 | `fchmodat` | FCHMODAT | partial |
 | 269 | `faccessat` | FACCESSAT | partial |
 | 280 | `utimensat` | UTIMENSAT | partial |
 | 293 | `pipe2` | PIPE2 | done (flags ignored) |
-| 313 | `finit_module` | FINIT_MODULE | done (load from fd; MNX1) |
+| 313 | `finit_module` | FINIT_MODULE | done (load from fd; MNX1 or ELF ET_REL) |
+| 332 | `statx` | STATX | done (basic mask; AT_SYMLINK_NOFOLLOW) |
 
 ## Linux syscalls NOT in munux (ENOSYS)
 
@@ -104,8 +109,6 @@ Among many others, these were previously over-claimed as implemented in older do
 |--:|------|------|
 | 7 | `poll` | not dispatched |
 | 58 | `vfork` | not dispatched (use `fork`) |
-| 89 | `readlink` | not dispatched |
-| 88 | `symlink` | not dispatched |
 | 99 | `sysinfo` | not dispatched |
 | 109 | `setpgid` | not dispatched |
 | 111 | `getpgrp` | not dispatched |
@@ -116,7 +119,7 @@ Among many others, these were previously over-claimed as implemented in older do
 | 140 | `getpriority` | not dispatched |
 | 141 | `setpriority` | not dispatched |
 | 271 | `ppoll` | not dispatched |
-| 332 | `statx` | not dispatched |
+
 
 Full remaining list (alphabetical by number):
 
@@ -169,8 +172,6 @@ Full remaining list (alphabetical by number):
 | 78 | `getdents` |
 | 81 | `fchdir` |
 | 85 | `creat` |
-| 88 | `symlink` |
-| 89 | `readlink` |
 | 91 | `fchmod` |
 | 93 | `fchown` |
 | 94 | `lchown` |
@@ -307,8 +308,6 @@ Full remaining list (alphabetical by number):
 | 259 | `mknodat` |
 | 260 | `fchownat` |
 | 265 | `linkat` |
-| 266 | `symlinkat` |
-| 267 | `readlinkat` |
 | 270 | `pselect6` |
 | 272 | `unshare` |
 | 273 | `set_robust_list` |
@@ -367,7 +366,6 @@ Full remaining list (alphabetical by number):
 | 329 | `pkey_mprotect` |
 | 330 | `pkey_alloc` |
 | 331 | `pkey_free` |
-| 332 | `statx` |
 | 333 | `io_pgetevents` |
 | 334 | `rseq` |
 | 335 | `uretprobe` |
@@ -421,4 +419,4 @@ Full remaining list (alphabetical by number):
 | 470 | `listns` |
 | 471 | `rseq_slice_yield` |
 
-Total missing: **309** (385 − 76). The numbered list below is the Linux x86_64 set minus munux dispatch; unused holes in `unistd_64.h` are omitted.
+Total missing: **304** (385 − 81). The numbered list below is the Linux x86_64 set minus munux dispatch; unused holes in `unistd_64.h` are omitted.

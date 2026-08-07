@@ -75,6 +75,7 @@ pub mod num {
     pub const RMDIR: u64 = 84;
     pub const LINK: u64 = 86;
     pub const UNLINK: u64 = 87;
+    pub const SYMLINK: u64 = 88;
     pub const READLINK: u64 = 89;
     pub const CHMOD: u64 = 90;
     pub const CHOWN: u64 = 92;
@@ -88,6 +89,9 @@ pub mod num {
     pub const UTIMENSAT: u64 = 280;
     pub const FUTIMESAT: u64 = 261; // obsolete; busybox touch probes it
     pub const UTIMES: u64 = 235;
+    pub const SYMLINKAT: u64 = 266;
+    pub const READLINKAT: u64 = 267;
+    pub const STATX: u64 = 332;
     /// Phase 8: loadable modules (Linux numbers).
     pub const INIT_MODULE: u64 = 175;
     pub const DELETE_MODULE: u64 = 176;
@@ -116,6 +120,7 @@ mod errno {
     pub const ERANGE: i64 = 34;
     pub const ENOTTY: i64 = 25;
     pub const ENOTEMPTY: i64 = 39;
+    pub const ELOOP: i64 = 40;
     pub const ETIMEDOUT: i64 = 110;
     pub const EPIPE: i64 = 32;
     pub const EBUSY: i64 = 16;
@@ -136,6 +141,7 @@ fn map_fd_err(e: fd::FdError) -> u64 {
         fd::FdError::NoMem => errno::neg(errno::EMFILE),
         fd::FdError::Inval => errno::neg(errno::EINVAL),
         fd::FdError::Exist => errno::neg(errno::EEXIST),
+        fd::FdError::Loop => errno::neg(errno::ELOOP),
     }
 }
 
@@ -494,6 +500,11 @@ pub extern "C" fn syscall_dispatch(
         num::RENAME => sys_rename(a1, a2),
         num::RENAMEAT => sys_renameat(a1, a2, a3, a4),
         num::LINK => sys_link(a1, a2),
+        num::SYMLINK => sys_symlink(a1, a2),
+        num::READLINK => sys_readlink(a1, a2, a3),
+        num::SYMLINKAT => sys_symlinkat(a1, a2, a3),
+        num::READLINKAT => sys_readlinkat(a1, a2, a3, a4),
+        num::STATX => sys_statx(a1, a2, a3, a4, a5),
         num::PIPE | num::PIPE2 => sys_pipe(a1),
         num::DUP => sys_dup(a1),
         num::DUP2 => sys_dup2(a1, a2),
@@ -1524,14 +1535,28 @@ fn fill_console_stat(stat_buf: u64) -> u64 {
     0
 }
 
-fn stat_path(path: &str, stat_buf: u64) -> u64 {
+fn resolve_user_ino(path: &str, follow: bool) -> Result<u32, u64> {
     if !crate::fs::is_ready() {
-        return errno::neg(errno::ENOENT);
+        return Err(errno::neg(errno::ENOENT));
     }
     let cwd = crate::fs::path::cwd_inode();
-    let ino = match crate::fs::ext2::resolve_path(cwd, path) {
+    let r = if follow {
+        crate::fs::ext2::resolve_path(cwd, path)
+    } else {
+        crate::fs::ext2::resolve_lpath(cwd, path)
+    };
+    match r {
+        Ok(i) => Ok(i),
+        Err("too many symlinks") => Err(errno::neg(errno::ELOOP)),
+        Err("not a directory") => Err(errno::neg(errno::ENOTDIR)),
+        Err(_) => Err(errno::neg(errno::ENOENT)),
+    }
+}
+
+fn stat_path(path: &str, stat_buf: u64, follow: bool) -> u64 {
+    let ino = match resolve_user_ino(path, follow) {
         Ok(i) => i,
-        Err(_) => return errno::neg(errno::ENOENT),
+        Err(e) => return e,
     };
     let st = match crate::fs::ext2::inode_stat(ino) {
         Ok(s) => s,
@@ -1540,7 +1565,7 @@ fn stat_path(path: &str, stat_buf: u64) -> u64 {
     fill_linux_stat(stat_buf, ino, &st)
 }
 
-/// Linux stat(path, buf).
+/// Linux stat(path, buf) — follows last symlink.
 fn sys_stat(path_ptr: u64, stat_buf: u64) -> u64 {
     let mut path_buf = [0u8; 256];
     let n = match copy_user_path(path_ptr, &mut path_buf) {
@@ -1551,13 +1576,21 @@ fn sys_stat(path_ptr: u64, stat_buf: u64) -> u64 {
         Ok(s) => s,
         Err(_) => return errno::neg(errno::ENOENT),
     };
-    // No symlink resolution yet — same as lstat for now.
-    stat_path(path, stat_buf)
+    stat_path(path, stat_buf, true)
 }
 
-/// Linux lstat(path, buf) — same as stat until we follow symlinks.
+/// Linux lstat(path, buf) — does not follow last symlink.
 fn sys_lstat(path_ptr: u64, stat_buf: u64) -> u64 {
-    sys_stat(path_ptr, stat_buf)
+    let mut path_buf = [0u8; 256];
+    let n = match copy_user_path(path_ptr, &mut path_buf) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let path = match core::str::from_utf8(&path_buf[..n]) {
+        Ok(s) => s,
+        Err(_) => return errno::neg(errno::ENOENT),
+    };
+    stat_path(path, stat_buf, false)
 }
 
 /// Linux fstat(fd, buf).
@@ -1577,8 +1610,9 @@ fn sys_fstat(fd: u64, stat_buf: u64) -> u64 {
 }
 
 /// Linux newfstatat(dirfd, path, buf, flags) — AT_FDCWD / absolute only.
-fn sys_newfstatat(dirfd: u64, path_ptr: u64, stat_buf: u64, _flags: u64) -> u64 {
+fn sys_newfstatat(dirfd: u64, path_ptr: u64, stat_buf: u64, flags: u64) -> u64 {
     const AT_FDCWD: i32 = -100;
+    const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
     // Empty path + AT_EMPTY_PATH not supported; require a path.
     let mut path_buf = [0u8; 256];
     let n = match copy_user_path(path_ptr, &mut path_buf) {
@@ -1592,7 +1626,7 @@ fn sys_newfstatat(dirfd: u64, path_ptr: u64, stat_buf: u64, _flags: u64) -> u64 
     if !path.starts_with('/') && dirfd as i32 != AT_FDCWD {
         return errno::neg(errno::ENOSYS);
     }
-    stat_path(path, stat_buf)
+    stat_path(path, stat_buf, flags & AT_SYMLINK_NOFOLLOW == 0)
 }
 
 /// Linux lseek(fd, offset, whence).
@@ -1701,6 +1735,8 @@ fn map_fs_write_err(e: &str) -> u64 {
         "directory not empty" => errno::neg(errno::ENOTEMPTY),
         "bad name" => errno::neg(errno::EINVAL),
         "not mounted" | "not found" | "no such" => errno::neg(errno::ENOENT),
+        "too many symlinks" => errno::neg(errno::ELOOP),
+        "not a symlink" => errno::neg(errno::EINVAL),
         _ => {
             // lookup / resolve failures
             if e.contains("not found") || e.contains("ENOENT") {
@@ -1837,6 +1873,148 @@ fn sys_renameat(olddirfd: u64, old_ptr: u64, newdirfd: u64, new_ptr: u64) -> u64
         }
     }
     sys_rename(old_ptr, new_ptr)
+}
+
+fn sys_symlink(target_ptr: u64, link_ptr: u64) -> u64 {
+    let mut a = [0u8; 256];
+    let mut b = [0u8; 256];
+    let target = match user_path_str(target_ptr, &mut a) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let mut t_owned = [0u8; 256];
+    let tl = target.len().min(255);
+    t_owned[..tl].copy_from_slice(target.as_bytes());
+    let target = core::str::from_utf8(&t_owned[..tl]).unwrap_or("");
+    let link = match user_path_str(link_ptr, &mut b) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let r = unsafe {
+        asm!("cli", options(nomem, nostack));
+        let r = crate::fs::vops::vfs_symlink(target, link);
+        asm!("sti", options(nomem, nostack));
+        r
+    };
+    match r {
+        Ok(()) => 0,
+        Err(e) => map_fs_write_err(crate::fs::vops::vfs_err_str(e)),
+    }
+}
+
+fn sys_symlinkat(target_ptr: u64, newdirfd: u64, link_ptr: u64) -> u64 {
+    const AT_FDCWD: i32 = -100;
+    let mut b = [0u8; 256];
+    let link = match user_path_str(link_ptr, &mut b) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if !link.starts_with('/') && newdirfd as i32 != AT_FDCWD {
+        return errno::neg(errno::ENOSYS);
+    }
+    sys_symlink(target_ptr, link_ptr)
+}
+
+fn sys_readlink(path_ptr: u64, buf_ptr: u64, bufsiz: u64) -> u64 {
+    if bufsiz == 0 {
+        return errno::neg(errno::EINVAL);
+    }
+    if bufsiz > 4096 {
+        return errno::neg(errno::EINVAL);
+    }
+    if !user_ptr_ok(buf_ptr, bufsiz) {
+        return errno::neg(errno::EFAULT);
+    }
+    let mut pbuf = [0u8; 256];
+    let path = match user_path_str(path_ptr, &mut pbuf) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let ino = match resolve_user_ino(path, false) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let mut tbuf = [0u8; 256];
+    let n = match crate::fs::ext2::read_symlink(ino, &mut tbuf) {
+        Ok(n) => n,
+        Err("not a symlink") => return errno::neg(errno::EINVAL),
+        Err(_) => return errno::neg(errno::ENOENT),
+    };
+    let copy = n.min(bufsiz as usize);
+    unsafe {
+        core::ptr::copy_nonoverlapping(tbuf.as_ptr(), buf_ptr as *mut u8, copy);
+    }
+    copy as u64
+}
+
+fn sys_readlinkat(dirfd: u64, path_ptr: u64, buf_ptr: u64, bufsiz: u64) -> u64 {
+    const AT_FDCWD: i32 = -100;
+    let mut pbuf = [0u8; 256];
+    let path = match user_path_str(path_ptr, &mut pbuf) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if !path.starts_with('/') && dirfd as i32 != AT_FDCWD {
+        return errno::neg(errno::ENOSYS);
+    }
+    sys_readlink(path_ptr, buf_ptr, bufsiz)
+}
+
+/// Linux `struct statx` (uapi) — first 256 bytes used by musl/BusyBox.
+const STATX_SIZE: usize = 256;
+const STATX_BASIC_STATS: u32 = 0x0000_07ff;
+const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
+
+fn sys_statx(dirfd: u64, path_ptr: u64, flags: u64, _mask: u64, buf_ptr: u64) -> u64 {
+    const AT_FDCWD: i32 = -100;
+    if !user_ptr_ok(buf_ptr, STATX_SIZE as u64) {
+        return errno::neg(errno::EFAULT);
+    }
+    let mut pbuf = [0u8; 256];
+    let path = match user_path_str(path_ptr, &mut pbuf) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if !path.starts_with('/') && dirfd as i32 != AT_FDCWD {
+        return errno::neg(errno::ENOSYS);
+    }
+    let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
+    let ino = match resolve_user_ino(path, follow) {
+        Ok(i) => i,
+        Err(e) => return e,
+    };
+    let st = match crate::fs::ext2::inode_stat(ino) {
+        Ok(s) => s,
+        Err(_) => return errno::neg(errno::ENOENT),
+    };
+    let blksize = unsafe { crate::fs::ext2::fs_block_size() };
+    let blksize = if blksize == 0 { 1024 } else { blksize };
+    unsafe {
+        core::ptr::write_bytes(buf_ptr as *mut u8, 0, STATX_SIZE);
+    }
+    let p = buf_ptr as *mut u8;
+    write_u32_le(p, 0x00, STATX_BASIC_STATS); // stx_mask
+    write_u32_le(p, 0x04, blksize); // stx_blksize
+    write_u32_le(p, 0x10, st.nlink as u32);
+    write_u32_le(p, 0x14, st.uid as u32);
+    write_u32_le(p, 0x18, st.gid as u32);
+    write_u16_le(p, 0x1c, st.mode);
+    write_u64_le(p, 0x20, ino as u64);
+    write_u64_le(p, 0x28, st.size as u64);
+    write_u64_le(p, 0x30, st.blocks_512 as u64);
+    // timestamps: i64 sec at +0, u32 nsec at +8, reserved +12
+    write_u64_le(p, 0x40, st.atime as u64);
+    write_u64_le(p, 0x60, st.ctime as u64);
+    write_u64_le(p, 0x70, st.mtime as u64);
+    write_u32_le(p, 0x88, 0xdead); // stx_dev_major (fake)
+    write_u32_le(p, 0x8c, 0);
+    0
+}
+
+fn write_u16_le(base: *mut u8, off: usize, v: u16) {
+    unsafe {
+        core::ptr::copy_nonoverlapping(v.to_le_bytes().as_ptr(), base.add(off), 2);
+    }
 }
 
 fn sys_link(old_ptr: u64, new_ptr: u64) -> u64 {

@@ -37,7 +37,7 @@ VFS (incl. pipes/vops), and **loadable modules** (MNX1 **and** ELF64 ET_REL `.ko
 + Linux `init_module` / `delete_module` / `finit_module`, `/bin/insmod|rmmod|lsmod`,
 `hello.{mnx,ko}`, `echo.{mnx,ko}` → `/dev/echo` with unload refcount).
 
-**Next epic: Phase 9** (broader Linux surface). IDE stays a **built-in** (`hda` is the root disk — not a P8 leftover).
+**Phase 9a** (`symlink` / `readlink` / `statx`) is in. Next P9 slices: file-backed `mmap`, `epoll`/`select`. IDE stays a **built-in**.
 
 ### Boot & build
 - Multiboot → long mode trampoline → Rust `kmain`

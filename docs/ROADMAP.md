@@ -1,6 +1,6 @@
 # munux roadmap — Linux-compatible kernel in Rust
 
-**Last updated:** 2026-08-07 (P8 **closed**; IDE stays built-in — not a P8 gap. Next is Phase 9).
+**Last updated:** 2026-08-07 (P8 closed; **P9a** symlink/readlink/statx).
 
 **Goal:** a **Linux x86_64 ABI–compatible** kernel written in Rust, not “run every BusyBox applet.”
 
@@ -338,8 +338,9 @@ Prioritize by **kernel completeness**, not applet count:
 
 | Priority | Area | Why |
 |----------|------|-----|
-| High | `readlink`/`symlink`, `statx`, `execveat`, `prctl` | Real userspace tooling |
+| High | ~~`readlink`/`symlink`/`statx`~~ ✅ P9a | Real userspace tooling |
 | High | File-backed `mmap`, correct ELF loader | Dynamic linkers later |
+| High | `execveat`, `prctl` | Tooling / process control |
 | Medium | `epoll`/`select`, `pipe` polish | Evented programs |
 | Medium | `mount`/`umount`, ramfs, better `/proc`/`sys` | Module-loaded FS |
 | Later | Sockets / TCP | Only if networking is a goal |
@@ -422,11 +423,11 @@ munux is a **Linux-compatible teaching/research kernel in Rust** when:
 
 **Phase 8 is complete.** Do not reopen it for “make IDE a `.ko` on ext2.”
 
-**Start Phase 9** — pick one high-value Linux-surface slice:
+**P9a (`symlink` / `readlink` / `statx`) landed.** Next Phase 9 slice:
 
 1. **File-backed `mmap` + ELF polish** (unlocks more musl/dynamic later)
-2. **`readlink` / `symlink` / `statx`** (real tooling)
-3. **`epoll`/`select`** (evented programs; pipes already exist)
+2. **`epoll`/`select`** (evented programs; pipes already exist)
+3. **`execveat` / `prctl`**
 
 Keep qemu-connect smokes green: `signaltest`, `clonetest`, `futextest`, `echotest`,
 `insmod …/hello.ko`, `preempttest`.

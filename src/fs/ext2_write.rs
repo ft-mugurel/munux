@@ -6,10 +6,12 @@ use crate::fs::ext2::{
 
 const S_IFREG: u16 = 0x8000;
 const S_IFDIR: u16 = 0x4000;
+const S_IFLNK: u16 = 0xA000;
 const S_IFMT: u16 = 0xF000;
 
 const EXT2_FT_REG: u8 = 1;
 const EXT2_FT_DIR: u8 = 2;
+const EXT2_FT_SYMLINK: u8 = 7;
 
 const MAX_GROUPS: usize = 32;
 
@@ -808,12 +810,12 @@ pub fn rmdir(cwd: u32, path: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Hard link: add a second name for an existing regular file.
+/// Hard link: add a second name for an existing inode (does not follow last symlink).
 pub fn link(cwd: u32, oldpath: &str, newpath: &str) -> Result<(), &'static str> {
     if !ext2::is_mounted() {
         return Err("not mounted");
     }
-    let old_ino = ext2::resolve_path(cwd, oldpath)?;
+    let old_ino = ext2::resolve_lpath(cwd, oldpath)?;
     let mut inode = read_inode(old_ino)?;
     if inode_get_mode(&inode) & S_IFMT == S_IFDIR {
         return Err("is a directory");
@@ -825,11 +827,65 @@ pub fn link(cwd: u32, oldpath: &str, newpath: &str) -> Result<(), &'static str> 
     if ext2::lookup(parent, name).is_ok() {
         return Err("exists");
     }
-    dir_add_entry(parent, name, old_ino, EXT2_FT_REG)?;
+    let ft = if inode_get_mode(&inode) & S_IFMT == S_IFLNK {
+        EXT2_FT_SYMLINK
+    } else {
+        EXT2_FT_REG
+    };
+    dir_add_entry(parent, name, old_ino, ft)?;
     let links = inode_get_links(&inode) + 1;
     inode_set_links(&mut inode, links);
     inode_set_times(&mut inode, now());
     write_inode(old_ino, &inode)?;
+    Ok(())
+}
+
+/// Symbolic link: `linkpath` → `target` (target is stored as-is, not resolved).
+pub fn symlink(cwd: u32, target: &str, linkpath: &str) -> Result<(), &'static str> {
+    if !ext2::is_mounted() {
+        return Err("not mounted");
+    }
+    if target.is_empty() || target.len() > 1023 {
+        return Err("bad name");
+    }
+    let (parent, name) = split_parent_name(cwd, linkpath)?;
+    if name == "." || name == ".." {
+        return Err("bad name");
+    }
+    if ext2::lookup(parent, name).is_ok() {
+        return Err("exists");
+    }
+
+    let ino_num = alloc_inode()?;
+    let mut inode = zero_inode();
+    inode_set_mode(&mut inode, S_IFLNK | 0o777);
+    inode_set_uid(&mut inode, 0);
+    inode_set_links(&mut inode, 1);
+    inode_set_times(&mut inode, now());
+    inode_set_size(&mut inode, target.len() as u32);
+
+    if target.len() <= 60 {
+        // Fast symlink: target lives in i_block[15] as raw bytes.
+        inode_set_blocks(&mut inode, 0);
+        unsafe {
+            let p = core::ptr::addr_of_mut!(inode.i_block) as *mut u8;
+            core::ptr::write_bytes(p, 0, 60);
+            core::ptr::copy_nonoverlapping(target.as_ptr(), p, target.len());
+        }
+    } else {
+        let blk = alloc_block()?;
+        let bs = fs_block_size() as usize;
+        {
+            let bbuf = scratch(0);
+            bbuf.fill(0);
+            bbuf[..target.len()].copy_from_slice(target.as_bytes());
+            write_fs_block(blk, bbuf)?;
+        }
+        inode_set_block(&mut inode, 0, blk);
+        inode_set_blocks(&mut inode, (bs as u32) / 512);
+    }
+    write_inode(ino_num, &inode)?;
+    dir_add_entry(parent, name, ino_num, EXT2_FT_SYMLINK)?;
     Ok(())
 }
 

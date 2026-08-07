@@ -857,25 +857,73 @@ pub fn lookup(dir_ino: u32, name: &str) -> Result<u32, &'static str> {
 }
 
 /// Resolve path relative to `cwd_ino`. Absolute if starts with '/'.
+/// Follows symlinks on every component, including the last (like `stat`/`open`).
 pub fn resolve_path(cwd_ino: u32, path: &str) -> Result<u32, &'static str> {
+    let mut depth = 0u32;
+    resolve_path_ex(cwd_ino, path, true, &mut depth)
+}
+
+/// Like [`resolve_path`] but does **not** follow a symlink last component (`lstat`/`readlink`).
+pub fn resolve_lpath(cwd_ino: u32, path: &str) -> Result<u32, &'static str> {
+    let mut depth = 0u32;
+    resolve_path_ex(cwd_ino, path, false, &mut depth)
+}
+
+const MAX_SYMLINK_FOLLOW: u32 = 8;
+
+fn resolve_path_ex(
+    start_ino: u32,
+    path: &str,
+    follow_last: bool,
+    depth: &mut u32,
+) -> Result<u32, &'static str> {
     if path.is_empty() {
-        return Ok(cwd_ino);
+        return Ok(start_ino);
     }
     let mut ino = if path.starts_with('/') {
         ROOT_INODE
     } else {
-        cwd_ino
+        start_ino
     };
+    let mut ncomp = 0u32;
     for part in path.split('/') {
         if part.is_empty() || part == "." {
             continue;
         }
+        ncomp += 1;
+    }
+    let mut idx = 0u32;
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        idx += 1;
+        let is_last = idx == ncomp;
         if part == ".." {
-            // look up .. in directory
+            if !inode_is_dir(ino) {
+                return Err("not a directory");
+            }
             ino = lookup(ino, "..").unwrap_or(ROOT_INODE);
             continue;
         }
-        ino = lookup(ino, part)?;
+        if !inode_is_dir(ino) {
+            return Err("not a directory");
+        }
+        let next = lookup(ino, part)?;
+        let follow = !is_last || follow_last;
+        if follow && inode_is_lnk(next) {
+            *depth += 1;
+            if *depth > MAX_SYMLINK_FOLLOW {
+                return Err("too many symlinks");
+            }
+            let mut tbuf = [0u8; 256];
+            let tn = read_symlink(next, &mut tbuf)?;
+            let t = core::str::from_utf8(&tbuf[..tn]).map_err(|_| "bad symlink")?;
+            // Target is relative to the directory containing the symlink.
+            ino = resolve_path_ex(ino, t, true, depth)?;
+        } else {
+            ino = next;
+        }
     }
     Ok(ino)
 }
@@ -884,6 +932,35 @@ pub fn inode_is_dir(ino: u32) -> bool {
     read_inode(ino)
         .map(|i| inode_mode(&i) & S_IFMT == S_IFDIR)
         .unwrap_or(false)
+}
+
+pub fn inode_is_lnk(ino: u32) -> bool {
+    read_inode(ino)
+        .map(|i| inode_mode(&i) & S_IFMT == S_IFLNK)
+        .unwrap_or(false)
+}
+
+/// Copy symlink target into `out` (not NUL-terminated). Fast (≤60 B in `i_block`)
+/// or one data block.
+pub fn read_symlink(ino: u32, out: &mut [u8]) -> Result<usize, &'static str> {
+    let inode = read_inode(ino)?;
+    if inode_mode(&inode) & S_IFMT != S_IFLNK {
+        return Err("not a symlink");
+    }
+    let size = inode_size(&inode) as usize;
+    if size == 0 || out.is_empty() {
+        return Ok(0);
+    }
+    let n = size.min(out.len());
+    let blocks = unsafe { core::ptr::addr_of!(inode.i_blocks).read_unaligned() };
+    if blocks == 0 && size <= 60 {
+        unsafe {
+            let p = core::ptr::addr_of!(inode.i_block) as *const u8;
+            core::ptr::copy_nonoverlapping(p, out.as_mut_ptr(), n);
+        }
+        return Ok(n);
+    }
+    read_file(ino, 0, &mut out[..n])
 }
 
 pub fn inode_file_size(ino: u32) -> u32 {

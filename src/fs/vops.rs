@@ -98,7 +98,23 @@ pub fn vfs_link(old: &str, new: &str) -> Result<(), VfsError> {
         Ok(()) => Ok(()),
         Err("exists") => Err(VfsError::Exist),
         Err("is a directory") => Err(VfsError::IsDir),
+        Err("too many symlinks") => Err(VfsError::Loop),
         Err("not found") | Err("no such") => Err(VfsError::NoEnt),
+        Err(_) => Err(VfsError::Fault),
+    }
+}
+
+pub fn vfs_symlink(target: &str, linkpath: &str) -> Result<(), VfsError> {
+    refuse_virtual_mut(linkpath)?;
+    if !ext2::is_mounted() {
+        return Err(VfsError::NoEnt);
+    }
+    match ext2_write::symlink(cwd(), target, linkpath) {
+        Ok(()) => Ok(()),
+        Err("exists") => Err(VfsError::Exist),
+        Err("too many symlinks") => Err(VfsError::Loop),
+        Err("not found") | Err("no such") => Err(VfsError::NoEnt),
+        Err("not a directory") => Err(VfsError::NotDir),
         Err(_) => Err(VfsError::Fault),
     }
 }
@@ -112,6 +128,7 @@ pub fn vfs_err_str(e: VfsError) -> &'static str {
         VfsError::NotEmpty => "directory not empty",
         VfsError::Inval => "bad name",
         VfsError::Exist => "exists",
+        VfsError::Loop => "too many symlinks",
         VfsError::Fault | VfsError::NoDev | VfsError::NoMem => "fault",
     }
 }

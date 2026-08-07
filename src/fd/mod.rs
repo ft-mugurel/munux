@@ -321,6 +321,7 @@ pub enum FdError {
     NoMem,
     Inval,
     Exist,
+    Loop,
 }
 
 /// Physical FD table storage, one per process-table slot index.
@@ -457,6 +458,7 @@ fn vfs_to_fd(e: VfsError) -> FdError {
         VfsError::NoDev | VfsError::NoMem => FdError::NoMem,
         VfsError::Exist => FdError::Exist,
         VfsError::NotEmpty => FdError::Inval,
+        VfsError::Loop => FdError::Loop,
     }
 }
 
