@@ -56,6 +56,7 @@ Requires `/bin/busybox` on `disk.img`.
 - [ ] `busybox true` — returns to `$`
 - [ ] `busybox uname` — prints `munux` (or similar)
 - [ ] `busybox ls` / `busybox ls bin`
+- [ ] `busybox ls -l /` — `proc`/`dev`/`ram` are dirs, not “No such file”
 - [ ] `busybox echo hi`
 - [ ] `busybox touch t_smoke.txt`
 - [ ] `busybox cp t_smoke.txt t_smoke2.txt`

@@ -656,6 +656,17 @@ pub fn sys_fd_inode(fd: u64) -> Result<u32, FdError> {
     })
 }
 
+/// `fstat` via VFS (ext2, virtual mounts, pipes, chrdev).
+pub fn sys_fd_stat(fd: u64) -> Result<vcore::VfsStat, FdError> {
+    if !is_ready() || fd >= FD_MAX as u64 {
+        return Err(FdError::BadFd);
+    }
+    with_current(|t| {
+        let file = t.get(fd as usize).ok_or(FdError::BadFd)?;
+        vcore::vfs_stat_open(&file.data).map_err(vfs_to_fd)
+    })
+}
+
 /// True if fd is the console (stdin/stdout/stderr style).
 pub fn sys_fd_is_console(fd: u64) -> bool {
     if !is_ready() || fd >= FD_MAX as u64 {

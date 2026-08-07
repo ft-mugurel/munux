@@ -1402,6 +1402,353 @@ fn ramfs_write_op(f: &mut FileData, data: &[u8]) -> Result<usize, VfsError> {
     Ok(n)
 }
 
+// ---------------------------------------------------------------------------
+// stat — synthetic mounts + ext2 (so `ls -l /` does not ENOENT on proc/dev/ram)
+// ---------------------------------------------------------------------------
+
+const S_IFDIR: u16 = 0x4000;
+const S_IFREG: u16 = 0x8000;
+const S_IFCHR: u16 = 0x2000;
+const S_IFBLK: u16 = 0x6000;
+const S_IFIFO: u16 = 0x1000;
+
+/// Kernel-wide stat result (feeds Linux `stat` / `statx`).
+#[derive(Clone, Copy)]
+pub struct VfsStat {
+    pub ino: u64,
+    pub mode: u16,
+    pub nlink: u16,
+    pub uid: u16,
+    pub gid: u16,
+    pub size: u64,
+    pub blocks_512: u64,
+    pub blksize: u32,
+    pub rdev: u32,
+    pub atime: u32,
+    pub mtime: u32,
+    pub ctime: u32,
+}
+
+fn vfs_now() -> u32 {
+    1_700_000_000u32.wrapping_add(crate::interrupts::timer::ticks() as u32)
+}
+
+fn stat_dir(ino: u64) -> VfsStat {
+    let t = vfs_now();
+    VfsStat {
+        ino,
+        mode: S_IFDIR | 0o755,
+        nlink: 2,
+        uid: 0,
+        gid: 0,
+        size: 0,
+        blocks_512: 0,
+        blksize: 1024,
+        rdev: 0,
+        atime: t,
+        mtime: t,
+        ctime: t,
+    }
+}
+
+fn stat_reg(ino: u64, size: u64, mode: u16) -> VfsStat {
+    let t = vfs_now();
+    VfsStat {
+        ino,
+        mode,
+        nlink: 1,
+        uid: 0,
+        gid: 0,
+        size,
+        blocks_512: (size + 511) / 512,
+        blksize: 1024,
+        rdev: 0,
+        atime: t,
+        mtime: t,
+        ctime: t,
+    }
+}
+
+fn ext2_to_vfs_stat(ino: u32) -> Result<VfsStat, VfsError> {
+    let st = ext2::inode_stat(ino).map_err(|_| VfsError::NoEnt)?;
+    let bs = unsafe { ext2::fs_block_size() };
+    let bs = if bs == 0 { 1024 } else { bs };
+    Ok(VfsStat {
+        ino: ino as u64,
+        mode: st.mode,
+        nlink: st.nlink,
+        uid: st.uid,
+        gid: st.gid,
+        size: st.size as u64,
+        blocks_512: st.blocks_512 as u64,
+        blksize: bs,
+        rdev: 0,
+        atime: st.atime,
+        mtime: st.mtime,
+        ctime: st.ctime,
+    })
+}
+
+fn cwd_is_ext2_root() -> bool {
+    let c = path::cwd_inode();
+    c == ext2::ROOT_INODE || c == 0
+}
+
+fn map_resolve_err(e: &str) -> VfsError {
+    match e {
+        "too many symlinks" => VfsError::Loop,
+        "not a directory" => VfsError::NotDir,
+        _ => VfsError::NoEnt,
+    }
+}
+
+fn stat_proc_rest(rest: &str) -> Result<VfsStat, VfsError> {
+    let rest = rest.trim_end_matches('/');
+    if rest.is_empty() {
+        return Ok(stat_dir(VINO_PROC as u64));
+    }
+    if rest == "self" {
+        return Ok(stat_dir(VINO_PROC_SELF as u64));
+    }
+    let (which, name_ok) = match rest {
+        "meminfo" => (1u64, true),
+        "mounts" => (2, true),
+        "version" => (3, true),
+        "uptime" => (4, true),
+        "self/status" => (5, true),
+        "modules" => (6, true),
+        _ => (0, false),
+    };
+    if !name_ok {
+        return Err(VfsError::NoEnt);
+    }
+    Ok(stat_reg(0xF000_0100 + which, 0, S_IFREG | 0o444))
+}
+
+fn stat_dev_rest(rest: &str) -> Result<VfsStat, VfsError> {
+    let rest = rest.trim_end_matches('/');
+    if rest.is_empty() {
+        return Ok(stat_dir(VINO_DEV as u64));
+    }
+    if rest.contains('/') {
+        return Err(VfsError::NoEnt);
+    }
+    for (i, e) in chrdevs_mut().iter().enumerate() {
+        if e.used && chrdev_name_str(e) == rest {
+            let t = vfs_now();
+            let (mode, rdev, size, blocks) = if e.fops_id == FOPS_BLK {
+                let secs = crate::fs::blockdev::sector_count() as u64;
+                (S_IFBLK | 0o660, 0x0300, secs * 512, secs)
+            } else {
+                (S_IFCHR | 0o666, 0x0100 + i as u32, 0, 0)
+            };
+            return Ok(VfsStat {
+                ino: 0xF000_0200 + i as u64,
+                mode,
+                nlink: 1,
+                uid: 0,
+                gid: 0,
+                size,
+                blocks_512: blocks,
+                blksize: 1024,
+                rdev,
+                atime: t,
+                mtime: t,
+                ctime: t,
+            });
+        }
+    }
+    Err(VfsError::NoEnt)
+}
+
+fn stat_ram_rest(rest: &str) -> Result<VfsStat, VfsError> {
+    let rest = rest.trim_end_matches('/');
+    if rest.is_empty() {
+        return Ok(stat_dir(VINO_RAM as u64));
+    }
+    if rest.contains('/') {
+        return Err(VfsError::NoEnt);
+    }
+    for (i, slot) in ramfs_mut().iter().enumerate() {
+        if !slot.used {
+            continue;
+        }
+        let nm = core::str::from_utf8(&slot.name[..slot.name_len as usize]).unwrap_or("");
+        if nm == rest {
+            return Ok(stat_reg(
+                0xF000_0300 + i as u64,
+                slot.len as u64,
+                S_IFREG | 0o644,
+            ));
+        }
+    }
+    Err(VfsError::NoEnt)
+}
+
+/// Stat a virtual path. `Ok(None)` = not a virtual path (try ext2).
+fn try_stat_virtual(path: &str, allow_rel_mount: bool) -> Result<Option<VfsStat>, VfsError> {
+    let p = path.trim_end_matches('/');
+    let p = if p.is_empty() { "/" } else { p };
+
+    if p == "/proc" || (allow_rel_mount && (p == "proc" || p == "./proc")) {
+        return Ok(Some(stat_dir(VINO_PROC as u64)));
+    }
+    if p == "/dev" || (allow_rel_mount && (p == "dev" || p == "./dev")) {
+        return Ok(Some(stat_dir(VINO_DEV as u64)));
+    }
+    if p == "/ram" || (allow_rel_mount && (p == "ram" || p == "./ram")) {
+        return Ok(Some(stat_dir(VINO_RAM as u64)));
+    }
+
+    if let Some(rest) = p.strip_prefix("/proc/") {
+        return stat_proc_rest(rest).map(Some);
+    }
+    if allow_rel_mount {
+        if let Some(rest) = p.strip_prefix("proc/") {
+            return stat_proc_rest(rest).map(Some);
+        }
+    }
+    if let Some(rest) = p.strip_prefix("/dev/") {
+        return stat_dev_rest(rest).map(Some);
+    }
+    if allow_rel_mount {
+        if let Some(rest) = p.strip_prefix("dev/") {
+            return stat_dev_rest(rest).map(Some);
+        }
+    }
+    if let Some(rest) = p.strip_prefix("/ram/") {
+        return stat_ram_rest(rest).map(Some);
+    }
+    if allow_rel_mount {
+        if let Some(rest) = p.strip_prefix("ram/") {
+            return stat_ram_rest(rest).map(Some);
+        }
+    }
+    Ok(None)
+}
+
+fn vfs_stat_under_vdir(vino: u32, name: &str) -> Result<VfsStat, VfsError> {
+    if name.is_empty() || name == "." {
+        return Ok(stat_dir(vino as u64));
+    }
+    if name == ".." {
+        return Ok(stat_dir(ext2::ROOT_INODE as u64));
+    }
+    match vino {
+        VINO_PROC => stat_proc_rest(name),
+        VINO_PROC_SELF => {
+            if name == "status" {
+                stat_proc_rest("self/status")
+            } else {
+                Err(VfsError::NoEnt)
+            }
+        }
+        VINO_DEV => stat_dev_rest(name),
+        VINO_RAM => stat_ram_rest(name),
+        _ => Err(VfsError::NoEnt),
+    }
+}
+
+/// Path `stat`/`lstat`/`statx`: virtual mounts first, then ext2 (+ symlink follow).
+pub fn vfs_stat(path: &str, follow: bool) -> Result<VfsStat, VfsError> {
+    if path.is_empty() {
+        return Err(VfsError::NoEnt);
+    }
+    let cwd = path::cwd_inode();
+    if !path.starts_with('/') && is_virtual_ino(cwd) {
+        return vfs_stat_under_vdir(cwd, path);
+    }
+    if let Some(st) = try_stat_virtual(path, cwd_is_ext2_root() && !path.starts_with('/'))? {
+        return Ok(st);
+    }
+    if path == "/" {
+        return ext2_to_vfs_stat(ext2::ROOT_INODE);
+    }
+    if !ext2::is_mounted() {
+        return Err(VfsError::NoEnt);
+    }
+    let ino = if follow {
+        ext2::resolve_path(cwd, path)
+    } else {
+        ext2::resolve_lpath(cwd, path)
+    }
+    .map_err(map_resolve_err)?;
+    ext2_to_vfs_stat(ino)
+}
+
+/// `fstat` for an already-open file.
+pub fn vfs_stat_open(f: &FileData) -> Result<VfsStat, VfsError> {
+    match f.fops_id {
+        FOPS_EXT2_FILE | FOPS_EXT2_DIR => ext2_to_vfs_stat(f.private as u32),
+        FOPS_VDIR => Ok(stat_dir(f.private)),
+        FOPS_PROC => Ok(stat_reg(0xF000_0100 + f.private, 0, S_IFREG | 0o444)),
+        FOPS_NULL | FOPS_ZERO | FOPS_MOD => {
+            let t = vfs_now();
+            Ok(VfsStat {
+                ino: 0xF000_0200,
+                mode: S_IFCHR | 0o666,
+                nlink: 1,
+                uid: 0,
+                gid: 0,
+                size: 0,
+                blocks_512: 0,
+                blksize: 1024,
+                rdev: 0x0100,
+                atime: t,
+                mtime: t,
+                ctime: t,
+            })
+        }
+        FOPS_BLK => {
+            let secs = crate::fs::blockdev::sector_count() as u64;
+            let t = vfs_now();
+            Ok(VfsStat {
+                ino: 0xF000_02FF,
+                mode: S_IFBLK | 0o660,
+                nlink: 1,
+                uid: 0,
+                gid: 0,
+                size: secs * 512,
+                blocks_512: secs,
+                blksize: 512,
+                rdev: 0x0300,
+                atime: t,
+                mtime: t,
+                ctime: t,
+            })
+        }
+        FOPS_RAMFS_FILE => {
+            let i = f.private as usize;
+            let r = ramfs_mut();
+            let len = if i < RAMFS_SLOTS && r[i].used {
+                r[i].len as u64
+            } else {
+                0
+            };
+            Ok(stat_reg(0xF000_0300 + i as u64, len, S_IFREG | 0o644))
+        }
+        FOPS_PIPE_R | FOPS_PIPE_W => Ok(stat_reg(0xF000_0400 + f.private, 0, S_IFIFO | 0o600)),
+        FOPS_CONSOLE => {
+            let t = vfs_now();
+            Ok(VfsStat {
+                ino: 1,
+                mode: S_IFCHR | 0o620,
+                nlink: 1,
+                uid: 0,
+                gid: 0,
+                size: 0,
+                blocks_512: 0,
+                blksize: 1024,
+                rdev: 0x0501,
+                atime: t,
+                mtime: t,
+                ctime: t,
+            })
+        }
+        _ => Err(VfsError::NoEnt),
+    }
+}
+
 /// Console stdio handle for FD 0/1/2 install.
 pub fn console_file(readable: bool, writable: bool) -> FileData {
     FileData {

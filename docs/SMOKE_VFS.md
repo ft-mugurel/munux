@@ -15,6 +15,7 @@
 | Command | Expected |
 |---------|----------|
 | `ls` / `ls /` | `proc` `dev` `ram` + ext2 names |
+| `ls -l /` | same names; `stat` works on virtual mounts (not ENOENT) |
 | `ls /proc` | meminfo mounts version uptime self **modules** |
 | `ls /dev` | null zero **hda** (+ **echo** only after `insmod echo.mnx`) |
 | `ls /ram` | hello |

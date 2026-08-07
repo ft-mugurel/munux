@@ -1456,48 +1456,39 @@ fn sys_openat(dirfd: u64, path_ptr: u64, flags: u64, mode: u64) -> u64 {
 /// Linux x86_64 `struct stat` size (arch/x86/include/uapi/asm/stat.h).
 const STAT_SIZE: usize = 144;
 
-/// Fill a Linux x86_64 `struct stat` at `stat_buf` from ext2 inode metadata.
-fn fill_linux_stat(stat_buf: u64, ino: u32, st: &crate::fs::ext2::InodeStat) -> u64 {
+fn map_vfs_stat_err(e: crate::fs::vcore::VfsError) -> u64 {
+    use crate::fs::vcore::VfsError;
+    match e {
+        VfsError::NoEnt => errno::neg(errno::ENOENT),
+        VfsError::NotDir => errno::neg(errno::ENOTDIR),
+        VfsError::Loop => errno::neg(errno::ELOOP),
+        VfsError::IsDir => errno::neg(errno::EISDIR),
+        VfsError::Inval => errno::neg(errno::EINVAL),
+        _ => errno::neg(errno::ENOENT),
+    }
+}
+
+/// Fill a Linux x86_64 `struct stat` at `stat_buf` from VFS metadata.
+fn fill_linux_stat(stat_buf: u64, st: &crate::fs::vcore::VfsStat) -> u64 {
     if !user_ptr_ok(stat_buf, STAT_SIZE as u64) {
         return errno::neg(errno::EFAULT);
     }
-    // Zero the whole struct first.
     unsafe {
         core::ptr::write_bytes(stat_buf as *mut u8, 0, STAT_SIZE);
     }
-    // Layout (all little-endian, natural alignment on x86_64):
-    //  0: st_dev u64
-    //  8: st_ino u64
-    // 16: st_nlink u64
-    // 24: st_mode u32
-    // 28: st_uid u32
-    // 32: st_gid u32
-    // 36: __pad0 u32
-    // 40: st_rdev u64
-    // 48: st_size i64
-    // 56: st_blksize i64
-    // 64: st_blocks i64  (512-byte units)
-    // 72: st_atime u64
-    // 80: st_atime_nsec u64
-    // 88: st_mtime u64
-    // 96: st_mtime_nsec u64
-    //104: st_ctime u64
-    //112: st_ctime_nsec u64
-    //120: __unused[3] i64
-    let blksize = unsafe { crate::fs::ext2::fs_block_size() } as i64;
-    let blksize = if blksize == 0 { 1024 } else { blksize };
+    let blksize = if st.blksize == 0 { 1024 } else { st.blksize };
     let p = stat_buf as *mut u8;
-    write_u64_le(p, 0, 0xdead); // st_dev: fake device id
-    write_u64_le(p, 8, ino as u64);
+    write_u64_le(p, 0, 0xdead); // st_dev
+    write_u64_le(p, 8, st.ino);
     write_u64_le(p, 16, st.nlink as u64);
     write_u32_le(p, 24, st.mode as u32);
     write_u32_le(p, 28, st.uid as u32);
     write_u32_le(p, 32, st.gid as u32);
     write_u32_le(p, 36, 0);
-    write_u64_le(p, 40, 0); // st_rdev
-    write_u64_le(p, 48, st.size as u64); // st_size (positive)
+    write_u64_le(p, 40, st.rdev as u64);
+    write_u64_le(p, 48, st.size);
     write_u64_le(p, 56, blksize as u64);
-    write_u64_le(p, 64, st.blocks_512 as u64);
+    write_u64_le(p, 64, st.blocks_512);
     write_u64_le(p, 72, st.atime as u64);
     write_u64_le(p, 80, 0);
     write_u64_le(p, 88, st.mtime as u64);
@@ -1516,23 +1507,6 @@ fn write_u32_le(base: *mut u8, off: usize, v: u32) {
     unsafe {
         core::ptr::copy_nonoverlapping(v.to_le_bytes().as_ptr(), base.add(off), 4);
     }
-}
-
-fn fill_console_stat(stat_buf: u64) -> u64 {
-    if !user_ptr_ok(stat_buf, STAT_SIZE as u64) {
-        return errno::neg(errno::EFAULT);
-    }
-    unsafe {
-        core::ptr::write_bytes(stat_buf as *mut u8, 0, STAT_SIZE);
-        let p = stat_buf as *mut u8;
-        write_u64_le(p, 0, 5); // st_dev
-        write_u64_le(p, 8, 1); // st_ino
-        write_u64_le(p, 16, 1); // nlink
-        // S_IFCHR | 0666
-        write_u32_le(p, 24, 0o020666);
-        write_u64_le(p, 56, 1024); // blksize
-    }
-    0
 }
 
 fn resolve_user_ino(path: &str, follow: bool) -> Result<u32, u64> {
@@ -1554,15 +1528,10 @@ fn resolve_user_ino(path: &str, follow: bool) -> Result<u32, u64> {
 }
 
 fn stat_path(path: &str, stat_buf: u64, follow: bool) -> u64 {
-    let ino = match resolve_user_ino(path, follow) {
-        Ok(i) => i,
-        Err(e) => return e,
-    };
-    let st = match crate::fs::ext2::inode_stat(ino) {
-        Ok(s) => s,
-        Err(_) => return errno::neg(errno::ENOENT),
-    };
-    fill_linux_stat(stat_buf, ino, &st)
+    match crate::fs::vcore::vfs_stat(path, follow) {
+        Ok(st) => fill_linux_stat(stat_buf, &st),
+        Err(e) => map_vfs_stat_err(e),
+    }
 }
 
 /// Linux stat(path, buf) — follows last symlink.
@@ -1595,18 +1564,10 @@ fn sys_lstat(path_ptr: u64, stat_buf: u64) -> u64 {
 
 /// Linux fstat(fd, buf).
 fn sys_fstat(fd: u64, stat_buf: u64) -> u64 {
-    if fd::sys_fd_is_console(fd) {
-        return fill_console_stat(stat_buf);
+    match fd::sys_fd_stat(fd) {
+        Ok(st) => fill_linux_stat(stat_buf, &st),
+        Err(e) => map_fd_err(e),
     }
-    let ino = match fd::sys_fd_inode(fd) {
-        Ok(i) => i,
-        Err(e) => return map_fd_err(e),
-    };
-    let st = match crate::fs::ext2::inode_stat(ino) {
-        Ok(s) => s,
-        Err(_) => return errno::neg(errno::EBADF),
-    };
-    fill_linux_stat(stat_buf, ino, &st)
 }
 
 /// Linux newfstatat(dirfd, path, buf, flags) — AT_FDCWD / absolute only.
@@ -1979,35 +1940,29 @@ fn sys_statx(dirfd: u64, path_ptr: u64, flags: u64, _mask: u64, buf_ptr: u64) ->
         return errno::neg(errno::ENOSYS);
     }
     let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
-    let ino = match resolve_user_ino(path, follow) {
-        Ok(i) => i,
-        Err(e) => return e,
-    };
-    let st = match crate::fs::ext2::inode_stat(ino) {
+    let st = match crate::fs::vcore::vfs_stat(path, follow) {
         Ok(s) => s,
-        Err(_) => return errno::neg(errno::ENOENT),
+        Err(e) => return map_vfs_stat_err(e),
     };
-    let blksize = unsafe { crate::fs::ext2::fs_block_size() };
-    let blksize = if blksize == 0 { 1024 } else { blksize };
+    let blksize = if st.blksize == 0 { 1024 } else { st.blksize };
     unsafe {
         core::ptr::write_bytes(buf_ptr as *mut u8, 0, STATX_SIZE);
     }
     let p = buf_ptr as *mut u8;
-    write_u32_le(p, 0x00, STATX_BASIC_STATS); // stx_mask
-    write_u32_le(p, 0x04, blksize); // stx_blksize
+    write_u32_le(p, 0x00, STATX_BASIC_STATS);
+    write_u32_le(p, 0x04, blksize);
     write_u32_le(p, 0x10, st.nlink as u32);
     write_u32_le(p, 0x14, st.uid as u32);
     write_u32_le(p, 0x18, st.gid as u32);
     write_u16_le(p, 0x1c, st.mode);
-    write_u64_le(p, 0x20, ino as u64);
-    write_u64_le(p, 0x28, st.size as u64);
-    write_u64_le(p, 0x30, st.blocks_512 as u64);
-    // timestamps: i64 sec at +0, u32 nsec at +8, reserved +12
+    write_u64_le(p, 0x20, st.ino);
+    write_u64_le(p, 0x28, st.size);
+    write_u64_le(p, 0x30, st.blocks_512);
     write_u64_le(p, 0x40, st.atime as u64);
     write_u64_le(p, 0x60, st.ctime as u64);
     write_u64_le(p, 0x70, st.mtime as u64);
-    write_u32_le(p, 0x88, 0xdead); // stx_dev_major (fake)
-    write_u32_le(p, 0x8c, 0);
+    write_u32_le(p, 0x88, 0xdead);
+    write_u32_le(p, 0x8c, st.rdev);
     0
 }
 
