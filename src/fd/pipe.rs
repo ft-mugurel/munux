@@ -99,6 +99,22 @@ pub fn close_writer(id: usize) {
     maybe_free(id);
 }
 
+/// Snapshot for poll/select/epoll (no wait).
+pub fn poll_state(id: usize) -> Option<(bool, bool, bool, bool)> {
+    if id >= MAX_PIPES {
+        return None;
+    }
+    let p = &pipes_mut()[id];
+    if !p.used {
+        return None;
+    }
+    let can_read = p.len > 0 || p.nwriters == 0;
+    let can_write = (p.len as usize) < PIPE_CAP || p.nreaders == 0;
+    let rd_hup = p.nwriters == 0;
+    let wr_err = p.nreaders == 0;
+    Some((can_read, can_write, rd_hup, wr_err))
+}
+
 fn maybe_free(id: usize) {
     let p = &mut pipes_mut()[id];
     if p.nreaders == 0 && p.nwriters == 0 {

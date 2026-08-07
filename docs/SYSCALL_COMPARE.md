@@ -9,9 +9,9 @@ Source of munux set: `src/syscalls/mod.rs` dispatch `match` (not merely `num` co
 | Metric | Value |
 |--------|------:|
 | Linux (unistd_64.h) | **385** |
-| munux dispatched | **81** |
-| Coverage | **21.0%** |
-| Notable ENOSYS | `poll`/`epoll`/`vfork`/`prctl`/sockets/… |
+| munux dispatched | **88** |
+| Coverage | **22.9%** |
+| Notable ENOSYS | `vfork`/`prctl`/`pselect6`/sockets/… |
 
 Legend in the tables below: implemented rows list munux notes; “NOT in munux” means **`-ENOSYS`**.
 
@@ -26,6 +26,7 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 4 | `stat` | STAT | implemented |
 | 5 | `fstat` | FSTAT | implemented |
 | 6 | `lstat` | LSTAT | implemented |
+| 7 | `poll` | POLL | done (P9c) |
 | 8 | `lseek` | LSEEK | implemented |
 | 9 | `mmap` | MMAP | partial (`MAP_PRIVATE` anon + file copy-in; r9 offset; no `MAP_SHARED`) |
 | 10 | `mprotect` | MPROTECT | implemented |
@@ -39,6 +40,7 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 20 | `writev` | WRITEV | implemented |
 | 21 | `access` | ACCESS | implemented |
 | 22 | `pipe` | PIPE | done (P7d; cooperative) |
+| 23 | `select` | SELECT | done (P9c) |
 | 32 | `dup` | DUP | done |
 | 33 | `dup2` | DUP2 | done |
 | 35 | `nanosleep` | NANOSLEEP | implemented |
@@ -96,7 +98,12 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 267 | `readlinkat` | READLINKAT | partial (AT_FDCWD / abs) |
 | 268 | `fchmodat` | FCHMODAT | partial |
 | 269 | `faccessat` | FACCESSAT | partial |
+| 213 | `epoll_create` | EPOLL_CREATE | done |
+| 232 | `epoll_wait` | EPOLL_WAIT | done (level-triggered) |
+| 233 | `epoll_ctl` | EPOLL_CTL | done |
+| 271 | `ppoll` | PPOLL | done (sigmask ignored) |
 | 280 | `utimensat` | UTIMENSAT | partial |
+| 291 | `epoll_create1` | EPOLL_CREATE1 | done |
 | 293 | `pipe2` | PIPE2 | done (flags ignored) |
 | 313 | `finit_module` | FINIT_MODULE | done (load from fd; MNX1 or ELF ET_REL) |
 | 332 | `statx` | STATX | done (basic mask; AT_SYMLINK_NOFOLLOW) |
@@ -107,7 +114,6 @@ Among many others, these were previously over-claimed as implemented in older do
 
 | # | name | note |
 |--:|------|------|
-| 7 | `poll` | not dispatched |
 | 58 | `vfork` | not dispatched (use `fork`) |
 | 99 | `sysinfo` | not dispatched |
 | 109 | `setpgid` | not dispatched |
@@ -118,7 +124,6 @@ Among many others, these were previously over-claimed as implemented in older do
 | 138 | `fstatfs` | not dispatched |
 | 140 | `getpriority` | not dispatched |
 | 141 | `setpriority` | not dispatched |
-| 271 | `ppoll` | not dispatched |
 
 
 Full remaining list (alphabetical by number):
@@ -128,7 +133,6 @@ Full remaining list (alphabetical by number):
 |--:|------|
 | 17 | `pread64` |
 | 18 | `pwrite64` |
-| 23 | `select` |
 | 24 | `sched_yield` |
 | 25 | `mremap` |
 | 26 | `msync` |
@@ -267,7 +271,6 @@ Full remaining list (alphabetical by number):
 | 210 | `io_cancel` |
 | 211 | `get_thread_area` |
 | 212 | `lookup_dcookie` |
-| 213 | `epoll_create` |
 | 214 | `epoll_ctl_old` |
 | 215 | `epoll_wait_old` |
 | 216 | `remap_file_pages` |
@@ -282,8 +285,6 @@ Full remaining list (alphabetical by number):
 | 227 | `clock_settime` |
 | 229 | `clock_getres` |
 | 230 | `clock_nanosleep` |
-| 232 | `epoll_wait` |
-| 233 | `epoll_ctl` |
 | 236 | `vserver` |
 | 237 | `mbind` |
 | 238 | `set_mempolicy` |
@@ -327,7 +328,6 @@ Full remaining list (alphabetical by number):
 | 288 | `accept4` |
 | 289 | `signalfd4` |
 | 290 | `eventfd2` |
-| 291 | `epoll_create1` |
 | 292 | `dup3` |
 | 294 | `inotify_init1` |
 | 295 | `preadv` |
@@ -419,4 +419,4 @@ Full remaining list (alphabetical by number):
 | 470 | `listns` |
 | 471 | `rseq_slice_yield` |
 
-Total missing: **304** (385 − 81). The numbered list below is the Linux x86_64 set minus munux dispatch; unused holes in `unistd_64.h` are omitted.
+Total missing: **297** (385 − 88). The numbered list below is the Linux x86_64 set minus munux dispatch; unused holes in `unistd_64.h` are omitted.

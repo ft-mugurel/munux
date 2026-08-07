@@ -86,6 +86,8 @@ pub const FOPS_PIPE_W: u8 = 10;
 pub const FOPS_BLK: u8 = 11;
 /// Loadable-module character device (ops live in the module image).
 pub const FOPS_MOD: u8 = 12;
+/// epoll instance fd.
+pub const FOPS_EPOLL: u8 = 13;
 
 /// Synthetic inodes for virtual directories (not on ext2).
 pub const VINO_PROC: u32 = 0xF000_0001;
@@ -106,7 +108,7 @@ pub const DT_DIR: u8 = 4;
 pub const DT_REG: u8 = 8;
 pub const DT_CHR: u8 = 2;
 
-static FOPS_TABLE: [FileOperations; 13] = [
+static FOPS_TABLE: [FileOperations; 14] = [
     FileOperations {
         name: "none",
         read: None,
@@ -184,6 +186,12 @@ static FOPS_TABLE: [FileOperations; 13] = [
         read: Some(mod_read_op),
         write: Some(mod_write_op),
         release: Some(mod_release_op),
+    },
+    FileOperations {
+        name: "epoll",
+        read: None,
+        write: None,
+        release: Some(epoll_release_op),
     },
 ];
 
@@ -1197,6 +1205,10 @@ fn pipe_release_w(f: &mut FileData) {
     crate::fd::pipe::close_writer(f.private as usize);
 }
 
+fn epoll_release_op(f: &mut FileData) {
+    crate::fd::epoll::free(f.private as usize);
+}
+
 fn blk_read_op(f: &mut FileData, buf: &mut [u8]) -> Result<usize, VfsError> {
     if buf.is_empty() {
         return Ok(0);
@@ -1728,6 +1740,7 @@ pub fn vfs_stat_open(f: &FileData) -> Result<VfsStat, VfsError> {
             Ok(stat_reg(0xF000_0300 + i as u64, len, S_IFREG | 0o644))
         }
         FOPS_PIPE_R | FOPS_PIPE_W => Ok(stat_reg(0xF000_0400 + f.private, 0, S_IFIFO | 0o600)),
+        FOPS_EPOLL => Ok(stat_reg(0xF000_0500 + f.private, 0, S_IFIFO | 0o600)),
         FOPS_CONSOLE => {
             let t = vfs_now();
             Ok(VfsStat {

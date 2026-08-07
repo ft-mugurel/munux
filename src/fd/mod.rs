@@ -7,7 +7,9 @@ use crate::fs;
 use crate::fs::vcore::{self, FileData, VfsError};
 use crate::process::pcb::MAX_PROCESSES;
 
+pub mod epoll;
 pub mod pipe;
+pub mod poll;
 
 pub const FD_MAX: usize = 32;
 

@@ -66,9 +66,16 @@ pub mod num {
     // File create/remove (BusyBox touch/mkdir/rm/…):
     pub const ACCESS: u64 = 21;
     pub const PIPE: u64 = 22;
+    pub const SELECT: u64 = 23;
     pub const DUP: u64 = 32;
     pub const DUP2: u64 = 33;
+    pub const POLL: u64 = 7;
     pub const PIPE2: u64 = 293;
+    pub const EPOLL_CREATE: u64 = 213;
+    pub const EPOLL_WAIT: u64 = 232;
+    pub const EPOLL_CTL: u64 = 233;
+    pub const EPOLL_CREATE1: u64 = 291;
+    pub const PPOLL: u64 = 271;
     pub const NANOSLEEP: u64 = 35;
     pub const RENAME: u64 = 82;
     pub const MKDIR: u64 = 83;
@@ -507,6 +514,13 @@ pub extern "C" fn syscall_dispatch(
         num::READLINKAT => sys_readlinkat(a1, a2, a3, a4),
         num::STATX => sys_statx(a1, a2, a3, a4, a5),
         num::PIPE | num::PIPE2 => sys_pipe(a1),
+        num::POLL => sys_poll(a1, a2, a3),
+        num::PPOLL => sys_ppoll(a1, a2, a3, a4),
+        num::SELECT => sys_select(a1, a2, a3, a4, a5),
+        num::EPOLL_CREATE => sys_epoll_create(a1),
+        num::EPOLL_CREATE1 => sys_epoll_create1(a1),
+        num::EPOLL_CTL => sys_epoll_ctl(a1, a2, a3, a4),
+        num::EPOLL_WAIT => sys_epoll_wait(a1, a2, a3, a4),
         num::DUP => sys_dup(a1),
         num::DUP2 => sys_dup2(a1, a2),
         num::ACCESS => sys_access(a1, a2),
@@ -2001,6 +2015,321 @@ fn sys_link(old_ptr: u64, new_ptr: u64) -> u64 {
     }
 }
 
+/// Wait until `scan` reports >0 ready fds, timeout (ms) elapses, or timeout==0.
+/// `timeout_ms < 0` waits indefinitely (capped spin).
+fn wait_ready<F: FnMut() -> u64>(timeout_ms: i64, mut scan: F) -> u64 {
+    let start = crate::interrupts::ticks();
+    let ticks_need: Option<u64> = if timeout_ms < 0 {
+        None
+    } else if timeout_ms == 0 {
+        Some(0)
+    } else {
+        Some(((timeout_ms as u64) + 9) / 10)
+    };
+    // Bound so a stuck wait cannot hang QEMU forever (~60s at 100 Hz).
+    for _ in 0..6000 {
+        crate::tty::deliver_pending_sigint();
+        if let Some(sig) = crate::tty::take_force_fatal() {
+            fatal_signal_exit(sig);
+        }
+        let n = scan();
+        if n > 0 {
+            return n;
+        }
+        if let Some(need) = ticks_need {
+            if need == 0 || crate::interrupts::ticks().wrapping_sub(start) >= need {
+                return 0;
+            }
+        }
+        try_run_ready_child();
+        unsafe {
+            asm!("sti; hlt", options(nostack));
+        }
+    }
+    0
+}
+
+/// Linux poll(fds, nfds, timeout_ms).
+fn sys_poll(fds_ptr: u64, nfds: u64, timeout: u64) -> u64 {
+    const MAX_POLL: u64 = 32;
+    if nfds > MAX_POLL {
+        return errno::neg(errno::EINVAL);
+    }
+    if nfds == 0 {
+        let t = timeout as i64;
+        if t == 0 {
+            return 0;
+        }
+        return wait_ready(t, || 0);
+    }
+    let bytes = nfds.saturating_mul(8);
+    if !user_ptr_ok(fds_ptr, bytes) {
+        return errno::neg(errno::EFAULT);
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct PollFd {
+        fd: i32,
+        events: u16,
+        revents: u16,
+    }
+    let mut local = [PollFd {
+        fd: -1,
+        events: 0,
+        revents: 0,
+    }; 32];
+    let n = nfds as usize;
+    unsafe {
+        core::ptr::copy_nonoverlapping(fds_ptr as *const PollFd, local.as_mut_ptr(), n);
+    }
+    let timeout_ms = timeout as i32 as i64;
+    let ready = wait_ready(timeout_ms, || {
+        let mut c = 0u64;
+        for p in local[..n].iter_mut() {
+            p.revents = crate::fd::poll::revents(p.fd, p.events);
+            if p.revents != 0 {
+                c += 1;
+            }
+        }
+        c
+    });
+    unsafe {
+        core::ptr::copy_nonoverlapping(local.as_ptr(), fds_ptr as *mut PollFd, n);
+    }
+    ready
+}
+
+/// Linux ppoll — timespec timeout; sigmask ignored.
+fn sys_ppoll(fds: u64, nfds: u64, tsp: u64, _sigmask: u64) -> u64 {
+    let timeout_ms = if tsp == 0 {
+        -1i64
+    } else {
+        if !user_ptr_ok(tsp, 16) {
+            return errno::neg(errno::EFAULT);
+        }
+        let sec = unsafe { core::ptr::read_volatile(tsp as *const i64) };
+        let nsec = unsafe { core::ptr::read_volatile((tsp + 8) as *const i64) };
+        if sec < 0 || nsec < 0 || nsec >= 1_000_000_000 {
+            return errno::neg(errno::EINVAL);
+        }
+        if sec == 0 && nsec == 0 {
+            0
+        } else {
+            sec.saturating_mul(1000)
+                .saturating_add((nsec + 999_999) / 1_000_000)
+        }
+    };
+    sys_poll(fds, nfds, timeout_ms as u64)
+}
+
+/// Linux select(nfds, readfds, writefds, exceptfds, timeout).
+fn sys_select(nfds: u64, rfds: u64, wfds: u64, efds: u64, tv: u64) -> u64 {
+    if nfds > 1024 {
+        return errno::neg(errno::EINVAL);
+    }
+    let ncheck = (nfds as usize).min(crate::fd::FD_MAX);
+    let set_bytes = 128usize; // FD_SETSIZE 1024 bits
+    let mut rin = [0u8; 128];
+    let mut win = [0u8; 128];
+    let mut ein = [0u8; 128];
+    if rfds != 0 {
+        if !user_ptr_ok(rfds, set_bytes as u64) {
+            return errno::neg(errno::EFAULT);
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(rfds as *const u8, rin.as_mut_ptr(), set_bytes);
+        }
+    }
+    if wfds != 0 {
+        if !user_ptr_ok(wfds, set_bytes as u64) {
+            return errno::neg(errno::EFAULT);
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(wfds as *const u8, win.as_mut_ptr(), set_bytes);
+        }
+    }
+    if efds != 0 {
+        if !user_ptr_ok(efds, set_bytes as u64) {
+            return errno::neg(errno::EFAULT);
+        }
+        unsafe {
+            core::ptr::copy_nonoverlapping(efds as *const u8, ein.as_mut_ptr(), set_bytes);
+        }
+    }
+    fn bit(set: &[u8], fd: usize) -> bool {
+        let byte = fd / 8;
+        let mask = 1u8 << (fd % 8);
+        byte < set.len() && set[byte] & mask != 0
+    }
+    fn set_bit(set: &mut [u8], fd: usize) {
+        let byte = fd / 8;
+        let mask = 1u8 << (fd % 8);
+        if byte < set.len() {
+            set[byte] |= mask;
+        }
+    }
+    // EBADF if a requested fd is closed.
+    for fd in 0..ncheck {
+        let want_r = rfds != 0 && bit(&rin, fd);
+        let want_w = wfds != 0 && bit(&win, fd);
+        let want_e = efds != 0 && bit(&ein, fd);
+        if !want_r && !want_w && !want_e {
+            continue;
+        }
+        let rev = crate::fd::poll::revents(fd as i32, crate::fd::poll::POLLIN | crate::fd::poll::POLLOUT);
+        if rev & crate::fd::poll::POLLNVAL != 0 {
+            return errno::neg(errno::EBADF);
+        }
+    }
+    let timeout_ms = if tv == 0 {
+        -1i64
+    } else {
+        if !user_ptr_ok(tv, 16) {
+            return errno::neg(errno::EFAULT);
+        }
+        let sec = unsafe { core::ptr::read_volatile(tv as *const i64) };
+        let usec = unsafe { core::ptr::read_volatile((tv + 8) as *const i64) };
+        if sec < 0 || usec < 0 {
+            return errno::neg(errno::EINVAL);
+        }
+        sec.saturating_mul(1000).saturating_add((usec + 999) / 1000)
+    };
+    let ready = wait_ready(timeout_ms, || {
+        let mut c = 0u64;
+        for fd in 0..ncheck {
+            let want_r = rfds != 0 && bit(&rin, fd);
+            let want_w = wfds != 0 && bit(&win, fd);
+            let want_e = efds != 0 && bit(&ein, fd);
+            if !want_r && !want_w && !want_e {
+                continue;
+            }
+            let mut ev = 0u16;
+            if want_r {
+                ev |= crate::fd::poll::POLLIN;
+            }
+            if want_w {
+                ev |= crate::fd::poll::POLLOUT;
+            }
+            let rev = crate::fd::poll::revents(fd as i32, ev);
+            if (want_r && rev & (crate::fd::poll::POLLIN | crate::fd::poll::POLLHUP | crate::fd::poll::POLLERR) != 0)
+                || (want_w && rev & (crate::fd::poll::POLLOUT | crate::fd::poll::POLLERR) != 0)
+                || (want_e && rev & crate::fd::poll::POLLERR != 0)
+            {
+                c += 1;
+            }
+        }
+        c
+    });
+    let mut rout = [0u8; 128];
+    let mut wout = [0u8; 128];
+    let mut eout = [0u8; 128];
+    if ready > 0 {
+        for fd in 0..ncheck {
+            let want_r = rfds != 0 && bit(&rin, fd);
+            let want_w = wfds != 0 && bit(&win, fd);
+            let want_e = efds != 0 && bit(&ein, fd);
+            let mut ev = 0u16;
+            if want_r {
+                ev |= crate::fd::poll::POLLIN;
+            }
+            if want_w {
+                ev |= crate::fd::poll::POLLOUT;
+            }
+            let rev = crate::fd::poll::revents(fd as i32, ev);
+            if want_r && rev & (crate::fd::poll::POLLIN | crate::fd::poll::POLLHUP | crate::fd::poll::POLLERR) != 0
+            {
+                set_bit(&mut rout, fd);
+            }
+            if want_w && rev & (crate::fd::poll::POLLOUT | crate::fd::poll::POLLERR) != 0 {
+                set_bit(&mut wout, fd);
+            }
+            if want_e && rev & crate::fd::poll::POLLERR != 0 {
+                set_bit(&mut eout, fd);
+            }
+        }
+    }
+    if rfds != 0 {
+        unsafe {
+            core::ptr::copy_nonoverlapping(rout.as_ptr(), rfds as *mut u8, set_bytes);
+        }
+    }
+    if wfds != 0 {
+        unsafe {
+            core::ptr::copy_nonoverlapping(wout.as_ptr(), wfds as *mut u8, set_bytes);
+        }
+    }
+    if efds != 0 {
+        unsafe {
+            core::ptr::copy_nonoverlapping(eout.as_ptr(), efds as *mut u8, set_bytes);
+        }
+    }
+    ready
+}
+
+fn sys_epoll_create(size: u64) -> u64 {
+    if size == 0 {
+        return errno::neg(errno::EINVAL);
+    }
+    sys_epoll_create1(0)
+}
+
+fn sys_epoll_create1(flags: u64) -> u64 {
+    match crate::fd::epoll::create_fd(flags as u32) {
+        Ok(fd) => fd as u64,
+        Err(e) => errno::neg(e),
+    }
+}
+
+fn sys_epoll_ctl(epfd: u64, op: u64, fd: u64, event_ptr: u64) -> u64 {
+    let mut events = 0u32;
+    let mut data = 0u64;
+    if op != crate::fd::epoll::EPOLL_CTL_DEL as u64 {
+        // packed 12-byte epoll_event on x86_64
+        if !user_ptr_ok(event_ptr, 12) {
+            return errno::neg(errno::EFAULT);
+        }
+        unsafe {
+            events = core::ptr::read_unaligned(event_ptr as *const u32);
+            data = core::ptr::read_unaligned((event_ptr + 4) as *const u64);
+        }
+    }
+    match crate::fd::epoll::ctl(epfd as usize, op as i32, fd as i32, events, data) {
+        Ok(()) => 0,
+        Err(e) => errno::neg(e),
+    }
+}
+
+fn sys_epoll_wait(epfd: u64, events_ptr: u64, maxevents: u64, timeout: u64) -> u64 {
+    if maxevents == 0 || maxevents > 32 {
+        return errno::neg(errno::EINVAL);
+    }
+    if !user_ptr_ok(events_ptr, maxevents.saturating_mul(12)) {
+        return errno::neg(errno::EFAULT);
+    }
+    let max = maxevents as usize;
+    let timeout_ms = timeout as i32 as i64;
+    let mut buf = [(0u32, 0u64); 32];
+    wait_ready(timeout_ms, || {
+        match crate::fd::epoll::collect(epfd as usize, &mut buf[..max]) {
+            Ok(c) => c as u64,
+            Err(_) => 0,
+        }
+    });
+    // Re-collect to fill `buf` (level-triggered: still ready).
+    let n = match crate::fd::epoll::collect(epfd as usize, &mut buf[..max]) {
+        Ok(c) => c,
+        Err(e) => return errno::neg(e),
+    };
+    for i in 0..n {
+        let p = events_ptr + (i as u64) * 12;
+        unsafe {
+            core::ptr::write_unaligned(p as *mut u32, buf[i].0);
+            core::ptr::write_unaligned((p + 4) as *mut u64, buf[i].1);
+        }
+    }
+    n as u64
+}
+
 fn sys_pipe(pipefd_ptr: u64) -> u64 {
     if !user_ptr_ok(pipefd_ptr, 8) {
         return errno::neg(errno::EFAULT);
@@ -2625,6 +2954,12 @@ fn load_exec_image(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage,
         || path.ends_with("/mmaptest")
     {
         return load(crate::embedded_mmaptest::MMAPTEST_ELF);
+    }
+    if path == "polltest"
+        || path == "/bin/polltest"
+        || path.ends_with("/polltest")
+    {
+        return load(crate::embedded_polltest::POLLTEST_ELF);
     }
     if path == "preempttest"
         || path == "/bin/preempttest"

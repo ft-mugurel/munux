@@ -20,6 +20,7 @@ pub mod embedded_sh;
 pub mod embedded_archprctl;
 pub mod embedded_brktest;
 pub mod embedded_mmaptest;
+pub mod embedded_polltest;
 pub mod embedded_preempttest;
 pub mod embedded_clonetest;
 pub mod embedded_futextest;

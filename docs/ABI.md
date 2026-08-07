@@ -5,7 +5,7 @@ This document freezes conventions for userspace and the kernel.
 
 | Field | Value |
 |-------|--------|
-| **Status** | **v0.3.2** — P9a symlink/readlink/statx |
+| **Status** | **v0.3.3** — P9c poll/select/epoll |
 | **Arch** | **x86_64** only on `main` |
 | **Goal** | Static Linux/musl binaries use the **same numbers and register ABI** as Linux; missing calls return **`-ENOSYS`** |
 
@@ -35,7 +35,7 @@ Same as Linux x86_64:
 
 Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.  
 Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` constants).  
-**81** numbers are dispatched (quality varies: full / partial / stub). Guest `uname` strings are still `sysname=munux`, `release=0.2.0`, `version=munux 0.2 x86_64` (independent of this ABI doc version).
+**88** numbers are dispatched (quality varies: full / partial / stub). Guest `uname` strings are still `sysname=munux`, `release=0.2.0`, `version=munux 0.2 x86_64` (independent of this ABI doc version).
 
 | # | Linux name | munux status |
 |--:|------------|--------------|
@@ -46,6 +46,7 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` consta
 | 4 | `stat` | done |
 | 5 | `fstat` | done |
 | 6 | `lstat` | done (does **not** follow last symlink) |
+| 7 | `poll` | done (P9c; ms timeout; pipes/TTY/files) |
 | 8 | `lseek` | done |
 | 9 | `mmap` | **partial** (`MAP_PRIVATE` anon + file snapshot; offset via r9, page-aligned; no `MAP_SHARED` writeback) |
 | 10 | `mprotect` | done |
@@ -59,6 +60,7 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` consta
 | 20 | `writev` | done |
 | 21 | `access` | done |
 | 22 | `pipe` | done (P7d; cooperative) |
+| 23 | `select` | done (P9c; fd_set first 32 fds) |
 | 32 | `dup` | done |
 | 33 | `dup2` | done |
 | 35 | `nanosleep` | done (PIT-based; interruptible by fatal signals) |
@@ -118,10 +120,15 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` consta
 | 269 | `faccessat` | partial |
 | 280 | `utimensat` | partial |
 | 293 | `pipe2` | done (flags ignored) |
+| 213 | `epoll_create` | done |
+| 232 | `epoll_wait` | done (level-triggered) |
+| 233 | `epoll_ctl` | done (ADD/DEL/MOD) |
+| 271 | `ppoll` | done (sigmask ignored) |
+| 291 | `epoll_create1` | done (CLOEXEC ignored) |
 | 313 | `finit_module` | done (load from fd; MNX1 or ELF ET_REL) |
 | 332 | `statx` | done (basic stats; `AT_SYMLINK_NOFOLLOW`) |
 
-**Notable still ENOSYS** (among others): `poll`/`ppoll`/`select`/`epoll_*`,
+**Notable still ENOSYS** (among others): `pselect6`, `epoll_pwait`,
 `vfork`, `dup3`, `statfs`, `getpriority`/`setpriority`,
 `setpgid`/`getpgrp`/`setsid`, `prctl`, `execveat`, sockets. Full matrix: **[SYSCALL_COMPARE.md](SYSCALL_COMPARE.md)**.
 
@@ -243,7 +250,7 @@ Foundation for threads is in; polish and next architecture:
 3. ~~Signals (`rt_sigreturn`, delivery, `tgkill`, Ctrl-C)~~ ✅ (practical slices)  
 4. Full signal frames (`siginfo`/`ucontext`), absolute/PI futex, musl pthread soak  
 5. ~~`pipe`/`dup`, `rename`/`link`, VFS + modules~~ ✅ P7–P8c  
-6. ~~`readlink`/`symlink`/`statx`~~ ✅ P9a; ~~file `mmap` private snapshot~~ ✅ P9b; still missing `MAP_SHARED` writeback, `epoll`/`select`
+6. ~~`readlink`/`symlink`/`statx`~~ ✅ P9a; ~~file mmap~~ ✅ P9b; ~~poll/select/epoll~~ ✅ P9c
 
 Using **wrong syscall numbers** would make Linux binaries impossible — munux keeps Linux numbers from v0.2 forward.
 
@@ -262,3 +269,4 @@ Using **wrong syscall numbers** would make Linux binaries impossible — munux k
 | **0.3** | Private mm, preempt, `clone`/tid, signals, futex (2026-08) |
 | **0.3.1** | Doc sync with P7d/P8 dispatch: pipe/dup/rename/link/modules (2026-08-07) |
 | **0.3.2** | P9a: `symlink`/`readlink`/`statx`; **81** dispatched (2026-08-07) |
+| **0.3.3** | P9c: poll/select/epoll; **88** dispatched |

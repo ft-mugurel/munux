@@ -37,7 +37,7 @@ VFS (incl. pipes/vops), and **loadable modules** (MNX1 **and** ELF64 ET_REL `.ko
 + Linux `init_module` / `delete_module` / `finit_module`, `/bin/insmod|rmmod|lsmod`,
 `hello.{mnx,ko}`, `echo.{mnx,ko}` → `/dev/echo` with unload refcount).
 
-**Phase 9a–9b** in: symlink/statx + file-backed `MAP_PRIVATE` mmap (page-aligned offset). Next: `epoll`/`select`. IDE stays built-in.
+**Phase 9a–9c** in: symlink/statx, file mmap, **poll/select/epoll**. Next: `execveat`/`prctl`. IDE stays built-in.
 
 ### Boot & build
 - Multiboot → long mode trampoline → Rust `kmain`
