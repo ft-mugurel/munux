@@ -1,6 +1,6 @@
 # Linux x86_64 syscalls vs munux
 
-**Last updated:** 2026-08-02.  
+**Last updated:** 2026-08-07.  
 Source of Linux names/numbers: host `/usr/include/asm/unistd_64.h`.  
 Source of munux set: `src/syscalls/mod.rs` dispatch `match` (not merely `num` constants).
 
@@ -9,9 +9,9 @@ Source of munux set: `src/syscalls/mod.rs` dispatch `match` (not merely `num` co
 | Metric | Value |
 |--------|------:|
 | Linux (unistd_64.h) | **385** |
-| munux dispatched | **~65** |
-| Coverage | **~17%** |
-| Notable ENOSYS | `pipe`/`dup`/`rename`/`link`/`readlink`/`poll`/… |
+| munux dispatched | **~75** (approx; see table) |
+| Coverage | **~19%** |
+| Notable ENOSYS | `readlink`/`symlink`/`poll`/`epoll`/`statx`/`vfork`/… |
 
 Legend in the tables below: implemented rows list munux notes; “NOT in munux” means **`-ENOSYS`**.
 
@@ -38,6 +38,9 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 19 | `readv` | READV | implemented |
 | 20 | `writev` | WRITEV | implemented |
 | 21 | `access` | ACCESS | implemented |
+| 22 | `pipe` | PIPE | done (P7d; cooperative) |
+| 32 | `dup` | DUP | done |
+| 33 | `dup2` | DUP2 | done |
 | 35 | `nanosleep` | NANOSLEEP | implemented |
 | 39 | `getpid` | GETPID | implemented (returns **tgid**) |
 | 40 | `sendfile` | SENDFILE | partial |
@@ -67,7 +70,11 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 110 | `getppid` | GETPPID | implemented |
 | 115 | `getgroups` | GETGROUPS | implemented |
 | 158 | `arch_prctl` | ARCH_PRCTL | implemented |
+| 82 | `rename` | RENAME | done (vops) |
+| 86 | `link` | LINK | done (vops) |
 | 162 | `sync` | SYNC | stub (no-op) |
+| 175 | `init_module` | INIT_MODULE | done (MNX1 image; params ignored) |
+| 176 | `delete_module` | DELETE_MODULE | done (EBUSY if refcount > 0) |
 | 186 | `gettid` | GETTID | done (unique tid) |
 | 200 | `tkill` | TKILL | done |
 | 202 | `futex` | FUTEX | done (WAIT/WAKE + PRIVATE) |
@@ -82,9 +89,12 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 261 | `futimesat` | FUTIMESAT | partial |
 | 262 | `newfstatat` | NEWFSTATAT | implemented |
 | 263 | `unlinkat` | UNLINKAT | partial |
+| 264 | `renameat` | RENAMEAT | partial |
 | 268 | `fchmodat` | FCHMODAT | partial |
 | 269 | `faccessat` | FACCESSAT | partial |
 | 280 | `utimensat` | UTIMENSAT | partial |
+| 293 | `pipe2` | PIPE2 | done (flags ignored) |
+| 313 | `finit_module` | FINIT_MODULE | done (load from fd; MNX1) |
 
 ## Linux syscalls NOT in munux (ENOSYS)
 
@@ -93,12 +103,9 @@ Among many others, these were previously over-claimed as implemented in older do
 | # | name | note |
 |--:|------|------|
 | 7 | `poll` | not dispatched |
-| 22 | `pipe` | not dispatched |
-| 32 | `dup` | not dispatched |
-| 33 | `dup2` | not dispatched |
 | 58 | `vfork` | not dispatched (use `fork`) |
-| 82 | `rename` | not dispatched (BusyBox `mv` fails) |
-| 86 | `link` | not dispatched |
+| 89 | `readlink` | not dispatched |
+| 88 | `symlink` | not dispatched |
 | 99 | `sysinfo` | not dispatched |
 | 109 | `setpgid` | not dispatched |
 | 111 | `getpgrp` | not dispatched |
@@ -108,9 +115,8 @@ Among many others, these were previously over-claimed as implemented in older do
 | 138 | `fstatfs` | not dispatched |
 | 140 | `getpriority` | not dispatched |
 | 141 | `setpriority` | not dispatched |
-| 264 | `renameat` | not dispatched |
 | 271 | `ppoll` | not dispatched |
-| 293 | `pipe2` | not dispatched |
+| 332 | `statx` | not dispatched |
 
 Full remaining list (alphabetical by number):
 
@@ -227,8 +233,6 @@ Full remaining list (alphabetical by number):
 | 172 | `iopl` |
 | 173 | `ioperm` |
 | 174 | `create_module` |
-| 175 | `init_module` |
-| 176 | `delete_module` |
 | 177 | `get_kernel_syms` |
 | 178 | `query_module` |
 | 179 | `quotactl` |
@@ -345,7 +349,6 @@ Full remaining list (alphabetical by number):
 | 310 | `process_vm_readv` |
 | 311 | `process_vm_writev` |
 | 312 | `kcmp` |
-| 313 | `finit_module` |
 | 314 | `sched_setattr` |
 | 315 | `sched_getattr` |
 | 316 | `renameat2` |

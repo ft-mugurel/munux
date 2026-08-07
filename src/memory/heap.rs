@@ -85,7 +85,7 @@ pub fn heap_alloc_count() -> usize {
     unsafe { ALLOC_COUNT }
 }
 
-fn grow_heap(min_bytes: usize) -> bool {
+fn grow_heap(min_bytes: usize, also_map_cr3: u64) -> bool {
     let pages = align_up(min_bytes.max(1), FRAME_SIZE) / FRAME_SIZE;
     unsafe {
         let add = (pages * FRAME_SIZE) as u64;
@@ -94,8 +94,15 @@ fn grow_heap(min_bytes: usize) -> bool {
         }
         let old = HEAP_END;
         let mut v = HEAP_END;
+        // Active CR3 is kernel (see `with_kernel_heap`). Permanently map into
+        // kernel tables; also map into the calling process so it can use the
+        // returned pointer without faulting.
+        let kcr3 = paging::kernel_cr3();
         for _ in 0..pages {
-            paging::create_page(v, PAGE_KERNEL_RW);
+            let frame = paging::create_page(v, PAGE_KERNEL_RW);
+            if also_map_cr3 != 0 && also_map_cr3 != kcr3 {
+                paging::map_page_in(also_map_cr3, v, frame, PAGE_KERNEL_RW);
+            }
             v = v.wrapping_add(FRAME_SIZE as u64);
         }
         HEAP_END = v;
@@ -162,25 +169,81 @@ unsafe fn coalesce(addr: u64) {
     }
 }
 
+/// Run heap metadata ops under the kernel CR3. `caller_cr3` is the process we
+/// return to — new heap pages are also mapped there so the returned pointer is
+/// usable after the switch back.
+fn with_kernel_heap<F, R>(f: F) -> R
+where
+    F: FnOnce(u64) -> R,
+{
+    let prev = paging::current_cr3();
+    let k = paging::kernel_cr3();
+    if k != 0 && prev != k {
+        paging::switch_mm(k);
+    }
+    // Pass the caller's CR3 so grow can dual-map; 0 if already on kernel.
+    let caller = if k != 0 && prev != k { prev } else { 0 };
+    let r = f(caller);
+    if k != 0 && prev != k && prev != 0 {
+        paging::switch_mm(prev);
+    }
+    r
+}
+
+/// Ensure `[virt, virt+len)` is mapped in `cr3` by copying PTEs from kernel CR3.
+fn ensure_caller_mapped(caller_cr3: u64, virt: u64, len: usize) {
+    if caller_cr3 == 0 || len == 0 {
+        return;
+    }
+    let k = paging::kernel_cr3();
+    if k == 0 || caller_cr3 == k {
+        return;
+    }
+    let start = virt & !(FRAME_SIZE as u64 - 1);
+    let end = (virt + len as u64 + FRAME_SIZE as u64 - 1) & !(FRAME_SIZE as u64 - 1);
+    let mut v = start;
+    while v < end {
+        if paging::virt_to_phys_in(caller_cr3, v).is_none() {
+            if let Some(phys) = paging::virt_to_phys_in(k, v) {
+                paging::map_page_in(
+                    caller_cr3,
+                    v,
+                    crate::memory::pmm::PhysAddr::new(phys & !0xFFF),
+                    PAGE_KERNEL_RW,
+                );
+            }
+        }
+        v = v.wrapping_add(FRAME_SIZE as u64);
+        if v == 0 {
+            break;
+        }
+    }
+}
+
 pub fn kmalloc(size: usize) -> Option<*mut u8> {
     if !is_initialized() || size == 0 {
         return None;
     }
-    let need = align_up(HEADER_SIZE + size, ALIGN) as u32;
-    unsafe {
-        for _ in 0..16 {
-            if let Some(p) = alloc_from_free(need) {
-                BYTES_ALLOCATED = BYTES_ALLOCATED.saturating_add(size);
-                ALLOC_COUNT = ALLOC_COUNT.saturating_add(1);
-                ptr::write_bytes(p, 0, size);
-                return Some(p);
-            }
-            if !grow_heap(need as usize) {
-                return None;
+    with_kernel_heap(|caller_cr3| {
+        let need = align_up(HEADER_SIZE + size, ALIGN) as u32;
+        unsafe {
+            for _ in 0..16 {
+                if let Some(p) = alloc_from_free(need) {
+                    BYTES_ALLOCATED = BYTES_ALLOCATED.saturating_add(size);
+                    ALLOC_COUNT = ALLOC_COUNT.saturating_add(1);
+                    ptr::write_bytes(p, 0, size);
+                    // Header + payload must be visible in the caller's CR3.
+                    let total = need as usize;
+                    ensure_caller_mapped(caller_cr3, header_of(p), total);
+                    return Some(p);
+                }
+                if !grow_heap(need as usize, caller_cr3) {
+                    return None;
+                }
             }
         }
-    }
-    None
+        None
+    })
 }
 
 unsafe fn alloc_from_free(need: u32) -> Option<*mut u8> {
@@ -241,43 +304,47 @@ pub fn kfree(p: *mut u8) {
     if p.is_null() || !is_initialized() {
         return;
     }
-    let addr = header_of(p);
-    unsafe {
-        if addr < KERNEL_HEAP_START || addr >= HEAP_END {
-            return;
+    with_kernel_heap(|_| {
+        let addr = header_of(p);
+        unsafe {
+            if addr < KERNEL_HEAP_START || addr >= HEAP_END {
+                return;
+            }
+            let h = hdr_read(addr);
+            if h.magic != MAGIC_USED {
+                return;
+            }
+            let usable = h.size as usize - HEADER_SIZE;
+            BYTES_ALLOCATED = BYTES_ALLOCATED.saturating_sub(usable);
+            ALLOC_COUNT = ALLOC_COUNT.saturating_sub(1);
+            hdr_write(
+                addr,
+                BlockHeader {
+                    magic: MAGIC_FREE,
+                    size: h.size,
+                    next_free: 0,
+                },
+            );
+            insert_free(addr);
         }
-        let h = hdr_read(addr);
-        if h.magic != MAGIC_USED {
-            return;
-        }
-        let usable = h.size as usize - HEADER_SIZE;
-        BYTES_ALLOCATED = BYTES_ALLOCATED.saturating_sub(usable);
-        ALLOC_COUNT = ALLOC_COUNT.saturating_sub(1);
-        hdr_write(
-            addr,
-            BlockHeader {
-                magic: MAGIC_FREE,
-                size: h.size,
-                next_free: 0,
-            },
-        );
-        insert_free(addr);
-    }
+    });
 }
 
 pub fn ksize(p: *mut u8) -> Option<usize> {
     if p.is_null() || !is_initialized() {
         return None;
     }
-    let addr = header_of(p);
-    unsafe {
-        if addr < KERNEL_HEAP_START || addr >= HEAP_END {
-            return None;
+    with_kernel_heap(|_| {
+        let addr = header_of(p);
+        unsafe {
+            if addr < KERNEL_HEAP_START || addr >= HEAP_END {
+                return None;
+            }
+            let h = hdr_read(addr);
+            if h.magic != MAGIC_USED {
+                return None;
+            }
+            Some(h.size as usize - HEADER_SIZE)
         }
-        let h = hdr_read(addr);
-        if h.magic != MAGIC_USED {
-            return None;
-        }
-        Some(h.size as usize - HEADER_SIZE)
-    }
+    })
 }

@@ -6,7 +6,8 @@ Prompt: userspace **`$`** after boot. Kernel debug shell appears only after `exi
 
 **Focused feature smokes (details):**  
 [SMOKE_PREEMPT](docs/SMOKE_PREEMPT.md) · [SMOKE_CLONE](docs/SMOKE_CLONE.md) ·  
-[SMOKE_SIGNAL](docs/SMOKE_SIGNAL.md) · [SMOKE_FUTEX](docs/SMOKE_FUTEX.md)
+[SMOKE_SIGNAL](docs/SMOKE_SIGNAL.md) · [SMOKE_FUTEX](docs/SMOKE_FUTEX.md) ·  
+[SMOKE_VFS](docs/SMOKE_VFS.md) · [SMOKE_MODULE](docs/SMOKE_MODULE.md)
 
 ---
 
@@ -60,7 +61,22 @@ Requires `/bin/busybox` on `disk.img`.
 - [ ] `busybox cp t_smoke.txt t_smoke2.txt` (if `cp` works without rename)
 - [ ] `busybox rm t_smoke.txt` (and cleanup)
 - [ ] `busybox cat /proc/meminfo` (or similar) — proc readable when available
-- [ ] Note: `busybox mv` may still **ENOSYS** (`rename` not dispatched) — expected until FS polish
+- [ ] Note: `busybox mv` / `ln` use VFS rename/link (P7d) — report if ENOSYS returns
+
+---
+
+## Modules (Phase 8) — needs `make disk`
+
+From **`$`**:
+
+- [ ] `ls /lib/modules` — `hello.mnx` `echo.mnx`
+- [ ] `insmod /lib/modules/hello.mnx` then `lsmod` then `rmmod hello`
+- [ ] `insmod /lib/modules/echo.mnx` then `ls /dev` shows `echo`
+- [ ] `echotest` — `PASS` (read/write + EBUSY while open)
+- [ ] `rmmod echo` then `ls /dev` has no `echo`
+- [ ] `cat /proc/modules` matches `lsmod`
+
+Kernel shell after `exit` also has `insmod`/`rmmod`/`lsmod` (bare `hello` can be builtin).
 
 ---
 

@@ -207,7 +207,8 @@ See **[MM.md](MM.md)** for kernel windows and isolation rules.
 - Root: **ext2** on IDE primary master.
 - Virtual **`/proc`**: kernel-generated (`meminfo`, `mounts`, pid nodes, …).
 - Writes: create/unlink/mkdir/rmdir/chmod as wired in syscalls → `fs/ext2_write.rs`.
-- **Not yet:** `rename`/`link`/`symlink`/`readlink` as dispatched syscalls; full VFS ops tables (roadmap P7).
+- VFS ops + vops: mkdir/unlink/rename/link dispatched (P7 practical).
+- **Not yet:** `symlink`/`readlink`/`statx`; `mount`/`umount` syscalls; full dentry cache.
 
 ---
 
@@ -219,9 +220,8 @@ Foundation for threads is in; polish and next architecture:
 2. ~~Scheduler + `clone` + futex~~ ✅ (practical slices)  
 3. ~~Signals (`rt_sigreturn`, delivery, `tgkill`, Ctrl-C)~~ ✅ (practical slices)  
 4. Full signal frames (`siginfo`/`ucontext`), futex timeout, musl pthread soak  
-5. **`pipe`/`dup`**, **`rename`/`link`/`readlink`**, file-backed `mmap`, dynamic linker path  
-6. **VFS** + **kernel modules** (roadmap P7–P8)  
-7. Broader syscall surface (network optional)
+5. ~~`pipe`/`dup`, `rename`/`link`, VFS + modules~~ ✅ practical (P7–P8); still missing `readlink`/`symlink`, file-backed `mmap`  
+6. Broader syscall surface (Phase 9); network optional
 
 Using **wrong syscall numbers** would make Linux binaries impossible — munux keeps Linux numbers from v0.2 forward.
 

@@ -592,11 +592,11 @@ install_sig_ign:
 	ret
 
 section .rodata
-msg_banner:	db "munux sh  |  help  exit  cd  pwd  vi  |  fork/exec /bin/<cmd>", 10
+msg_banner:	db "munux sh  |  help exit cd pwd vi lsmod insmod rmmod echotest", 10
 msg_banner_len equ $ - msg_banner
 msg_prompt:	db "$ "
 msg_prompt_len equ $ - msg_prompt
-msg_help:	db "help clear/cls exit cd pwd uname brktest mmaptest; other = /bin/cmd", 10
+msg_help:	db "help clear/cls exit cd pwd; modules: lsmod insmod rmmod; other=/bin/cmd", 10
 		db "edit: Backspace/Del; vi <file> = mini editor", 10
 msg_help_len equ $ - msg_help
 msg_nl:		db 10

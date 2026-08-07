@@ -408,6 +408,13 @@ fn dirent_rec_len(name_len: usize) -> usize {
     (n + 3) & !3 // align 4
 }
 
+fn write_u32_le(buf: &mut [u8], off: usize, v: u32) {
+    buf[off] = v as u8;
+    buf[off + 1] = (v >> 8) as u8;
+    buf[off + 2] = (v >> 16) as u8;
+    buf[off + 3] = (v >> 24) as u8;
+}
+
 fn read_u32_le(buf: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]])
 }
@@ -798,6 +805,114 @@ pub fn rmdir(cwd: u32, path: &str) -> Result<(), &'static str> {
     }
     inode_set_times(&mut pino, now());
     write_inode(parent, &pino)?;
+    Ok(())
+}
+
+/// Hard link: add a second name for an existing regular file.
+pub fn link(cwd: u32, oldpath: &str, newpath: &str) -> Result<(), &'static str> {
+    if !ext2::is_mounted() {
+        return Err("not mounted");
+    }
+    let old_ino = ext2::resolve_path(cwd, oldpath)?;
+    let mut inode = read_inode(old_ino)?;
+    if inode_get_mode(&inode) & S_IFMT == S_IFDIR {
+        return Err("is a directory");
+    }
+    let (parent, name) = split_parent_name(cwd, newpath)?;
+    if name == "." || name == ".." {
+        return Err("bad name");
+    }
+    if ext2::lookup(parent, name).is_ok() {
+        return Err("exists");
+    }
+    dir_add_entry(parent, name, old_ino, EXT2_FT_REG)?;
+    let links = inode_get_links(&inode) + 1;
+    inode_set_links(&mut inode, links);
+    inode_set_times(&mut inode, now());
+    write_inode(old_ino, &inode)?;
+    Ok(())
+}
+
+/// Rename within the filesystem (same device). Directories only if empty-safe:
+/// we allow rename of files always; directories only if not crossing in a way that
+/// needs ".." update when parent changes — we update ".." when parent differs.
+pub fn rename(cwd: u32, oldpath: &str, newpath: &str) -> Result<(), &'static str> {
+    if !ext2::is_mounted() {
+        return Err("not mounted");
+    }
+    if oldpath == newpath {
+        return Ok(());
+    }
+    let (old_parent, old_name) = split_parent_name(cwd, oldpath)?;
+    if old_name == "." || old_name == ".." {
+        return Err("bad name");
+    }
+    let child = ext2::lookup(old_parent, old_name)?;
+    let mut inode = read_inode(child)?;
+    let is_dir = inode_get_mode(&inode) & S_IFMT == S_IFDIR;
+
+    let (new_parent, new_name) = split_parent_name(cwd, newpath)?;
+    if new_name == "." || new_name == ".." {
+        return Err("bad name");
+    }
+
+    // If destination exists: for files, unlink it; for dirs, must be empty.
+    if let Ok(dst) = ext2::lookup(new_parent, new_name) {
+        if dst == child {
+            return Ok(());
+        }
+        let dino = read_inode(dst)?;
+        if inode_get_mode(&dino) & S_IFMT == S_IFDIR {
+            // try rmdir semantics
+            rmdir(cwd, newpath)?;
+        } else {
+            unlink(cwd, newpath)?;
+        }
+    }
+
+    let ft = if is_dir { EXT2_FT_DIR } else { EXT2_FT_REG };
+    dir_add_entry(new_parent, new_name, child, ft)?;
+    let _ = dir_remove_entry(old_parent, old_name)?;
+
+    if is_dir && old_parent != new_parent {
+        // Update ".." in the directory to new parent.
+        // Read first block, find .., rewrite.
+        let blk = inode_get_block(&inode, 0);
+        if blk != 0 {
+            let bbuf = scratch(0);
+            read_fs_block(blk, bbuf)?;
+            let bs = fs_block_size() as usize;
+            let mut pos = 0usize;
+            while pos + 8 <= bs {
+                let ino = read_u32_le(bbuf, pos);
+                let rec = read_u16_le(bbuf, pos + 4) as usize;
+                if rec == 0 {
+                    break;
+                }
+                let nlen = bbuf[pos + 6] as usize;
+                if ino != 0 && nlen == 2 && bbuf[pos + 8] == b'.' && bbuf[pos + 9] == b'.' {
+                    write_u32_le(bbuf, pos, new_parent);
+                    write_fs_block(blk, bbuf)?;
+                    break;
+                }
+                pos += rec;
+            }
+        }
+        // nlink: old parent --, new parent ++
+        let mut op = read_inode(old_parent)?;
+        let l = inode_get_links(&op);
+        if l > 1 {
+            inode_set_links(&mut op, l - 1);
+        }
+        write_inode(old_parent, &op)?;
+        let mut np = read_inode(new_parent)?;
+        let l = inode_get_links(&np) + 1;
+        inode_set_links(&mut np, l);
+        write_inode(new_parent, &np)?;
+    }
+
+    inode_set_times(&mut inode, now());
+    write_inode(child, &inode)?;
     Ok(())
 }
 

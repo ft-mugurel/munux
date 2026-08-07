@@ -70,6 +70,9 @@ pub fn dispatch(line: &str) {
         "preempt" | "sched" => cmd_preempt_status(),
         "preempttest" => cmd_preempttest(),
         "vfs" | "mounts" => cmd_vfs(),
+        "insmod" => cmd_insmod(rest),
+        "rmmod" => cmd_rmmod(rest),
+        "lsmod" => crate::module::lsmod(),
         "echo" => {
             console::println(rest);
         }
@@ -819,6 +822,9 @@ fn cmd_help() {
     console::println("  preempt/sched   Show IRQ preemption counter");
     console::println("  preempttest     Specific IRQ preempt checks (A-G)");
     console::println("  vfs / mounts    Phase 7 VFS mounts + chrdevs");
+    console::println("  insmod <name|path>  Load module (hello or /lib/modules/*.mnx)");
+    console::println("  rmmod <name>    Unload module");
+    console::println("  lsmod           List loaded modules + export count");
     console::println("  reboot / halt   Machine control");
     console::println("  fault [ud2]     Trigger CPU exception");
     console::println("  panic           Rust panic");
@@ -830,6 +836,38 @@ fn cmd_help() {
     console::println("  pwd / cd        Working directory");
     console::println("  ps              Process table");
     console::println("Editing: Backspace/Del erase previous character");
+}
+
+fn cmd_insmod(rest: &str) {
+    let arg = rest.split_whitespace().next().unwrap_or("");
+    if arg.is_empty() {
+        console::println("usage: insmod <name|/path/to.mnx>");
+        console::println("  bare name looks in /lib/modules/<name>.mnx");
+        console::println("  'hello' falls back to builtin if file missing");
+        return;
+    }
+    match crate::module::insmod(arg) {
+        Ok(()) => {}
+        Err(e) => {
+            console::print("insmod: ");
+            console::println(e.as_str());
+        }
+    }
+}
+
+fn cmd_rmmod(rest: &str) {
+    let arg = rest.split_whitespace().next().unwrap_or("");
+    if arg.is_empty() {
+        console::println("usage: rmmod <name>");
+        return;
+    }
+    match crate::module::rmmod(arg) {
+        Ok(()) => {}
+        Err(e) => {
+            console::print("rmmod: ");
+            console::println(e.as_str());
+        }
+    }
 }
 
 fn cmd_vfs() {
@@ -849,7 +887,7 @@ fn cmd_vfs() {
             console::println(name);
         }
     }
-    console::println("  chrdev: /dev/null /dev/zero");
+    console::println("  chrdev: /dev/null /dev/zero /dev/hda (+ /dev/echo via echo.mnx)");
     console::println("  ramfs:  /ram/hello (seeded)");
     console::println("  proc:   /proc/meminfo mounts version uptime self/status");
     console::print("  blkdev: ");

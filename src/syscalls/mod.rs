@@ -65,8 +65,10 @@ pub mod num {
     pub const NEWFSTATAT: u64 = 262; // fstatat
     // File create/remove (BusyBox touch/mkdir/rm/…):
     pub const ACCESS: u64 = 21;
-    pub const PIPE: u64 = 22; // not yet
+    pub const PIPE: u64 = 22;
+    pub const DUP: u64 = 32;
     pub const DUP2: u64 = 33;
+    pub const PIPE2: u64 = 293;
     pub const NANOSLEEP: u64 = 35;
     pub const RENAME: u64 = 82;
     pub const MKDIR: u64 = 83;
@@ -86,6 +88,11 @@ pub mod num {
     pub const UTIMENSAT: u64 = 280;
     pub const FUTIMESAT: u64 = 261; // obsolete; busybox touch probes it
     pub const UTIMES: u64 = 235;
+    /// Phase 8: loadable modules (Linux numbers).
+    pub const INIT_MODULE: u64 = 175;
+    pub const DELETE_MODULE: u64 = 176;
+    /// Optional: load from open fd (modern insmod); not required if open+read+init_module.
+    pub const FINIT_MODULE: u64 = 313;
 }
 
 /// Linux-style: return `-errno` as `u64` bit pattern (negative i64).
@@ -110,6 +117,8 @@ mod errno {
     pub const ENOTTY: i64 = 25;
     pub const ENOTEMPTY: i64 = 39;
     pub const ETIMEDOUT: i64 = 110;
+    pub const EPIPE: i64 = 32;
+    pub const EBUSY: i64 = 16;
 
     #[inline]
     pub fn neg(e: i64) -> u64 {
@@ -482,6 +491,12 @@ pub extern "C" fn syscall_dispatch(
         num::RMDIR => sys_rmdir(a1),
         num::UNLINK => sys_unlink(a1),
         num::UNLINKAT => sys_unlinkat(a1, a2, a3),
+        num::RENAME => sys_rename(a1, a2),
+        num::RENAMEAT => sys_renameat(a1, a2, a3, a4),
+        num::LINK => sys_link(a1, a2),
+        num::PIPE | num::PIPE2 => sys_pipe(a1),
+        num::DUP => sys_dup(a1),
+        num::DUP2 => sys_dup2(a1, a2),
         num::ACCESS => sys_access(a1, a2),
         num::FACCESSAT => sys_faccessat(a1, a2, a3, a4),
         num::CHMOD => sys_chmod(a1, a2),
@@ -516,6 +531,9 @@ pub extern "C" fn syscall_dispatch(
         num::GETTIMEOFDAY => sys_gettimeofday(a1, a2),
         num::CLOCK_GETTIME => sys_clock_gettime(a1, a2),
         num::FCNTL => sys_fcntl(a1, a2, a3),
+        num::INIT_MODULE => sys_init_module(a1, a2, a3),
+        num::DELETE_MODULE => sys_delete_module(a1, a2),
+        num::FINIT_MODULE => sys_finit_module(a1, a2, a3),
         num::EXIT => {
             let status = a1 as i32;
             finish_exit(status, false);
@@ -896,6 +914,17 @@ fn take_ready_child() -> Option<crate::process::UserFrame> {
         crate::process::sched::take_ready(child)
     } else {
         None
+    }
+}
+
+/// Public helper for pipes: run one Ready child if any, else pause.
+pub fn try_run_ready_child() {
+    if let Some(frame) = take_ready_child() {
+        run_user_frame(frame);
+    } else {
+        unsafe {
+            core::arch::asm!("sti; pause", options(nostack, nomem));
+        }
     }
 }
 
@@ -1695,17 +1724,16 @@ fn sys_mkdir(path_ptr: u64, _mode: u64) -> u64 {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let cwd = crate::fs::path::cwd_inode();
     // cli: ext2 write uses static block scratches (not re-entrant with IRQ).
     let r = unsafe {
         asm!("cli", options(nomem, nostack));
-        let r = crate::fs::ext2_write::mkdir(cwd, path);
+        let r = crate::fs::vops::vfs_mkdir(path);
         asm!("sti", options(nomem, nostack));
         r
     };
     match r {
-        Ok(_) => 0,
-        Err(e) => map_fs_write_err(e),
+        Ok(()) => 0,
+        Err(e) => map_fs_write_err(crate::fs::vops::vfs_err_str(e)),
     }
 }
 
@@ -1731,16 +1759,15 @@ fn sys_rmdir(path_ptr: u64) -> u64 {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let cwd = crate::fs::path::cwd_inode();
     let r = unsafe {
         asm!("cli", options(nomem, nostack));
-        let r = crate::fs::ext2_write::rmdir(cwd, path);
+        let r = crate::fs::vops::vfs_rmdir(path);
         asm!("sti", options(nomem, nostack));
         r
     };
     match r {
         Ok(()) => 0,
-        Err(e) => map_fs_write_err(e),
+        Err(e) => map_fs_write_err(crate::fs::vops::vfs_err_str(e)),
     }
 }
 
@@ -1751,16 +1778,121 @@ fn sys_unlink(path_ptr: u64) -> u64 {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let cwd = crate::fs::path::cwd_inode();
     let r = unsafe {
         asm!("cli", options(nomem, nostack));
-        let r = crate::fs::ext2_write::unlink(cwd, path);
+        let r = crate::fs::vops::vfs_unlink(path);
         asm!("sti", options(nomem, nostack));
         r
     };
     match r {
         Ok(()) => 0,
-        Err(e) => map_fs_write_err(e),
+        Err(e) => map_fs_write_err(crate::fs::vops::vfs_err_str(e)),
+    }
+}
+
+fn sys_rename(old_ptr: u64, new_ptr: u64) -> u64 {
+    let mut a = [0u8; 256];
+    let mut b = [0u8; 256];
+    let old = match user_path_str(old_ptr, &mut a) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    // copy old to stack string we own
+    let mut old_owned = [0u8; 256];
+    let ol = old.len().min(255);
+    old_owned[..ol].copy_from_slice(old.as_bytes());
+    let old = core::str::from_utf8(&old_owned[..ol]).unwrap_or("");
+    let new = match user_path_str(new_ptr, &mut b) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let r = unsafe {
+        asm!("cli", options(nomem, nostack));
+        let r = crate::fs::vops::vfs_rename(old, new);
+        asm!("sti", options(nomem, nostack));
+        r
+    };
+    match r {
+        Ok(()) => 0,
+        Err(e) => map_fs_write_err(crate::fs::vops::vfs_err_str(e)),
+    }
+}
+
+fn sys_renameat(olddirfd: u64, old_ptr: u64, newdirfd: u64, new_ptr: u64) -> u64 {
+    const AT_FDCWD: i32 = -100;
+    if olddirfd as i32 != AT_FDCWD || newdirfd as i32 != AT_FDCWD {
+        // only AT_FDCWD for now unless absolute paths
+        let mut a = [0u8; 256];
+        let mut b = [0u8; 256];
+        let old = match user_path_str(old_ptr, &mut a) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        let new = match user_path_str(new_ptr, &mut b) {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
+        if !old.starts_with('/') || !new.starts_with('/') {
+            return errno::neg(errno::ENOSYS);
+        }
+    }
+    sys_rename(old_ptr, new_ptr)
+}
+
+fn sys_link(old_ptr: u64, new_ptr: u64) -> u64 {
+    let mut a = [0u8; 256];
+    let mut b = [0u8; 256];
+    let old = match user_path_str(old_ptr, &mut a) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let mut old_owned = [0u8; 256];
+    let ol = old.len().min(255);
+    old_owned[..ol].copy_from_slice(old.as_bytes());
+    let old = core::str::from_utf8(&old_owned[..ol]).unwrap_or("");
+    let new = match user_path_str(new_ptr, &mut b) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let r = unsafe {
+        asm!("cli", options(nomem, nostack));
+        let r = crate::fs::vops::vfs_link(old, new);
+        asm!("sti", options(nomem, nostack));
+        r
+    };
+    match r {
+        Ok(()) => 0,
+        Err(e) => map_fs_write_err(crate::fs::vops::vfs_err_str(e)),
+    }
+}
+
+fn sys_pipe(pipefd_ptr: u64) -> u64 {
+    if !user_ptr_ok(pipefd_ptr, 8) {
+        return errno::neg(errno::EFAULT);
+    }
+    match crate::fd::sys_pipe() {
+        Ok((r, w)) => {
+            unsafe {
+                core::ptr::write_volatile(pipefd_ptr as *mut i32, r as i32);
+                core::ptr::write_volatile((pipefd_ptr + 4) as *mut i32, w as i32);
+            }
+            0
+        }
+        Err(e) => map_fd_err(e),
+    }
+}
+
+fn sys_dup(fd: u64) -> u64 {
+    match crate::fd::sys_dup(fd) {
+        Ok(n) => n as u64,
+        Err(e) => map_fd_err(e),
+    }
+}
+
+fn sys_dup2(old: u64, new: u64) -> u64 {
+    match crate::fd::sys_dup2(old, new) {
+        Ok(n) => n as u64,
+        Err(e) => map_fd_err(e),
     }
 }
 
@@ -1906,6 +2038,115 @@ fn sys_futimesat(dirfd: u64, path_ptr: u64, _times: u64) -> u64 {
 
 fn sys_utimes(path_ptr: u64, _times: u64) -> u64 {
     sys_utimensat((-100i32) as u64, path_ptr, 0, 0)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8 — init_module / delete_module / finit_module (Linux numbers)
+// ---------------------------------------------------------------------------
+
+fn module_err_to_errno(e: crate::module::ModuleError) -> u64 {
+    use crate::module::ModuleError;
+    use crate::module::mnx::MnxError;
+    match e {
+        ModuleError::Exists => errno::neg(errno::EEXIST),
+        ModuleError::NotFound => errno::neg(errno::ENOENT),
+        ModuleError::Busy => errno::neg(errno::EBUSY),
+        ModuleError::NoSlot | ModuleError::Format(MnxError::Oom) => errno::neg(errno::ENOMEM),
+        ModuleError::BadPath | ModuleError::Format(MnxError::BadName) => errno::neg(errno::EINVAL),
+        ModuleError::Io => errno::neg(errno::EFAULT),
+        ModuleError::InitFail | ModuleError::Format(MnxError::InitFail) => {
+            errno::neg(errno::EPERM)
+        }
+        ModuleError::Format(_) => errno::neg(errno::ENOEXEC),
+    }
+}
+
+/// `long init_module(void *umod, unsigned long len, const char *uargs);`
+///
+/// `uargs` (module parameters) is accepted and ignored for now.
+fn sys_init_module(umod: u64, len: u64, _uargs: u64) -> u64 {
+    if len == 0 || len > crate::module::mnx::MNX_MAX_FILE as u64 {
+        return errno::neg(errno::EINVAL);
+    }
+    if !user_ptr_ok(umod, len) {
+        return errno::neg(errno::EFAULT);
+    }
+    // Copy into kernel buffer so reloc/init never touch user pages mid-flight.
+    let kbuf = match crate::memory::kmalloc(len as usize) {
+        Some(p) => p,
+        None => return errno::neg(errno::ENOMEM),
+    };
+    unsafe {
+        core::ptr::copy_nonoverlapping(umod as *const u8, kbuf, len as usize);
+    }
+    let slice = unsafe { core::slice::from_raw_parts(kbuf, len as usize) };
+    let rc = match crate::module::init_from_image(slice, "") {
+        Ok(()) => 0u64,
+        Err(e) => module_err_to_errno(e),
+    };
+    crate::memory::kfree(kbuf);
+    rc
+}
+
+/// `long delete_module(const char *name_user, unsigned int flags);`
+fn sys_delete_module(name_ptr: u64, _flags: u64) -> u64 {
+    let mut name_buf = [0u8; 64];
+    let n = match copy_user_path(name_ptr, &mut name_buf) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let name = match core::str::from_utf8(&name_buf[..n]) {
+        Ok(s) => s,
+        Err(_) => return errno::neg(errno::EINVAL),
+    };
+    match crate::module::rmmod(name) {
+        Ok(()) => 0,
+        Err(e) => module_err_to_errno(e),
+    }
+}
+
+/// `long finit_module(int fd, const char *uargs, int flags);`
+///
+/// Reads the open file into a kernel buffer and loads it (Linux-compatible
+/// entry point used by modern userspace `insmod`).
+fn sys_finit_module(fd: u64, _uargs: u64, _flags: u64) -> u64 {
+    let max = crate::module::mnx::MNX_MAX_FILE;
+    let kbuf = match crate::memory::kmalloc(max) {
+        Some(p) => p,
+        None => return errno::neg(errno::ENOMEM),
+    };
+    let mut total = 0usize;
+    loop {
+        if total >= max {
+            break;
+        }
+        let slice = unsafe {
+            core::slice::from_raw_parts_mut(kbuf.add(total), max - total)
+        };
+        match fd::sys_read_into(fd, slice) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(fd::FdError::BadFd) => {
+                crate::memory::kfree(kbuf);
+                return errno::neg(errno::EBADF);
+            }
+            Err(_) => {
+                crate::memory::kfree(kbuf);
+                return errno::neg(errno::EFAULT);
+            }
+        }
+    }
+    if total == 0 {
+        crate::memory::kfree(kbuf);
+        return errno::neg(errno::EINVAL);
+    }
+    let slice = unsafe { core::slice::from_raw_parts(kbuf, total) };
+    let rc = match crate::module::init_from_image(slice, "") {
+        Ok(()) => 0u64,
+        Err(e) => module_err_to_errno(e),
+    };
+    crate::memory::kfree(kbuf);
+    rc
 }
 
 // ENOTDIR used above

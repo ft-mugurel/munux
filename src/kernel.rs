@@ -31,6 +31,7 @@ pub mod fs;
 pub mod gdt;
 pub mod interrupts;
 pub mod memory;
+pub mod module;
 pub mod process;
 pub mod shell;
 pub mod syscalls;
@@ -139,6 +140,7 @@ pub extern "C" fn kmain() -> ! {
     process::init_processes();
     init_syscalls();
     fs::init();
+    module::init();
 
     console::set_color(0x0A);
     console::println("boot OK");

@@ -23,8 +23,8 @@ Primary architecture targets:
 
 1. ~~**Per-process address spaces** and a real process model~~ ✅  
 2. ~~**Threads** (`clone`, TID, futex, TLS) + signals~~ ✅ (practical slices)  
-3. **Loadable kernel modules** (ELF loader, symbol export, init/exit) — needs VFS first  
-4. Growing syscall / VFS surface on top of that foundation  
+3. ~~**Loadable kernel modules** (export table, init/exit, chardev)~~ ✅ practical (MNX1, not mainline `.ko`)  
+4. Growing syscall / VFS surface on top of that foundation (Phase 9)  
 
 See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phased plan.
 
@@ -32,7 +32,13 @@ See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phased plan.
 
 ## Current status (x86_64 `main`)
 
-**Foundation phases 1–6 are in place** (mm, preempt, clone/threads, signals, futex). **Phase 7a VFS** started: ops tables, mounts, chrdev. Next: finish P7 polish → **kernel modules (P8)**.
+**Phases 1–8 practical** are in place: mm, preempt, threads, signals, futex,
+VFS (incl. pipes/vops), and **loadable modules** (MNX1 + Linux `init_module` /
+`delete_module` / `finit_module`, `/bin/insmod|rmmod|lsmod`, `hello.mnx`,
+`echo.mnx` → `/dev/echo` with unload refcount).
+
+**Next epic: Phase 9** (broader Linux surface). Optional P8 polish: ELF ET_REL
+`.ko`-style loader (not required for the north-star demo).
 
 ### Boot & build
 - Multiboot → long mode trampoline → Rust `kmain`
@@ -63,9 +69,18 @@ See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phased plan.
 - **BusyBox** static binary on disk for regression probes
 
 ### Filesystem & FDs
-- **VFS 7a/7b:** `file_operations` + mounts (ext2, **ramfs**, **proc**) + chrdev + **blkdev `hda`**
-- ATA PIO **IDE** via blockdev; **ext2** via VFS fops; **`/proc`** synthetic files
-- FD tables: **clone on fork**; **share on `CLONE_FILES`** (refcount); open/read/write via VFS
+- **VFS (P7 practical):** fops, mounts (ext2/ramfs/proc), chrdev, blkdev `hda`,
+  vops (mkdir/unlink/rename/link), pipes, dup/dup2
+- ATA PIO **IDE** via blockdev; **ext2** via VFS; **`/proc`** + **`/dev`** virtual
+- FD tables: clone/share; open/read/write via VFS
+
+### Modules (P8 practical)
+- `src/module/`: `struct module`, export table, **MNX1** loader + relocs
+- Syscalls: `init_module` (175), `delete_module` (176), `finit_module` (313)
+- `/proc/modules`; userspace `/bin/insmod` `/bin/rmmod` `/bin/lsmod`
+- `hello.mnx` (printk); `echo.mnx` registers `/dev/echo` via C-ABI `register_chrdev`
+- Unload blocked while the device is open (`echotest` checks EBUSY)
+- Kernel debug shell also has `insmod` / `rmmod` / `lsmod` (after `exit` from sh)
 
 ### Console
 - VGA 80×25 text, PS/2 keyboard (US QWERTY)
@@ -85,7 +100,8 @@ See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phased plan.
 | **[docs/SMOKE_CLONE.md](docs/SMOKE_CLONE.md)** | `clone` / tid smoke |
 | **[docs/SMOKE_SIGNAL.md](docs/SMOKE_SIGNAL.md)** | Signals + Ctrl-C |
 | **[docs/SMOKE_FUTEX.md](docs/SMOKE_FUTEX.md)** | Futex join smoke |
-| **[docs/SMOKE_VFS.md](docs/SMOKE_VFS.md)** | VFS mounts / fops (Phase 7a) |
+| **[docs/SMOKE_VFS.md](docs/SMOKE_VFS.md)** | VFS mounts / fops / pipes (Phase 7) |
+| **[docs/SMOKE_MODULE.md](docs/SMOKE_MODULE.md)** | Modules: insmod/rmmod/lsmod, hello + `/dev/echo` |
 | **[docs/BUSYBOX_SUITE_REPORT.md](docs/BUSYBOX_SUITE_REPORT.md)** | Strict BusyBox regression suite |
 | **[SMOKE.md](SMOKE.md)** | Manual smoke checklist |
 
@@ -130,6 +146,7 @@ make size         # kernel / ISO size report
 | `help` | Builtins |
 | `cd` / `pwd` / `clear` / `exit` | Builtins |
 | `ls`, `cat`, … | `fork` + `execve` of `/bin/<cmd>` (embedded or disk) |
+| `insmod` / `rmmod` / `lsmod` / `echotest` | Loadable modules (need disk `.mnx`) |
 | `busybox …` | Static BusyBox from rootfs |
 
 ### Kernel debug shell (after `exit` from sh)
@@ -137,7 +154,8 @@ make size         # kernel / ISO size report
 | Command | Description |
 |---------|-------------|
 | `help` / `about` | Help / summary |
-| `ps` / `pmm` / … | Debug dumps |
+| `ps` / `pmm` / `vfs` | Debug dumps |
+| `insmod` / `rmmod` / `lsmod` | Same module core as userspace (bare `hello` can be builtin) |
 | `run sh` / `run init` | Re-enter userspace shell |
 | `ls` / `cat` / … | Kernel-side FS helpers |
 
@@ -150,7 +168,7 @@ QEMU → GRUB (or -kernel) → Multiboot / long-mode entry
   → GDT + TSS
   → IDT + PIC + keyboard + PIT
   → PMM → paging → heap
-  → process table + FDs + ext2 mount
+  → process table + FDs + ext2 mount + VFS + module subsystem
   → init_syscalls (STAR/LSTAR, syscall_entry)
   → load /bin/sh → enter_user_mode
   → interactive $ shell (or kernel shell after exit)
@@ -181,7 +199,8 @@ Coverage vs Linux: **[docs/SYSCALL_COMPARE.md](docs/SYSCALL_COMPARE.md)**.
 ├── multiboot/          # Multiboot header, exceptions, timer, syscall.asm
 ├── linker/linker.ld
 ├── grub/grub.cfg
-├── userland/           # freestanding asm apps (sh, ls, cat, …)
+├── userland/           # freestanding asm apps (sh, ls, cat, insmod, …)
+├── modules/            # MNX1 sources (hello.asm, echo.asm)
 ├── scripts/            # busybox_suite.py (strict regression)
 ├── docs/               # ABI, roadmap, syscall compare, suite reports
 ├── SMOKE.md
@@ -191,10 +210,11 @@ Coverage vs Linux: **[docs/SYSCALL_COMPARE.md](docs/SYSCALL_COMPARE.md)**.
     ├── interrupts/     # IDT, PIC, exceptions, keyboard, timer
     ├── memory/         # PMM, paging (clone_mm), heap, Multiboot
     ├── process/        # PCB, fork, clone, sched, signals, futex, sys
+    ├── module/         # loadable modules (export, MNX1, list)
     ├── tty.rs          # Ctrl-C → SIGINT hooks
     ├── drivers/ide.rs
-    ├── fs/             # ext2, path, procfs, vfs helpers
-    ├── fd/             # FD tables (clone / CLONE_FILES share)
+    ├── fs/             # ext2, path, procfs, vcore/vops, vfs
+    ├── fd/             # FD tables + pipe
     ├── elf/            # ELF64 load + stack/auxv
     ├── syscalls/       # Linux x86_64 dispatch
     ├── shell/          # kernel debug shell
@@ -225,9 +245,10 @@ rustup toolchain install nightly
 1. Manual checklist: **[SMOKE.md](SMOKE.md)**  
 2. Focused tests (userspace / kernel shell):
    - `$ signaltest` · `$ clonetest` · `$ futextest` · `$ forktest`
+   - `$ insmod /lib/modules/echo.mnx` · `$ echotest` · `$ rmmod echo`
    - `munux> preempttest` (IRQ preemption A–G)
 3. Strict BusyBox suite: `scripts/busybox_suite.py` → `docs/BUSYBOX_SUITE_REPORT.md`  
-4. Headless: `make iso`, then **qemu-connect** with prompt `$`
+4. Headless: `make iso disk`, then **qemu-connect** with prompt `$`
 
 ### Quick smoke after boot
 
@@ -236,25 +257,44 @@ $ signaltest          # caught + parent ok
 $ clonetest
 $ futextest
 $ forktest
+$ insmod /lib/modules/hello.mnx
+$ lsmod
+$ rmmod hello
+$ insmod /lib/modules/echo.mnx
+$ echotest            # PASS + EBUSY while open
+$ rmmod echo
 $ busybox true
 $ busybox sleep 30    # optional: Ctrl+C should return to $
 $ exit
 munux> preempttest    # pass=7 fail=0
 ```
 
+Need **`make disk`** so `/lib/modules/*.mnx` and `/bin/insmod` are on the image.
+
 ---
 
 ## Known limitations (current)
 
-- **No loadable kernel modules** (next major epic after VFS ops tables)
+**Modules (P8 — practical, not Linux-complete)**
+- Format is **MNX1**, not a mainline Linux **`.ko`** (no ET_REL, vermagic, GPL symbols)
+- No `depmod` / module dependency tree, signing, livepatch
+- IDE is still a **built-in**, not a loadable driver
+- Heap dual-map + CR3 switch is a teaching workaround (not Linux `vmalloc` + shared kernel PDPT)
+
+**Process / MM**
 - **No full Linux signal frame** (`siginfo` / `ucontext` / SA_NODEFER / RT signals)
 - **No futex timeout / requeue / PI**; pthread mutex soak incomplete
 - **No in-kernel preemption**; IRQ preempt gated under deep nest (depth ≥ 2 cooperative)
-- **No networking**
+- **No higher-half kernel**; identity map + high heap for modules
+- **No file-backed `mmap`** (anonymous mmap exists)
+
+**VFS / syscalls / HW**
+- No `mount`/`umount` syscalls; no full dentry cache
+- **No networking**, no SMP
 - Subset of Linux syscalls; rest **`-ENOSYS`**
 - VGA only (no serial console yet); US QWERTY only
 
-See **[docs/ROADMAP.md](docs/ROADMAP.md)** for P7+ (VFS → modules → broader surface).
+See **[docs/ROADMAP.md](docs/ROADMAP.md)** (Phase 9 next) and **[docs/SMOKE_MODULE.md](docs/SMOKE_MODULE.md)**.
 
 ---
 

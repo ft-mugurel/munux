@@ -1,17 +1,17 @@
 # munux roadmap — Linux-compatible kernel in Rust
 
-**Last updated:** 2026-08-02 (aligned with README; foundation P1–P6 practical slices done).
+**Last updated:** 2026-08-07 (P1–P8 practical landed; next is Phase 9).
 
 **Goal:** a **Linux x86_64 ABI–compatible** kernel written in Rust, not “run every BusyBox applet.”
 
 BusyBox / musl binaries are **compatibility probes** (does `fork`/`clone`/`mmap`/ELF load match Linux?). They are not the product definition.
 
-**Related docs:** [README](../README.md) · [ABI](ABI.md) · [MM](MM.md) · [SYSCALL_COMPARE](SYSCALL_COMPARE.md) · [SMOKE_PREEMPT](SMOKE_PREEMPT.md) · [SMOKE_CLONE](SMOKE_CLONE.md) · [SMOKE_SIGNAL](SMOKE_SIGNAL.md) · [SMOKE_FUTEX](SMOKE_FUTEX.md) · [BusyBox suite](BUSYBOX_SUITE_REPORT.md)
+**Related docs:** [README](../README.md) · [ABI](ABI.md) · [MM](MM.md) · [SYSCALL_COMPARE](SYSCALL_COMPARE.md) · [SMOKE_PREEMPT](SMOKE_PREEMPT.md) · [SMOKE_CLONE](SMOKE_CLONE.md) · [SMOKE_SIGNAL](SMOKE_SIGNAL.md) · [SMOKE_FUTEX](SMOKE_FUTEX.md) · [SMOKE_VFS](SMOKE_VFS.md) · [SMOKE_MODULE](SMOKE_MODULE.md) · [BusyBox suite](BUSYBOX_SUITE_REPORT.md)
 
 **North stars:**
 
 1. **Thread support** (Linux `clone` / TID model / futex) — **foundation in place**
-2. **Kernel modules** (loadable objects, symbol export, init/exit) — **next major epic**
+2. **Kernel modules** (loadable objects, symbol export, init/exit) — **practical slice done (P8a+b)**
 
 ---
 
@@ -27,11 +27,12 @@ BusyBox / musl binaries are **compatibility probes** (does `fork`/`clone`/`mmap`
 | Threads | **`clone`**, shared mm/files, gettid/tgid | OK (no full musl pthread suite yet) |
 | Signals | kill/tgkill, masks, handlers, rt_sigreturn, Ctrl-C | OK for practical use |
 | Futex | WAIT/WAKE + clear_child_tid wake | OK basic join |
-| FS | **VFS 7a**: ops tables, mounts (ext2 + ramfs), open/read/write via fops; `/proc` still ad-hoc | Partial — deepen for modules |
-| Drivers | Compile-time + **chrdev** (`null`/`zero`); IDE still behind ext2 | Partial |
-| Modules | None | **Missing (P8)** |
+| FS | **VFS P7 practical**: fops, mounts, proc, mutations, pipes | OK for modules |
+| Drivers | chrdev + blkdev; IDE as `hda` | OK for modules |
+| Modules | **P8a+b**: MNX1 loader, syscalls, `/dev/echo` module + refcount | ELF ET_REL optional |
 
-**Implication:** thread foundation + **VFS first slice** landed. Next: finish P7 polish → **loadable modules (P8)**.
+**Implication:** P7 + **P8 practical** landed (hello + `/dev/echo` + userspace insmod).  
+**Next epic: Phase 9** (broader Linux surface). Optional: ELF ET_REL `.ko`-like loader.
 
 ---
 
@@ -235,27 +236,39 @@ threads, wait runs Ready **children only**, nest-safe spurious wake. Smoke: `fut
 
 ## Phase 7 — VFS + device model (prepares modules)
 
-**Status (2026-08-02):** **7a–7c** — fops + mounts + chrdev + blkdev + procfs +
-**Linux-like dir visibility**: `ls /` shows `proc`/`dev`/`ram`; `ls /proc` lists
-files; `chdir`/`getcwd` understand virtual mounts. Userspace `ls` takes a path.
-Not yet: full dentry cache, `/dev/hda` node, mount syscalls, inode_ops for mkdir/unlink.
+**Status (2026-08-07):** **done (practical)** — 7a–7d.
+
+- fops + mounts (ext2 / ram / proc) + Linux-like dir visibility  
+- chrdev (`null`/`zero`/`hda`) + blkdev `hda` (ext2 I/O via blockdev)  
+- path mutations via **vops** (mkdir/unlink/rmdir/rename/link)  
+- **pipe** / **dup** / **dup2** (cooperative)  
+- Not Linux-complete: full dentry cache, `mount`/`umount` syscalls, rich inode cache  
 
 ### Deliverables
 
-- VFS objects: `super_block`, `inode`, `dentry`/`path`, `file` with `file_operations`.
-  🟡 `FileData` + `FileOperations` + mounts (inode/dentry cache later)
-- Mount table. ✅ `/` ext2, `/ram` ramfs, `/proc` proc
-- Char/block device registration. ✅ chrdev + **blkdev**
-- IDE/ext2 behind ops. ✅ fops + blockdev for IDE
+- VFS objects: `file_operations` + `FileData` + mounts + vops. ✅ practical  
+- Mount table. ✅ `/` ext2, `/ram` ramfs, `/proc` proc  
+- Char/block device registration. ✅  
+- IDE/ext2 behind ops. ✅  
 
 ### Exit criteria
 
-- Open/read/write go through VFS ops. ✅ FD path
-- A second FS can be registered without rewriting syscalls. ✅ ramfs + proc
+- Open/read/write go through VFS ops. ✅  
+- A second FS can be registered without rewriting syscalls. ✅  
+- Mutations + pipes for real userspace plumbing. ✅ practical
 
 ---
 
 ## Phase 8 — Kernel modules (north star #2)
+
+**Status (2026-08-07):** **done (practical)** — 8a loader + 8b chardev.
+
+- MNX1 container (not mainline `.ko`), export table, relocs, heap mapping  
+- Kernel shell + **userspace** `/bin/insmod|rmmod|lsmod` via Linux syscalls  
+- `hello.mnx`; `echo.mnx` → `/dev/echo` with open refcount / EBUSY `rmmod`  
+- `/proc/modules`  
+
+Not done (optional P8 polish or P9): ELF ET_REL, vermagic, depmod, IDE-as-module.
 
 ### What “Linux-compatible modules” means for munux
 
@@ -270,14 +283,14 @@ Aim for **conceptual compatibility** with Linux LKMs, not binary `.ko` from main
 
 ### Deliverables
 
-| Piece | Description |
-|-------|-------------|
-| `struct module` | name, state, refcount, init/exit, section pointers |
-| Export table | kernel symbols with names + addresses (+ optional CRC/version later) |
-| Loader | parse ELF ET_REL (or simplified container), apply relocations (x86_64) |
-| Syscalls or admin interface | start with **kernel shell command** or `init_module`/`delete_module` stubs |
-| Memory | module code/data in kernel VA (dedicated heap or `vmalloc`-like region) |
-| Safety | unload only if refcount 0; no use-after-free of ops pointers |
+| Piece | Description | Status |
+|-------|-------------|--------|
+| `struct module` | name, state, refcount, init/exit, section pointers | ✅ |
+| Export table | C ABI: printk, register/unregister chrdev | ✅ |
+| Loader | **MNX1** (not ET_REL `.ko`), x86_64 abs relocs | ✅ practical |
+| Admin | kernel shell + `init_module`/`delete_module`/`finit_module` + `/bin/*` | ✅ |
+| Memory | kmalloc heap + dual-map into kernel CR3 | ✅ workaround |
+| Safety | unload only if refcount 0; chrdev open holds ref | ✅ |
 
 ### Module authoring (Rust)
 
@@ -289,13 +302,14 @@ Recommended approach:
 
 ### Exit criteria
 
-- Load `hello.ko` (or `hello.mnx`) that prints on init and unloads cleanly.
-- Load a **char device module** that creates `/dev/echo` and works with `open`/`read`/`write`.
-- Built-in IDE driver can later be recompiled as a module without API rewrite.
+- Load `hello.ko` (or `hello.mnx`) that prints on init and unloads cleanly. ✅ `.mnx`
+- Load a **char device module** that creates `/dev/echo` and works with `open`/`read`/`write`. ✅
+- Built-in IDE driver can later be recompiled as a module without API rewrite. ❌ not started
 
-### Non-goals early
+### Non-goals early (still not done)
 
-- Livepatch, module signing, full mainline vermagic, dependency trees (`depmod`) — phase 9+.
+- Livepatch, module signing, full mainline vermagic, dependency trees (`depmod`)
+- Binary compatibility with Linux `.ko` files
 
 ---
 
@@ -337,8 +351,8 @@ Syscall coverage % is a **metric**, not a milestone by itself.
 | **M3** | **Timer preemption + schedule()** | Real multitasking | ✅ done |
 | **M4** | **clone + TID + shared mm/files** | Threads exist | ✅ done |
 | **M5** | **signals + futex + clear_child_tid** | kill/handlers/Ctrl-C; join path | ✅ practical |
-| **M6** | **VFS ops + register_chrdev** | Pluggable drivers | 🟡 7a–7c |
-| **M7** | **module loader + EXPORT_SYMBOL + hello module** | Loadable kernel code | planned |
+| **M6** | **VFS ops + register_chrdev** | Pluggable drivers | ✅ P7 practical |
+| **M7** | **module loader + EXPORT_SYMBOL + hello + echo chrdev** | Loadable kernel code | ✅ P8a+b practical |
 
 Everything else (more syscalls, net, polish) hangs off this spine.
 
@@ -365,7 +379,7 @@ What **to** keep:
 | Identity-map kernel forever blocks high-half / modules | Plan kernel VA when modules need it; identity is OK for P7 start |
 | Nest depth ≥ 2 stays cooperative | Document; only deepen nest preempt with careful testing |
 | Rust module ABI fragility | C ABI boundary for all module exports |
-| Too many goals at once | Active epic: **VFS → modules** (not more BusyBox stubs) |
+| Too many goals at once | Active epic: **Phase 9** Linux surface (not more BusyBox stubs) |
 | BusyBox regressions demoralize | Gate: suite + focused smokes after each M*, not drive design |
 
 ---
@@ -379,19 +393,23 @@ munux is a **Linux-compatible teaching/research kernel in Rust** when:
 3. The kernel can **load and unload a driver module** that registers a device under VFS.
 4. Syscall surface grows deliberately behind that architecture — not ahead of it.
 
-**Today:** (1) partial (threads foundation + basic futex/signals), (2) yes, (3) not started, (4) intentional.
+**Today:** (1) partial (threads + basic futex/signals; no full musl pthread),
+(2) yes, (3) **yes for MNX1 echo chardev**, (4) intentional.
 
 ---
 
-## Immediate recommendation
+## Immediate recommendation (handoff for next session)
 
-**Continue Phase 7:** deepen VFS (dentry/path cache, `/proc` behind ops, block-dev ops for IDE), then **P8 modules**.
+**Phase 8 practical is done.** Do not restart P8 unless you want ELF ET_REL.
 
-Thread foundation (P1–P6) + VFS 7a are landed. Next architecture unlock is **modules** on top of ops tables.
+**Start Phase 9** — pick one high-value Linux-surface slice:
 
-Conversation-sized follow-ups:
+1. **File-backed `mmap` + ELF polish** (unlocks more musl/dynamic later)  
+2. **`readlink` / `symlink` / `statx`** (real tooling)  
+3. **`epoll`/`select`** (evented programs; pipes already exist)  
+4. Optional P8 polish only if needed: ET_REL `.ko`-like loader, vermagic, IDE-as-module  
 
-1. Introduce `file_operations` / `inode` / open path that syscalls go through.  
-2. Move ext2 + `/proc` behind those ops (behavior unchanged).  
-3. `register_chrdev`-style hook (even if only for a built-in null/zero).  
-4. Keep focused smokes green after each step.
+Keep qemu-connect smokes green: `signaltest`, `clonetest`, `futextest`, `echotest`,
+`preempttest`, BusyBox suite.
+
+See [SMOKE_MODULE.md](SMOKE_MODULE.md) · [SMOKE_VFS.md](SMOKE_VFS.md).

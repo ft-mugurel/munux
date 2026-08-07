@@ -24,6 +24,7 @@ pub enum VfsError {
     NoDev,
     Exist,
     NoMem,
+    NotEmpty,
 }
 
 // ---------------------------------------------------------------------------
@@ -79,6 +80,11 @@ pub const FOPS_ZERO: u8 = 6;
 pub const FOPS_PROC: u8 = 7;
 /// Virtual directory (mount point or synthetic folder).
 pub const FOPS_VDIR: u8 = 8;
+pub const FOPS_PIPE_R: u8 = 9;
+pub const FOPS_PIPE_W: u8 = 10;
+pub const FOPS_BLK: u8 = 11;
+/// Loadable-module character device (ops live in the module image).
+pub const FOPS_MOD: u8 = 12;
 
 /// Synthetic inodes for virtual directories (not on ext2).
 pub const VINO_PROC: u32 = 0xF000_0001;
@@ -99,7 +105,7 @@ pub const DT_DIR: u8 = 4;
 pub const DT_REG: u8 = 8;
 pub const DT_CHR: u8 = 2;
 
-static FOPS_TABLE: [FileOperations; 9] = [
+static FOPS_TABLE: [FileOperations; 13] = [
     FileOperations {
         name: "none",
         read: None,
@@ -154,6 +160,30 @@ static FOPS_TABLE: [FileOperations; 9] = [
         write: None,
         release: None,
     },
+    FileOperations {
+        name: "pipe_r",
+        read: Some(pipe_read_op),
+        write: None,
+        release: Some(pipe_release_r),
+    },
+    FileOperations {
+        name: "pipe_w",
+        read: None,
+        write: Some(pipe_write_op),
+        release: Some(pipe_release_w),
+    },
+    FileOperations {
+        name: "blk",
+        read: Some(blk_read_op),
+        write: Some(blk_write_op),
+        release: None,
+    },
+    FileOperations {
+        name: "mod",
+        read: Some(mod_read_op),
+        write: Some(mod_write_op),
+        release: Some(mod_release_op),
+    },
 ];
 
 pub fn fops_name(id: u8) -> &'static str {
@@ -181,6 +211,16 @@ pub fn vfs_read(f: &mut FileData, buf: &mut [u8]) -> Result<usize, VfsError> {
         }
         None => Err(VfsError::IsDir),
     }
+}
+
+pub fn vfs_release(f: &mut FileData) {
+    let id = f.fops_id as usize;
+    if id < FOPS_TABLE.len() {
+        if let Some(op) = FOPS_TABLE[id].release {
+            op(f);
+        }
+    }
+    *f = FileData::closed();
 }
 
 pub fn vfs_write(f: &mut FileData, buf: &[u8]) -> Result<usize, VfsError> {
@@ -235,12 +275,22 @@ pub struct MountEntry {
     pub root_ino: u32,
 }
 
+/// C ABI fops used by loadable modules (`munux_register_chrdev`).
+pub type ModRwFn = extern "C" fn(*mut u8, u64) -> i64;
+pub type ModRelFn = extern "C" fn();
+
 #[derive(Clone, Copy)]
 pub struct ChrdevEntry {
     pub used: bool,
     pub name: [u8; 12],
     pub name_len: u8,
     pub fops_id: u8,
+    /// Owning module slot, or -1 for built-in chrdevs.
+    pub module_slot: i32,
+    pub opens: u32,
+    pub mod_read: Option<ModRwFn>,
+    pub mod_write: Option<ModRwFn>,
+    pub mod_release: Option<ModRelFn>,
 }
 
 static mut MOUNTS: [MountEntry; MAX_MOUNTS] = [MountEntry {
@@ -256,6 +306,11 @@ static mut CHRDEVS: [ChrdevEntry; MAX_CHRDEV] = [ChrdevEntry {
     name: [0; 12],
     name_len: 0,
     fops_id: FOPS_NONE,
+    module_slot: -1,
+    opens: 0,
+    mod_read: None,
+    mod_write: None,
+    mod_release: None,
 }; MAX_CHRDEV];
 
 static mut VFS_READY: bool = false;
@@ -289,7 +344,37 @@ pub fn register_mount(path: &str, fs_name: &'static str, root_ino: u32) -> Resul
 
 /// Register a character device name under `/dev/<name>`.
 pub fn register_chrdev(name: &str, fops_id: u8) -> Result<(), VfsError> {
+    register_chrdev_inner(name, fops_id, -1, None, None, None)
+}
+
+/// Register a module-backed `/dev/<name>` with C-ABI read/write/release.
+pub fn register_mod_chrdev(
+    name: &str,
+    read: Option<ModRwFn>,
+    write: Option<ModRwFn>,
+    release: Option<ModRelFn>,
+    module_slot: i32,
+) -> Result<(), VfsError> {
+    register_chrdev_inner(name, FOPS_MOD, module_slot, read, write, release)
+}
+
+fn register_chrdev_inner(
+    name: &str,
+    fops_id: u8,
+    module_slot: i32,
+    read: Option<ModRwFn>,
+    write: Option<ModRwFn>,
+    release: Option<ModRelFn>,
+) -> Result<(), VfsError> {
+    if name.is_empty() || name.len() > 11 {
+        return Err(VfsError::Inval);
+    }
     let c = chrdevs_mut();
+    for e in c.iter() {
+        if e.used && chrdev_name_str(e) == name {
+            return Err(VfsError::Exist);
+        }
+    }
     for e in c.iter_mut() {
         if !e.used {
             e.used = true;
@@ -299,10 +384,59 @@ pub fn register_chrdev(name: &str, fops_id: u8) -> Result<(), VfsError> {
             e.name[..n].copy_from_slice(&bytes[..n]);
             e.name_len = n as u8;
             e.fops_id = fops_id;
+            e.module_slot = module_slot;
+            e.opens = 0;
+            e.mod_read = read;
+            e.mod_write = write;
+            e.mod_release = release;
             return Ok(());
         }
     }
     Err(VfsError::NoMem)
+}
+
+/// Remove `/dev/<name>`. Fails if any file is still open.
+pub fn unregister_chrdev(name: &str) -> Result<(), VfsError> {
+    let c = chrdevs_mut();
+    for e in c.iter_mut() {
+        if e.used && chrdev_name_str(e) == name {
+            if e.opens > 0 {
+                return Err(VfsError::Inval);
+            }
+            *e = ChrdevEntry {
+                used: false,
+                name: [0; 12],
+                name_len: 0,
+                fops_id: FOPS_NONE,
+                module_slot: -1,
+                opens: 0,
+                mod_read: None,
+                mod_write: None,
+                mod_release: None,
+            };
+            return Ok(());
+        }
+    }
+    Err(VfsError::NoEnt)
+}
+
+/// Extra `dup()` of a module chrdev: bump opens + module ref.
+pub fn mod_chrdev_dup(f: &FileData) {
+    if f.fops_id != FOPS_MOD {
+        return;
+    }
+    let i = f.private as usize;
+    if i >= MAX_CHRDEV {
+        return;
+    }
+    let e = &mut chrdevs_mut()[i];
+    if !e.used {
+        return;
+    }
+    e.opens = e.opens.saturating_add(1);
+    if e.module_slot >= 0 {
+        let _ = crate::module::try_get(e.module_slot as usize);
+    }
 }
 
 fn mount_path_str(e: &MountEntry) -> &str {
@@ -320,6 +454,8 @@ pub fn init_after_ext2() {
     let _ = register_mount("/proc", "proc", 0);
     let _ = register_chrdev("null", FOPS_NULL);
     let _ = register_chrdev("zero", FOPS_ZERO);
+    // Block node name under /dev (opens FOPS_BLK via open_chrdev).
+    let _ = register_chrdev("hda", FOPS_BLK);
     ramfs_init();
     unsafe {
         VFS_READY = true;
@@ -651,8 +787,10 @@ fn vdir_next(vino: u32, pos: u64) -> Option<VfsDirEnt> {
     let idx = pos as usize;
     match vino {
         VINO_PROC => {
-            const NAMES: &[&str] = &[".", "..", "meminfo", "mounts", "version", "uptime", "self"];
-            const TYPES: &[u8] = &[DT_DIR, DT_DIR, DT_REG, DT_REG, DT_REG, DT_REG, DT_DIR];
+            const NAMES: &[&str] =
+                &[".", "..", "meminfo", "mounts", "version", "uptime", "self", "modules"];
+            const TYPES: &[u8] =
+                &[DT_DIR, DT_DIR, DT_REG, DT_REG, DT_REG, DT_REG, DT_DIR, DT_REG];
             const INOS: &[u64] = &[
                 VINO_PROC as u64,
                 ext2::ROOT_INODE as u64,
@@ -661,6 +799,7 @@ fn vdir_next(vino: u32, pos: u64) -> Option<VfsDirEnt> {
                 0xF000_0103,
                 0xF000_0104,
                 VINO_PROC_SELF as u64,
+                0xF000_0105,
             ];
             if idx >= NAMES.len() {
                 return None;
@@ -705,10 +844,15 @@ fn vdir_next(vino: u32, pos: u64) -> Option<VfsDirEnt> {
                 }
                 if n + 2 == idx {
                     let name = chrdev_name_str(e);
+                    let dt = if e.fops_id == FOPS_BLK {
+                        6u8 // DT_BLK
+                    } else {
+                        DT_CHR
+                    };
                     return Some(make_dent(
                         0xF000_0200 + n as u64,
                         (idx as u64) + 1,
-                        DT_CHR,
+                        dt,
                         name,
                     ));
                 }
@@ -781,17 +925,34 @@ fn strip_dev_prefix(path: &str) -> Option<&str> {
 }
 
 fn open_chrdev(name: &str, readable: bool, writable: bool) -> Result<FileData, VfsError> {
-    for e in chrdevs_mut().iter() {
+    for (i, e) in chrdevs_mut().iter_mut().enumerate() {
         if e.used && chrdev_name_str(e) == name {
+            e.opens = e.opens.saturating_add(1);
+            if e.module_slot >= 0 {
+                let _ = crate::module::try_get(e.module_slot as usize);
+            }
             return Ok(FileData {
                 pos: 0,
                 readable,
                 writable,
-                private: 0,
+                private: i as u64,
                 is_dir: false,
                 fops_id: e.fops_id,
             });
         }
+    }
+    // Block device node (e.g. hda) — open via blkdev table.
+    if crate::fs::blockdev::name_at(0) == Some(name)
+        || (name == "hda" && crate::fs::blockdev::count() > 0)
+    {
+        return Ok(FileData {
+            pos: 0,
+            readable,
+            writable,
+            private: 0,
+            is_dir: false,
+            fops_id: FOPS_BLK,
+        });
     }
     Err(VfsError::NoEnt)
 }
@@ -942,8 +1103,159 @@ fn zero_read_op(_f: &mut FileData, buf: &mut [u8]) -> Result<usize, VfsError> {
     Ok(buf.len())
 }
 
+fn mod_chrdev_entry(f: &FileData) -> Option<&'static mut ChrdevEntry> {
+    let i = f.private as usize;
+    if i >= MAX_CHRDEV {
+        return None;
+    }
+    let e = &mut chrdevs_mut()[i];
+    if e.used {
+        Some(e)
+    } else {
+        None
+    }
+}
+
+fn map_mod_rc(rc: i64) -> Result<usize, VfsError> {
+    if rc < 0 {
+        Err(VfsError::Fault)
+    } else {
+        Ok(rc as usize)
+    }
+}
+
+fn mod_read_op(f: &mut FileData, buf: &mut [u8]) -> Result<usize, VfsError> {
+    crate::module::map_code_into_current();
+    let op = match mod_chrdev_entry(f) {
+        Some(e) => e.mod_read,
+        None => return Err(VfsError::NoDev),
+    };
+    match op {
+        Some(fun) => map_mod_rc(fun(buf.as_mut_ptr(), buf.len() as u64)),
+        None => Err(VfsError::IsDir),
+    }
+}
+
+fn mod_write_op(f: &mut FileData, buf: &[u8]) -> Result<usize, VfsError> {
+    crate::module::map_code_into_current();
+    let op = match mod_chrdev_entry(f) {
+        Some(e) => e.mod_write,
+        None => return Err(VfsError::NoDev),
+    };
+    match op {
+        Some(fun) => map_mod_rc(fun(buf.as_ptr() as *mut u8, buf.len() as u64)),
+        None => Err(VfsError::IsDir),
+    }
+}
+
+fn mod_release_op(f: &mut FileData) {
+    crate::module::map_code_into_current();
+    let (rel, slot) = match mod_chrdev_entry(f) {
+        Some(e) => {
+            if e.opens > 0 {
+                e.opens -= 1;
+            }
+            (e.mod_release, e.module_slot)
+        }
+        None => (None, -1),
+    };
+    if let Some(fun) = rel {
+        fun();
+    }
+    if slot >= 0 {
+        crate::module::put(slot as usize);
+    }
+}
+
 fn proc_read_op(f: &mut FileData, buf: &mut [u8]) -> Result<usize, VfsError> {
     crate::fs::procfs::read_op(f, buf)
+}
+
+fn pipe_read_op(f: &mut FileData, buf: &mut [u8]) -> Result<usize, VfsError> {
+    match crate::fd::pipe::read(f.private as usize, buf) {
+        Ok(n) => Ok(n),
+        Err(-11) => Err(VfsError::Inval), // EAGAIN
+        Err(-32) => Err(VfsError::Fault), // EPIPE
+        Err(_) => Err(VfsError::Fault),
+    }
+}
+
+fn pipe_write_op(f: &mut FileData, data: &[u8]) -> Result<usize, VfsError> {
+    match crate::fd::pipe::write(f.private as usize, data) {
+        Ok(n) => Ok(n),
+        Err(-32) => Err(VfsError::Fault),
+        Err(_) => Err(VfsError::Fault),
+    }
+}
+
+fn pipe_release_r(f: &mut FileData) {
+    crate::fd::pipe::close_reader(f.private as usize);
+}
+
+fn pipe_release_w(f: &mut FileData) {
+    crate::fd::pipe::close_writer(f.private as usize);
+}
+
+fn blk_read_op(f: &mut FileData, buf: &mut [u8]) -> Result<usize, VfsError> {
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    let mut done = 0usize;
+    while done < buf.len() {
+        let lba = (f.pos / 512) as u32;
+        let off = (f.pos % 512) as usize;
+        if lba >= crate::fs::blockdev::sector_count() {
+            break;
+        }
+        let mut sec = [0u8; 512];
+        if crate::fs::blockdev::read_sector(lba, &mut sec).is_err() {
+            return if done > 0 {
+                Ok(done)
+            } else {
+                Err(VfsError::Fault)
+            };
+        }
+        let n = (512 - off).min(buf.len() - done);
+        buf[done..done + n].copy_from_slice(&sec[off..off + n]);
+        done += n;
+        f.pos = f.pos.saturating_add(n as u64);
+    }
+    // vfs_read also advances pos — undo double advance by leaving pos correct.
+    // Actually vfs_read does f.pos += n after op. So we must NOT advance here.
+    // Reset: we advanced in the loop. Subtract done before return.
+    f.pos = f.pos.saturating_sub(done as u64);
+    Ok(done)
+}
+
+fn blk_write_op(f: &mut FileData, data: &[u8]) -> Result<usize, VfsError> {
+    if data.is_empty() {
+        return Ok(0);
+    }
+    let mut done = 0usize;
+    while done < data.len() {
+        let lba = (f.pos / 512) as u32;
+        let off = (f.pos % 512) as usize;
+        if lba >= crate::fs::blockdev::sector_count() {
+            break;
+        }
+        let mut sec = [0u8; 512];
+        if off != 0 || data.len() - done < 512 {
+            let _ = crate::fs::blockdev::read_sector(lba, &mut sec);
+        }
+        let n = (512 - off).min(data.len() - done);
+        sec[off..off + n].copy_from_slice(&data[done..done + n]);
+        if crate::fs::blockdev::write_sector(lba, &sec).is_err() {
+            return if done > 0 {
+                Ok(done)
+            } else {
+                Err(VfsError::Fault)
+            };
+        }
+        done += n;
+        f.pos = f.pos.saturating_add(n as u64);
+    }
+    f.pos = f.pos.saturating_sub(done as u64);
+    Ok(done)
 }
 
 // ---------------------------------------------------------------------------

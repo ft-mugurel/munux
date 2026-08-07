@@ -12,6 +12,7 @@ pub const PROC_MOUNTS: u64 = 2;
 pub const PROC_VERSION: u64 = 3;
 pub const PROC_UPTIME: u64 = 4;
 pub const PROC_SELF_STATUS: u64 = 5;
+pub const PROC_MODULES: u64 = 6;
 
 const GEN_CAP: usize = 512;
 static mut GEN: [u8; GEN_CAP] = [0; GEN_CAP];
@@ -143,6 +144,19 @@ fn build_self_status() {
     gen_push("\n");
 }
 
+fn build_modules() {
+    gen_clear();
+    // Reuse GEN buffer via format_proc_modules into a temp, then push.
+    // format writes Linux-ish lines; empty when no modules loaded.
+    let mut tmp = [0u8; GEN_CAP];
+    let n = crate::module::format_proc_modules(&mut tmp);
+    unsafe {
+        let take = n.min(GEN_CAP);
+        GEN[..take].copy_from_slice(&tmp[..take]);
+        GEN_LEN = take;
+    }
+}
+
 fn rebuild(which: u64) {
     match which {
         PROC_MEMINFO => build_meminfo(),
@@ -150,6 +164,7 @@ fn rebuild(which: u64) {
         PROC_VERSION => build_version(),
         PROC_UPTIME => build_uptime(),
         PROC_SELF_STATUS => build_self_status(),
+        PROC_MODULES => build_modules(),
         _ => gen_clear(),
     }
 }
@@ -168,6 +183,7 @@ pub fn open_name(name: &str, readable: bool, writable: bool) -> Result<FileData,
         "version" => PROC_VERSION,
         "uptime" => PROC_UPTIME,
         "status" => PROC_SELF_STATUS, // when cwd is /proc/self
+        "modules" => PROC_MODULES,
         _ => return Err(VfsError::NoEnt),
     };
     Ok(FileData {
@@ -211,6 +227,7 @@ pub fn open(path: &str, readable: bool, writable: bool) -> Result<FileData, VfsE
         "version" => PROC_VERSION,
         "uptime" => PROC_UPTIME,
         "self/status" => PROC_SELF_STATUS,
+        "modules" => PROC_MODULES,
         _ => return Err(VfsError::NoEnt),
     };
 

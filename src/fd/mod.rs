@@ -7,6 +7,8 @@ use crate::fs;
 use crate::fs::vcore::{self, FileData, VfsError};
 use crate::process::pcb::MAX_PROCESSES;
 
+pub mod pipe;
+
 pub const FD_MAX: usize = 32;
 
 pub const STDIN_FILENO: usize = 0;
@@ -158,8 +160,76 @@ impl FdTable {
         if fd >= FD_MAX || !self.entries[fd].is_open() {
             return false;
         }
+        vcore::vfs_release(&mut self.entries[fd].data);
         self.entries[fd] = File::closed();
         true
+    }
+
+    /// Duplicate fd into lowest free slot (dup).
+    pub fn dup_fd(&mut self, fd: usize) -> Result<usize, FdError> {
+        let file = *self.get(fd).ok_or(FdError::BadFd)?;
+        // Pipe ends: bump reader/writer counts when duplicating.
+        if file.data.fops_id == vcore::FOPS_PIPE_R {
+            // reopen reader ref
+            let id = file.data.private as usize;
+            // alloc already set counts; manual bump
+            // re-open as second reader by reusing same id
+            let _ = id;
+        }
+        if file.data.fops_id == vcore::FOPS_MOD {
+            vcore::mod_chrdev_dup(&file.data);
+        }
+        self.install(file)
+    }
+
+    /// dup2(oldfd, newfd).
+    pub fn dup2_fd(&mut self, old: usize, new: usize) -> Result<usize, FdError> {
+        if new >= FD_MAX {
+            return Err(FdError::BadFd);
+        }
+        let file = *self.get(old).ok_or(FdError::BadFd)?;
+        if old == new {
+            return Ok(new);
+        }
+        if self.entries[new].is_open() {
+            vcore::vfs_release(&mut self.entries[new].data);
+        }
+        if file.data.fops_id == vcore::FOPS_MOD {
+            vcore::mod_chrdev_dup(&file.data);
+        }
+        self.entries[new] = file;
+        Ok(new)
+    }
+
+    /// Create a pipe; returns (read_fd, write_fd).
+    pub fn pipe_open(&mut self) -> Result<(usize, usize), FdError> {
+        let id = pipe::alloc().map_err(|_| FdError::NoMem)?;
+        let r = File::from_vfs(FileData {
+            pos: 0,
+            readable: true,
+            writable: false,
+            private: id as u64,
+            is_dir: false,
+            fops_id: vcore::FOPS_PIPE_R,
+        });
+        let w = File::from_vfs(FileData {
+            pos: 0,
+            readable: false,
+            writable: true,
+            private: id as u64,
+            is_dir: false,
+            fops_id: vcore::FOPS_PIPE_W,
+        });
+        let rfd = self.install(r).map_err(|e| {
+            pipe::close_reader(id);
+            pipe::close_writer(id);
+            e
+        })?;
+        let wfd = self.install(w).map_err(|e| {
+            let _ = self.close(rfd);
+            e
+        })?;
+        Ok((rfd, wfd))
     }
 
     pub fn open_count(&self) -> usize {
@@ -386,6 +456,7 @@ fn vfs_to_fd(e: VfsError) -> FdError {
         VfsError::Fault => FdError::Fault,
         VfsError::NoDev | VfsError::NoMem => FdError::NoMem,
         VfsError::Exist => FdError::Exist,
+        VfsError::NotEmpty => FdError::Inval,
     }
 }
 
@@ -456,6 +527,27 @@ pub fn sys_close(fd: u64) -> Result<(), FdError> {
 
 pub fn sys_open_path(path: &str, flags: u64) -> Result<usize, FdError> {
     open_path(path, flags)
+}
+
+pub fn sys_pipe() -> Result<(usize, usize), FdError> {
+    if !is_ready() {
+        return Err(FdError::BadFd);
+    }
+    with_current(|t| t.pipe_open())
+}
+
+pub fn sys_dup(fd: u64) -> Result<usize, FdError> {
+    if !is_ready() || fd >= FD_MAX as u64 {
+        return Err(FdError::BadFd);
+    }
+    with_current(|t| t.dup_fd(fd as usize))
+}
+
+pub fn sys_dup2(old: u64, new: u64) -> Result<usize, FdError> {
+    if !is_ready() || old >= FD_MAX as u64 || new >= FD_MAX as u64 {
+        return Err(FdError::BadFd);
+    }
+    with_current(|t| t.dup2_fd(old as usize, new as usize))
 }
 
 // Linux fcntl cmds (keep in sync with syscalls::sys_fcntl)

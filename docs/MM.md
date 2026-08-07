@@ -64,7 +64,7 @@ Canonical user half ends at `0x0000_8000_0000_0000` (non-canonical gap).
 
 Kernel shell: `preempt` / `preempttest` (A–G). Userspace: `clonetest`, `signaltest`, `futextest`.
 
-**Next (not mm):** VFS ops tables → kernel modules (roadmap P7–P8). Optional mm polish: COW fork, higher-half, demand paging.
+**Next (not mm):** Phase 9 Linux surface (file-backed mmap, symlink/statx, epoll). Optional mm polish: COW fork, higher-half, demand paging. P7–P8 practical are done.
 
 ---
 
