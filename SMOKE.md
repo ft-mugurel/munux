@@ -28,6 +28,7 @@ From freestanding **`$`**:
 - [ ] `clonetest` — child + parent ok
 - [ ] `futextest` — child + parent ok (join via futex / clear_child_tid)
 - [ ] `forktest` — still green
+- [ ] `mmaptest` — A–E + `ALL PASS` (run twice; also `/bin/mmaptest`)
 - [ ] `busybox true` — returns to `$`
 - [ ] Optional Ctrl-C: `busybox sleep 30` then **Ctrl+C** → back to `$` (shell stays alive)
 

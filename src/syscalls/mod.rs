@@ -109,6 +109,7 @@ mod errno {
     pub const ECHILD: i64 = 10;
     pub const EAGAIN: i64 = 11;
     pub const ENOMEM: i64 = 12;
+    pub const EACCES: i64 = 13;
     pub const EFAULT: i64 = 14;
     pub const EISDIR: i64 = 21;
     pub const EINVAL: i64 = 22;
@@ -529,9 +530,10 @@ pub extern "C" fn syscall_dispatch(
         num::UNAME => sys_uname(a1),
         num::ARCH_PRCTL => sys_arch_prctl(a1, a2),
         num::BRK => sys_brk(a1),
-        // mmap(addr, len, prot, flags, fd) — offset (6th arg) not passed by
-        // our entry stub; anonymous maps require offset 0 (passed as 0 here).
-        num::MMAP => sys_mmap(a1, a2, a3, a4, a5, 0),
+        num::MMAP => {
+            let a6 = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(last_user_r9)) };
+            sys_mmap(a1, a2, a3, a4, a5, a6)
+        }
         num::MPROTECT => sys_mprotect(a1, a2, a3),
         num::MUNMAP => sys_munmap(a1, a2),
         num::SET_TID_ADDRESS => sys_set_tid_address(a1),
@@ -659,7 +661,7 @@ fn sys_brk(new_brk: u64) -> u64 {
     crate::process::proc_brk(new_brk)
 }
 
-/// Linux mmap(2) — anonymous private maps only for now.
+/// Linux mmap(2) — anonymous or file-backed `MAP_PRIVATE` (offset page-aligned).
 fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> u64 {
     match crate::process::proc_mmap(addr, length, prot, flags, fd, offset) {
         Ok(va) => va,

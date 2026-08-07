@@ -27,7 +27,7 @@ Higher-half is **not** required yet. The kernel stays in the **identity window**
 | ELF load scratch | `0x0000_0001_3000_0000` | Kernel buffer for reading ELF from disk |
 | User ET_EXEC (typical) | `0x0040_0000` … | Static BusyBox/musl; private frames per mm |
 | User stack (classic) | top ~`0x0000_0000_7FFF_F000` | 1 MiB window today |
-| User mmap arena | process `mmap_bump` | Anonymous `MAP_PRIVATE` only today |
+| User mmap arena | process `mmap_bump` | Anon + file-backed `MAP_PRIVATE` snapshot |
 | Signal restorer | `0x7ffd0000` | Kernel trampoline page (`rt_sigreturn`) |
 
 Canonical user half ends at `0x0000_8000_0000_0000` (non-canonical gap).
@@ -73,6 +73,6 @@ Kernel shell: `preempt` / `preempttest` (A–G). Userspace: `clonetest`, `signal
 - Higher-half kernel (e.g. `-2 GiB` / `0xFFFF_FFFF_8000_0000`)
 - COW fork
 - Demand paging / stack growth on #PF
-- File-backed `mmap`
+- `MAP_SHARED` / COW file mmap (P9b is private snapshot only)
 
 See also: [ROADMAP.md](ROADMAP.md), [ABI.md](ABI.md).

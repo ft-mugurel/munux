@@ -656,6 +656,29 @@ pub fn sys_fd_inode(fd: u64) -> Result<u32, FdError> {
     })
 }
 
+/// Readable regular/proc/ramfs file suitable as `mmap` source.
+pub fn mmap_source_ok(fd: u64) -> Result<(), i64> {
+    if fd > isize::MAX as u64 {
+        return Err(9); // EBADF (-1 without MAP_ANONYMOUS)
+    }
+    with_current(|t| {
+        let file = t.get(fd as usize).ok_or(9i64)?;
+        if !file.is_open() {
+            return Err(9);
+        }
+        if file.data.is_dir {
+            return Err(21); // EISDIR
+        }
+        if !file.data.readable {
+            return Err(13); // EACCES
+        }
+        match file.data.fops_id {
+            vcore::FOPS_EXT2_FILE | vcore::FOPS_RAMFS_FILE | vcore::FOPS_PROC => Ok(()),
+            _ => Err(13),
+        }
+    })
+}
+
 /// `fstat` via VFS (ext2, virtual mounts, pipes, chrdev).
 pub fn sys_fd_stat(fd: u64) -> Result<vcore::VfsStat, FdError> {
     if !is_ready() || fd >= FD_MAX as u64 {

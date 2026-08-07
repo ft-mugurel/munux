@@ -37,7 +37,7 @@ VFS (incl. pipes/vops), and **loadable modules** (MNX1 **and** ELF64 ET_REL `.ko
 + Linux `init_module` / `delete_module` / `finit_module`, `/bin/insmod|rmmod|lsmod`,
 `hello.{mnx,ko}`, `echo.{mnx,ko}` → `/dev/echo` with unload refcount).
 
-**Phase 9a** (`symlink` / `readlink` / `statx`) is in. Next P9 slices: file-backed `mmap`, `epoll`/`select`. IDE stays a **built-in**.
+**Phase 9a–9b** in: symlink/statx + file-backed `MAP_PRIVATE` mmap (page-aligned offset). Next: `epoll`/`select`. IDE stays built-in.
 
 ### Boot & build
 - Multiboot → long mode trampoline → Rust `kmain`
@@ -291,7 +291,7 @@ Need **`make disk`** so `/lib/modules/*.mnx` and `/bin/insmod` are on the image.
 - **No futex timeout / requeue / PI**; pthread mutex soak incomplete
 - **No in-kernel preemption**; IRQ preempt gated under deep nest (depth ≥ 2 cooperative)
 - **No higher-half kernel**; identity map + high heap for modules
-- **No file-backed `mmap`** (anonymous mmap exists)
+- File `mmap` is **private snapshot** (no `MAP_SHARED` writeback / no COW)
 
 **VFS / syscalls / HW**
 - No `mount`/`umount` syscalls; no full dentry cache

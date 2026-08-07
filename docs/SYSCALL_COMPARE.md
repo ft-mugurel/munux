@@ -27,7 +27,7 @@ Legend in the tables below: implemented rows list munux notes; â€œNOT in munuxâ€
 | 5 | `fstat` | FSTAT | implemented |
 | 6 | `lstat` | LSTAT | implemented |
 | 8 | `lseek` | LSEEK | implemented |
-| 9 | `mmap` | MMAP | partial (anon mmap; offset always 0) |
+| 9 | `mmap` | MMAP | partial (`MAP_PRIVATE` anon + file copy-in; r9 offset; no `MAP_SHARED`) |
 | 10 | `mprotect` | MPROTECT | implemented |
 | 11 | `munmap` | MUNMAP | implemented |
 | 12 | `brk` | BRK | implemented |

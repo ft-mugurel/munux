@@ -114,10 +114,39 @@ pub fn clear_mmaps() {
     });
 }
 
-/// Linux-style anonymous `mmap` for the current process.
+fn fill_pages_from_fd(fd: u64, file_off: u64, dest: u64, copy_len: u64) -> Result<(), i64> {
+    if copy_len == 0 {
+        return Ok(());
+    }
+    let mut off = file_off;
+    let mut dst = dest;
+    let mut left = copy_len as usize;
+    let mut tmp = [0u8; 512];
+    while left > 0 {
+        let chunk = left.min(tmp.len());
+        let n = match crate::fd::sys_read_at(fd, off, &mut tmp[..chunk]) {
+            Ok(0) => break, // EOF — remaining pages stay zero
+            Ok(n) => n,
+            Err(crate::fd::FdError::BadFd) => return Err(9),
+            Err(crate::fd::FdError::IsDir) => return Err(21),
+            Err(_) => return Err(14), // EFAULT / I/O
+        };
+        unsafe {
+            core::ptr::copy_nonoverlapping(tmp.as_ptr(), dst as *mut u8, n);
+        }
+        dst = dst.saturating_add(n as u64);
+        off = off.saturating_add(n as u64);
+        left -= n;
+    }
+    Ok(())
+}
+
+/// Linux-style `mmap` for the current process.
 ///
-/// Supports `MAP_PRIVATE|MAP_ANONYMOUS` (and optional `MAP_FIXED`).
-/// Returns mapped VA on success, or `Err(errno)` as positive errno code.
+/// - `MAP_PRIVATE|MAP_ANONYMOUS` (optional `MAP_FIXED`)
+/// - `MAP_PRIVATE` file-backed: page-aligned `offset`, snapshot copy into new pages
+///
+/// `MAP_SHARED` is still EINVAL (no writeback). Returns mapped VA or `Err(errno)`.
 pub fn proc_mmap(
     addr: u64,
     length: u64,
@@ -132,27 +161,31 @@ pub fn proc_mmap(
     if length > MMAP_MAX_BYTES {
         return Err(12); // ENOMEM
     }
-    // Only anonymous private maps for now (musl large malloc path).
-    if flags & MAP_ANONYMOUS == 0 {
-        return Err(22); // EINVAL — file-backed not implemented
-    }
     if flags & MAP_PRIVATE == 0 && flags & MAP_SHARED == 0 {
         return Err(22);
     }
-    if flags & MAP_SHARED != 0 {
-        // Shared anon would need more machinery; reject for now.
-        return Err(22);
+    let anon = flags & MAP_ANONYMOUS != 0;
+    if anon {
+        if offset != 0 {
+            return Err(22);
+        }
+        if flags & MAP_SHARED != 0 {
+            return Err(22);
+        }
+    } else {
+        if flags & MAP_PRIVATE == 0 {
+            return Err(22); // shared file maps: no writeback yet
+        }
+        if offset & (FRAME_SIZE as u64 - 1) != 0 {
+            return Err(22);
+        }
+        crate::fd::mmap_source_ok(fd)?;
     }
-    if offset != 0 {
-        return Err(22);
-    }
-    // fd is ignored for MAP_ANONYMOUS on Linux (often -1).
-    let _ = fd;
 
     let len = page_ceil(length);
     let page_flags = prot_to_flags(prot); // None => PROT_NONE
 
-    table::with_current(|p| {
+    let base = table::with_current(|p| {
         // Free slot?
         let mut slot = None;
         for i in 0..MAX_MMAPS {
@@ -268,7 +301,15 @@ pub fn proc_mmap(
         }
         Ok(base)
     })
-    .unwrap_or(Err(12))
+    .unwrap_or(Err(12))?;
+
+    if !anon {
+        if let Err(e) = fill_pages_from_fd(fd, offset, base, length) {
+            let _ = proc_munmap(base, length);
+            return Err(e);
+        }
+    }
+    Ok(base)
 }
 
 /// Linux `mprotect(2)` — update PTE flags for [addr, addr+len).

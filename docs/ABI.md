@@ -47,7 +47,7 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` consta
 | 5 | `fstat` | done |
 | 6 | `lstat` | done (does **not** follow last symlink) |
 | 8 | `lseek` | done |
-| 9 | `mmap` | **partial** (anonymous `MAP_PRIVATE`; offset forced 0 in entry) |
+| 9 | `mmap` | **partial** (`MAP_PRIVATE` anon + file snapshot; offset via r9, page-aligned; no `MAP_SHARED` writeback) |
 | 10 | `mprotect` | done |
 | 11 | `munmap` | done |
 | 12 | `brk` | done (per-process break) |
@@ -243,7 +243,7 @@ Foundation for threads is in; polish and next architecture:
 3. ~~Signals (`rt_sigreturn`, delivery, `tgkill`, Ctrl-C)~~ ✅ (practical slices)  
 4. Full signal frames (`siginfo`/`ucontext`), absolute/PI futex, musl pthread soak  
 5. ~~`pipe`/`dup`, `rename`/`link`, VFS + modules~~ ✅ P7–P8c  
-6. ~~`readlink`/`symlink`/`statx`~~ ✅ P9a; still missing file-backed `mmap`, `epoll`/`select`
+6. ~~`readlink`/`symlink`/`statx`~~ ✅ P9a; ~~file `mmap` private snapshot~~ ✅ P9b; still missing `MAP_SHARED` writeback, `epoll`/`select`
 
 Using **wrong syscall numbers** would make Linux binaries impossible — munux keeps Linux numbers from v0.2 forward.
 
