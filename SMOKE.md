@@ -58,10 +58,12 @@ Requires `/bin/busybox` on `disk.img`.
 - [ ] `busybox ls` / `busybox ls bin`
 - [ ] `busybox echo hi`
 - [ ] `busybox touch t_smoke.txt`
-- [ ] `busybox cp t_smoke.txt t_smoke2.txt` (if `cp` works without rename)
-- [ ] `busybox rm t_smoke.txt` (and cleanup)
-- [ ] `busybox cat /proc/meminfo` (or similar) — proc readable when available
-- [ ] Note: `busybox mv` / `ln` use VFS rename/link (P7d) — report if ENOSYS returns
+- [ ] `busybox cp t_smoke.txt t_smoke2.txt`
+- [ ] `busybox mv t_smoke2.txt t_moved.txt` — **expected PASS** (`rename` 82)
+- [ ] `busybox ln t_smoke.txt t_link.txt` — **expected PASS** (`link` 86)
+- [ ] `busybox rm t_smoke.txt t_moved.txt t_link.txt` (cleanup)
+- [ ] `busybox cat /proc/meminfo` — proc readable
+- [ ] Freestanding `sh` does **not** parse `|` (not a kernel ENOSYS)
 
 ---
 
@@ -69,9 +71,10 @@ Requires `/bin/busybox` on `disk.img`.
 
 From **`$`**:
 
-- [ ] `ls /lib/modules` — `hello.mnx` `echo.mnx`
-- [ ] `insmod /lib/modules/hello.mnx` then `lsmod` then `rmmod hello`
-- [ ] `insmod /lib/modules/echo.mnx` then `ls /dev` shows `echo`
+- [ ] `ls /lib/modules` — `hello.ko` `hello.mnx` `echo.ko` `echo.mnx`
+- [ ] `insmod /lib/modules/hello.ko` then `lsmod` then `rmmod hello` (`(elf)` messages)
+- [ ] `insmod /lib/modules/hello.mnx` still works (`(mnx)`)
+- [ ] `insmod /lib/modules/echo.ko` then `ls /dev` shows `echo`
 - [ ] `echotest` — `PASS` (read/write + EBUSY while open)
 - [ ] `rmmod echo` then `ls /dev` has no `echo`
 - [ ] `cat /proc/modules` matches `lsmod`
@@ -92,13 +95,18 @@ Kernel shell after `exit` also has `insmod`/`rmmod`/`lsmod` (bare `hello` can be
 
 ## Regression automation
 
+There is **no** in-tree `scripts/busybox_suite.py`. Use **qemu-connect** against **this** tree
+(the tool’s default `QEMU_CONNECT_MUNUX` may point at another checkout):
+
 ```sh
-make iso
-# headless: qemu-connect or scripts/busybox_suite.py
-python3 scripts/busybox_suite.py   # if environment configured
+make iso disk
+# MCP / CLI: pass iso + disk explicitly
+#   iso  = build/kernel.iso
+#   disk = build/disk.img
+#   prompt = $
 ```
 
-Update **[docs/BUSYBOX_SUITE_REPORT.md](docs/BUSYBOX_SUITE_REPORT.md)** when the suite is re-run.
+Update **[docs/BUSYBOX_SUITE_REPORT.md](docs/BUSYBOX_SUITE_REPORT.md)** when a full suite is re-run.
 
 ---
 
@@ -116,6 +124,7 @@ make debug   # GDB stub + gdb/kfs.gdb
 | Symptom | Likely cause |
 |---------|----------------|
 | `ENOSYS n=…` | Unimplemented syscall (see SYSCALL_COMPARE) |
-| Panic after fork/exec under ash | Shared AS / TLS / nest — check ROADMAP P1 |
-| `find .` hang | Known suite hang (readdir loop / missing path) |
+| Panic after fork/exec under ash | Shared AS / TLS / nest — check ROADMAP P1 (private mm is done; re-check nest) |
+| `find .` hang | Known suite hang (readdir loop / missing path) — still open |
+| Freestanding `cmd \| cmd` prints `\|` literally | `/bin/sh` has no pipeline parser; `pipe(2)` exists |
 | Network applets | No sockets yet |

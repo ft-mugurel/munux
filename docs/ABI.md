@@ -5,7 +5,7 @@ This document freezes conventions for userspace and the kernel.
 
 | Field | Value |
 |-------|--------|
-| **Status** | **v0.3** — Linux x86_64 syscall numbers; expanded surface |
+| **Status** | **v0.3.1** — Linux x86_64 syscall numbers; table matches dispatch after P7d/P8 |
 | **Arch** | **x86_64** only on `main` |
 | **Goal** | Static Linux/musl binaries use the **same numbers and register ABI** as Linux; missing calls return **`-ENOSYS`** |
 
@@ -34,8 +34,8 @@ Same as Linux x86_64:
 ## 2. Syscall numbers (implemented)
 
 Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.  
-Source of truth: `src/syscalls/mod.rs` dispatch `match`.  
-~**65** numbers are dispatched (quality varies: full / partial / stub).
+Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` constants — e.g. `READLINK` is defined but **not** dispatched).  
+**76** numbers are dispatched (quality varies: full / partial / stub). Guest `uname` strings are still `sysname=munux`, `release=0.2.0`, `version=munux 0.2 x86_64` (independent of this ABI doc version).
 
 | # | Linux name | munux status |
 |--:|------------|--------------|
@@ -58,6 +58,9 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match`.
 | 19 | `readv` | done |
 | 20 | `writev` | done |
 | 21 | `access` | done |
+| 22 | `pipe` | done (P7d; cooperative) |
+| 32 | `dup` | done |
+| 33 | `dup2` | done |
 | 35 | `nanosleep` | done (PIT-based; interruptible by fatal signals) |
 | 39 | `getpid` | done (**tgid**) |
 | 40 | `sendfile` | partial |
@@ -67,12 +70,14 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match`.
 | 60 | `exit` | done (one task → zombie; clear_child_tid wake) |
 | 61 | `wait4` | done |
 | 62 | `kill` | done (process-directed; default terminate + handlers) |
-| 63 | `uname` | done (`sysname=munux`) |
+| 63 | `uname` | done (`sysname=munux`; see strings above) |
 | 72 | `fcntl` | partial (GET/SET FD/FL, DUPFD) |
 | 79 | `getcwd` | done |
 | 80 | `chdir` | done |
+| 82 | `rename` | done (vops) |
 | 83 | `mkdir` | done |
 | 84 | `rmdir` | done |
+| 86 | `link` | done (vops; hard link, not symlink) |
 | 87 | `unlink` | done |
 | 90 | `chmod` | done |
 | 92 | `chown` | **stub** (always success; single-user) |
@@ -88,6 +93,8 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match`.
 | 115 | `getgroups` | done |
 | 158 | `arch_prctl` | done (`ARCH_SET/GET_FS/GS`; TLS) |
 | 162 | `sync` | **stub** (no-op; write-through FS) |
+| 175 | `init_module` | done (MNX1 image; params ignored) |
+| 176 | `delete_module` | done (`EBUSY` if refcount > 0) |
 | 186 | `gettid` | done (unique task id; ≠ tgid for threads) |
 | 200 | `tkill` | done (thread-directed signal) |
 | 202 | `futex` | done (`WAIT`/`WAKE`/`REQUEUE`/`CMP_REQUEUE` + bitset + relative timeout; `PRIVATE`) |
@@ -102,13 +109,16 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match`.
 | 261 | `futimesat` | partial |
 | 262 | `newfstatat` | done |
 | 263 | `unlinkat` | partial |
+| 264 | `renameat` | partial |
 | 268 | `fchmodat` | partial |
 | 269 | `faccessat` | partial |
 | 280 | `utimensat` | partial |
+| 293 | `pipe2` | done (flags ignored) |
+| 313 | `finit_module` | done (load from fd; MNX1) |
 
-**Notable still ENOSYS** (among others): `pipe`/`pipe2`, `dup`/`dup2`, `poll`/`ppoll`,
-`rename`/`renameat`, `link`, `readlink`/`symlink`, `vfork`, `statfs`, `getpriority`/`setpriority`,
-`setpgid`/`getpgrp`/`setsid`. Full matrix: **[SYSCALL_COMPARE.md](SYSCALL_COMPARE.md)**.
+**Notable still ENOSYS** (among others): `poll`/`ppoll`/`select`/`epoll_*`,
+`readlink`/`symlink`/`statx`, `vfork`, `dup3`, `statfs`, `getpriority`/`setpriority`,
+`setpgid`/`getpgrp`/`setsid`, `prctl`, `execveat`, sockets. Full matrix: **[SYSCALL_COMPARE.md](SYSCALL_COMPARE.md)**.
 
 Unimplemented numbers return **`-ENOSYS` (`-38`)** and log `syscall: ENOSYS n=…`.
 
@@ -130,16 +140,19 @@ Common errno values:
 | EAGAIN | 11 | Try again |
 | ENOMEM | 12 | Out of memory |
 | EFAULT | 14 | Bad address |
+| EBUSY | 16 | Device or resource busy (e.g. `rmmod` while open) |
 | EEXIST | 17 | File exists |
 | ENOTDIR | 20 | Not a directory |
 | EISDIR | 21 | Is a directory |
 | EINVAL | 22 | Invalid argument |
+| EMFILE | 24 | Too many open files |
 | ENOTTY | 25 | Not a TTY |
+| EPIPE | 32 | Broken pipe |
+| ERANGE | 34 | Result too large |
 | ENAMETOOLONG | 36 | Name too long |
 | ENOSYS | 38 | Not implemented |
 | ENOTEMPTY | 39 | Directory not empty |
-| ERANGE | 34 | Result too large |
-| EMFILE | 24 | Too many open files |
+| ETIMEDOUT | 110 | Futex relative wait timed out |
 
 ---
 
@@ -147,13 +160,13 @@ Common errno values:
 
 | FD | Name | Backend (today) |
 |----|------|-----------------|
-| 0 | stdin | keyboard ring (`read`); ash may `poll` |
+| 0 | stdin | keyboard ring (`read`); no `poll` yet (ENOSYS) |
 | 1 | stdout | VGA console / file |
 | 2 | stderr | VGA console / file |
 
 - Max FDs per table: **32** (see `fd` module).
 - **FD tables**: fork **clones** the parent table; `CLONE_FILES` **shares** (refcount).
-- `pipe` / `dup` / `dup2` are **not** dispatched yet (ENOSYS).
+- `pipe` / `pipe2` / `dup` / `dup2` **are** dispatched (P7d). Freestanding `/bin/sh` does **not** parse `|` — pipelines need a userspace shell that issues `pipe` itself (e.g. BusyBox ash). `dup3` is still ENOSYS.
 
 ### `read` on stdin
 
@@ -177,7 +190,7 @@ Common errno values:
 | `exit_group` | Tear down thread group; one zombie for wait |
 | `wait4` | Reap zombie; schedules Ready children cooperatively |
 | Signals | `kill`/`tkill`/`tgkill`, `rt_sigaction`/`rt_sigprocmask`/`rt_sigreturn`; default terminate + user handlers |
-| Futex | `FUTEX_WAIT`/`WAKE` (+PRIVATE); `clear_child_tid` wake on exit |
+| Futex | `FUTEX_WAIT`/`WAKE`/`REQUEUE`/`CMP_REQUEUE` (+PRIVATE, relative timeout); `clear_child_tid` wake on exit |
 | cwd | Per-process (not yet real `CLONE_FS` object share) |
 | TLS | Per-task `fs_base` / `gs_base`; `arch_prctl` |
 | Scheduling | Timer user→user preempt; nest depth ≥ 2 stays cooperative |
@@ -205,9 +218,11 @@ See **[MM.md](MM.md)** for kernel windows and isolation rules.
 ## 6. Filesystem
 
 - Root: **ext2** on IDE primary master.
-- Virtual **`/proc`**: kernel-generated (`meminfo`, `mounts`, pid nodes, …).
-- Writes: create/unlink/mkdir/rmdir/chmod as wired in syscalls → `fs/ext2_write.rs`.
-- VFS ops + vops: mkdir/unlink/rename/link dispatched (P7 practical).
+- Virtual **`/proc`**: kernel-generated (`meminfo`, `mounts`, `modules`, pid nodes, …).
+- Virtual **`/dev`**: `null`, `zero`, `hda`; `echo` only after `insmod echo.mnx`.
+- Virtual **`/ram`**: ramfs.
+- Live `/proc/mounts` (qemu-connect 2026-08-07): `/dev/hda / ext2`, `ramfs /ram`, `proc /proc`, `devtmpfs /dev`.
+- Writes: create/unlink/mkdir/rmdir/chmod/rename/link as wired in syscalls → vops → ext2.
 - **Not yet:** `symlink`/`readlink`/`statx`; `mount`/`umount` syscalls; full dentry cache.
 
 ---
@@ -219,8 +234,8 @@ Foundation for threads is in; polish and next architecture:
 1. ~~Per-process page tables + fork without snapshots~~ ✅  
 2. ~~Scheduler + `clone` + futex~~ ✅ (practical slices)  
 3. ~~Signals (`rt_sigreturn`, delivery, `tgkill`, Ctrl-C)~~ ✅ (practical slices)  
-4. Full signal frames (`siginfo`/`ucontext`), futex timeout, musl pthread soak  
-5. ~~`pipe`/`dup`, `rename`/`link`, VFS + modules~~ ✅ practical (P7–P8); still missing `readlink`/`symlink`, file-backed `mmap`  
+4. Full signal frames (`siginfo`/`ucontext`), absolute/PI futex, musl pthread soak  
+5. ~~`pipe`/`dup`, `rename`/`link`, VFS + modules~~ ✅ P7–P8c (MNX1 + ELF ET_REL `.ko`); still missing `readlink`/`symlink`, file-backed `mmap`  
 6. Broader syscall surface (Phase 9); network optional
 
 Using **wrong syscall numbers** would make Linux binaries impossible — munux keeps Linux numbers from v0.2 forward.
@@ -237,4 +252,5 @@ Using **wrong syscall numbers** would make Linux binaries impossible — munux k
 | 0.2+FD | Per-process FD tables |
 | 0.2+TLS | `arch_prctl`, nest-safe enter_user TLS |
 | 0.2+BusyBox | Large static ELF, brk/mmap, FS syscalls, ash bring-up |
-| **0.3** | Private mm, preempt, `clone`/tid, signals, futex (2026-08); ~65 dispatched |
+| **0.3** | Private mm, preempt, `clone`/tid, signals, futex (2026-08) |
+| **0.3.1** | Doc sync with P7d/P8 dispatch: **76** numbers including pipe/dup/rename/link/modules (2026-08-07) |

@@ -3,9 +3,11 @@
 //! Conceptual Linux LKM lifecycle without mainline `.ko` binary compatibility:
 //! export table → load container → relocate → `init()` → live → `exit()` → free.
 //!
-//! Admin interface for this slice: kernel shell `insmod` / `rmmod` / `lsmod`.
-//! File format: **MNX1** (`module::mnx`). Builtin `hello` works without disk.
+//! Admin: kernel shell + Linux `init_module` / `finit_module` / `delete_module`.
+//! Formats: **MNX1** (`module::mnx`) and ELF64 **ET_REL** `.ko` (`module::elfrel`).
+//! Builtin `hello` works without disk.
 
+pub mod elfrel;
 pub mod export;
 pub mod mnx;
 
@@ -233,11 +235,17 @@ impl ModuleError {
     }
 }
 
+fn strip_mod_suffix(base: &str) -> &str {
+    base.strip_suffix(".ko")
+        .or_else(|| base.strip_suffix(".mnx"))
+        .unwrap_or(base)
+}
+
 /// Load a module by name or path.
 ///
-/// - `hello` → try `/lib/modules/hello.mnx`, else builtin `hello`
-/// - `/path/to/foo.mnx` → load file
-/// - bare name `foo` → `/lib/modules/foo.mnx`
+/// - `hello` → `/lib/modules/hello.ko`, then `.mnx`, else builtin `hello`
+/// - `/path/to/foo.ko` or `.mnx` → load that file (ELF ET_REL or MNX1)
+/// - bare name `foo` → try `.ko` then `.mnx` under `/lib/modules/`
 pub fn insmod(arg: &str) -> Result<(), ModuleError> {
     let arg = arg.trim();
     if arg.is_empty() {
@@ -247,9 +255,9 @@ pub fn insmod(arg: &str) -> Result<(), ModuleError> {
     // Derive module name for duplicate check / table.
     let name = if arg.starts_with('/') {
         let base = arg.rsplit('/').next().unwrap_or(arg);
-        base.strip_suffix(".mnx").unwrap_or(base)
+        strip_mod_suffix(base)
     } else {
-        arg.strip_suffix(".mnx").unwrap_or(arg)
+        strip_mod_suffix(arg)
     };
     if name.is_empty() || name.len() > MNX_NAME_LEN {
         return Err(ModuleError::BadPath);
@@ -258,20 +266,21 @@ pub fn insmod(arg: &str) -> Result<(), ModuleError> {
         return Err(ModuleError::Exists);
     }
 
-    let path_owned;
-    let path: &str = if arg.starts_with('/') {
-        arg
-    } else {
-        path_owned = format_module_path(name);
-        path_owned.as_str()
-    };
+    if arg.starts_with('/') {
+        return try_load_file(arg, name);
+    }
 
-    // Try file first. Explicit paths must succeed or fail without builtin.
-    match try_load_file(path, name) {
+    // Bare name: .ko (ELF) then .mnx then builtin hello.
+    let ko = format_module_path(name, b".ko");
+    match try_load_file(ko.as_str(), name) {
+        Ok(()) => return Ok(()),
+        Err(ModuleError::NotFound) | Err(ModuleError::Io) => {}
+        Err(e) => return Err(e),
+    }
+    let mnx = format_module_path(name, b".mnx");
+    match try_load_file(mnx.as_str(), name) {
         Ok(()) => Ok(()),
-        Err(e) if arg.starts_with('/') => Err(e),
         Err(ModuleError::NotFound) | Err(ModuleError::Io) => {
-            // Bare name: fall back to builtin hello.
             if name == "hello" {
                 load_builtin("hello", builtin_hello_init, Some(builtin_hello_exit))
             } else {
@@ -282,7 +291,7 @@ pub fn insmod(arg: &str) -> Result<(), ModuleError> {
     }
 }
 
-/// Small path buffer: `/lib/modules/<name>.mnx`
+/// Small path buffer: `/lib/modules/<name>.<ext>`
 struct PathBuf {
     data: [u8; 64],
     len: usize,
@@ -294,13 +303,12 @@ impl PathBuf {
     }
 }
 
-fn format_module_path(name: &str) -> PathBuf {
+fn format_module_path(name: &str, suffix: &[u8]) -> PathBuf {
     let mut p = PathBuf {
         data: [0; 64],
         len: 0,
     };
     let prefix = b"/lib/modules/";
-    let suffix = b".mnx";
     let nb = name.as_bytes();
     if prefix.len() + nb.len() + suffix.len() > p.data.len() {
         return p;
@@ -346,7 +354,7 @@ fn try_load_file(path: &str, name: &str) -> Result<(), ModuleError> {
         }
     }
     let bytes = unsafe { core::slice::from_raw_parts(tmp, total) };
-    let loaded = match mnx::load_from_bytes(bytes) {
+    let loaded = match load_image(bytes, name) {
         Ok(l) => l,
         Err(e) => {
             kfree(tmp);
@@ -456,14 +464,24 @@ fn install_loaded(name: &str, loaded: LoadedMnx, builtin: bool) -> Result<(), Mo
     Ok(())
 }
 
+/// Detect MNX1 vs ELF64 ET_REL and relocate into a heap image.
+fn load_image(bytes: &[u8], name_hint: &str) -> Result<mnx::LoadedMnx, MnxError> {
+    if elfrel::is_elf(bytes) {
+        elfrel::load_from_bytes(bytes, name_hint)
+    } else {
+        mnx::load_from_bytes(bytes)
+    }
+}
+
 /// Load a module image already in a kernel-accessible buffer (for `init_module`).
 ///
-/// `name_hint` is used only if the MNX header name is empty.
+/// `name_hint` is used if the container has no embedded name (MNX header /
+/// ELF `.modinfo name=`).
 pub fn init_from_image(bytes: &[u8], name_hint: &str) -> Result<(), ModuleError> {
     if bytes.is_empty() {
         return Err(ModuleError::Format(MnxError::Truncated));
     }
-    let loaded = mnx::load_from_bytes(bytes).map_err(ModuleError::Format)?;
+    let loaded = load_image(bytes, name_hint).map_err(ModuleError::Format)?;
 
     let mut name_buf = [0u8; MNX_NAME_LEN];
     let nlen = loaded.name_len.min(MNX_NAME_LEN);

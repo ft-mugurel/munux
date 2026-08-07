@@ -1,7 +1,7 @@
 # munux memory layout
 
 **Status:** living layout freeze (private mm + shared-mm threads).  
-**Last updated:** 2026-08-02.
+**Last updated:** 2026-08-07 (P7–P8c done; layout unchanged).
 
 Higher-half is **not** required yet. The kernel stays in the **identity window** until a later milestone.
 
@@ -64,7 +64,7 @@ Canonical user half ends at `0x0000_8000_0000_0000` (non-canonical gap).
 
 Kernel shell: `preempt` / `preempttest` (A–G). Userspace: `clonetest`, `signaltest`, `futextest`.
 
-**Next (not mm):** Phase 9 Linux surface (file-backed mmap, symlink/statx, epoll). Optional mm polish: COW fork, higher-half, demand paging. P7–P8 practical are done.
+**Next (not mm):** leftover P8 (IDE-as-module) or Phase 9 (file-backed mmap, symlink/statx, epoll). Optional mm polish: COW fork, higher-half, demand paging.
 
 ---
 

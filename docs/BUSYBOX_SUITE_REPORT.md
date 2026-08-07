@@ -4,9 +4,28 @@
 > Product direction: Linux-compatible Rust kernel (threads, modules, mm isolation).  
 > See [ROADMAP.md](ROADMAP.md) and the root [README.md](../README.md).
 
-**Note (2026-08-02):** This report is a **snapshot of the last automated run**. Architecture work
-since then (private mm, preemption, `clone`, signals, futex) is covered by focused smokes, not a
-re-scored suite JSON. Re-run `scripts/busybox_suite.py` to refresh numbers.
+**Note:** `scripts/busybox_suite.py` is **not in this tree**. The JSON + table below are a
+**historical snapshot** of the last full automated run (2026-08-02). Do not treat
+`mv_f` / rename ENOSYS as current. Re-score with qemu-connect (or restore the
+harness) before claiming suite totals.
+
+## Current overlay (qemu-connect, this tree, 2026-08-07)
+
+After P7d (`rename`/`link`/`pipe`/`dup`) and P8 (modules), headless guest
+(`/home/mtu/MTU/xAI/trace/munux/KFS/build/{kernel.iso,disk.img}`, prompt `$`):
+
+| Check | Result |
+|-------|--------|
+| Boot → `$` | OK |
+| `busybox true` / `busybox uname` | OK (`uname` → `munux`) |
+| `busybox touch` + `cp` + **`mv`** + **`ln`** | **PASS** — `rename`(82) and `link`(86) dispatched; files appeared |
+| `signaltest` / `futextest` / `forktest` / `clonetest` | PASS (`caught`+`parent ok`; `child ok`/`parent ok`) |
+| `insmod`/`lsmod`/`rmmod` hello + echo + `echotest` | PASS (`echotest: PASS`; `/dev/echo` appears/disappears) |
+| `preempttest` (kernel shell) | `pass=7 fail=0` |
+| Freestanding `sh` + `\|` | **Does not parse pipes** (echoed literally); syscall `pipe` still exists |
+| `find .` | Not re-run (historically HANG — leave open) |
+
+`docs/BUSYBOX_SUITE_RESULTS.json` is **not** rewritten — it remains the 2026-08-02 dump.
 
 ## Method (corrected)
 
@@ -15,25 +34,27 @@ re-scored suite JSON. Re-run `scripts/busybox_suite.py` to refresh numbers.
 - Console settle + re-read (no prompt-race false PASS).
 - Kernel: user/fork stacks **1 MiB**; execve argv up to **16** words.
 
-## Summary (last full automated run)
+## Summary (last full automated run — 2026-08-02, stale)
 
 | Status | Count |
 |--------|------:|
 | `PASS` | 46 |
 | `FAIL_PANIC` | 0 |
-| `FAIL_ENOSYS` | 1 (`mv` / `rename`) |
+| `FAIL_ENOSYS` | 1 (`mv` / `rename`) — **superseded**: `mv` PASSes on 2026-08-07 |
 | `FAIL_ERROR` | 0 |
 | `HANG` | 1 (`find .`) |
 | **Total** | **48** |
 
 ### Known vs earlier “post-report” notes
 
-| Item | Status (2026-08-02) |
+| Item | Status (2026-08-07) |
 |------|---------------------|
-| `rename` (82) + BusyBox `mv` | Still **ENOSYS** (not in syscall dispatch) |
-| Interactive ash + external cmds | Improved with nest/preempt work; re-verify if needed |
-| `find .` hang | **Still open** |
-| Threads / signals / futex | Not suite cases — use `clonetest` / `signaltest` / `futextest` |
+| `rename` (82) + BusyBox `mv` | **Done** (P7d; qemu-connect confirmed) |
+| `link` (86) + BusyBox `ln` | **Done** (already PASS in 2026-08-02 dump; still OK) |
+| Interactive ash + external cmds | Improved with nest/preempt work; default boot shell is freestanding `/bin/sh` |
+| `find .` hang | **Still open** (not re-run) |
+| Threads / signals / futex | Focused smokes green (`clonetest` / `signaltest` / `futextest`) |
+| Suite runner in-tree | **Missing** — docs previously claimed `scripts/busybox_suite.py` |
 
 ## Full results
 
@@ -55,7 +76,7 @@ re-scored suite JSON. Re-run `scripts/busybox_suite.py` to refresh numbers.
 | `chown_f` | `busybox chown 0 t_suite.txt` | **PASS** | True | (ok empty) |
 | `ln_f` | `busybox ln t_suite.txt t_link.txt` | **PASS** | True | (ok empty) |
 | `cp_f` | `busybox cp t_suite.txt t_copy.txt` | **PASS** | True | (ok empty) |
-| `mv_f` | `busybox mv t_copy.txt t_moved.txt` | **FAIL_ENOSYS** | True | syscall: ENOSYS n=82 (-38) mv: can't rename 't_copy.txt': Function not implemented |
+| `mv_f` | `busybox mv t_copy.txt t_moved.txt` | **FAIL_ENOSYS** *(2026-08-02 dump)* | True | **Superseded 2026-08-07:** rename is dispatched; qemu-connect `busybox mv` PASS |
 | `diff_f` | `busybox diff t_suite.txt t_moved.txt` | **PASS** | True | diff: can't stat 't_moved.txt': No such file or directory |
 | `tar_c` | `busybox tar -cf t.tar t_suite.txt` | **PASS** | True | (ok empty) |
 | `tar_t` | `busybox tar -tf t.tar` | **PASS** | True | t_suite.txt |
@@ -98,7 +119,7 @@ _(none)_
 
 ## FAIL_ENOSYS
 
-`mv_f`
+`mv_f` — **historical only** (2026-08-02). Current kernel implements `rename`; see overlay.
 
 ## FAIL_ERROR
 

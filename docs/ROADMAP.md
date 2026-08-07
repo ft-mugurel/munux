@@ -1,6 +1,6 @@
 # munux roadmap — Linux-compatible kernel in Rust
 
-**Last updated:** 2026-08-07 (P1–P8 practical landed; next is Phase 9).
+**Last updated:** 2026-08-07 (P1–P8c landed: MNX1 + ELF ET_REL `.ko`).
 
 **Goal:** a **Linux x86_64 ABI–compatible** kernel written in Rust, not “run every BusyBox applet.”
 
@@ -11,7 +11,7 @@ BusyBox / musl binaries are **compatibility probes** (does `fork`/`clone`/`mmap`
 **North stars:**
 
 1. **Thread support** (Linux `clone` / TID model / futex) — **foundation in place**
-2. **Kernel modules** (loadable objects, symbol export, init/exit) — **practical slice done (P8a+b)**
+2. **Kernel modules** (loadable objects, symbol export, init/exit) — **P8a–8c done** (MNX1 + ET_REL `.ko`)
 
 ---
 
@@ -26,13 +26,13 @@ BusyBox / musl binaries are **compatibility probes** (does `fork`/`clone`/`mmap`
 | Scheduling | Timer user→user preempt (`TrapFrame`); nest policy depth ≤ 1 | OK for user threads |
 | Threads | **`clone`**, shared mm/files, gettid/tgid | OK (no full musl pthread suite yet) |
 | Signals | kill/tgkill, masks, handlers, rt_sigreturn, Ctrl-C | OK for practical use |
-| Futex | WAIT/WAKE + clear_child_tid wake | OK basic join |
+| Futex | WAIT/WAKE/REQUEUE + timeout + clear_child_tid | OK basic join |
 | FS | **VFS P7 practical**: fops, mounts, proc, mutations, pipes | OK for modules |
 | Drivers | chrdev + blkdev; IDE as `hda` | OK for modules |
-| Modules | **P8a+b**: MNX1 loader, syscalls, `/dev/echo` module + refcount | ELF ET_REL optional |
+| Modules | **P8a–8c**: MNX1 + ELF ET_REL `.ko`, syscalls, `/dev/echo` | IDE-as-module still open |
 
-**Implication:** P7 + **P8 practical** landed (hello + `/dev/echo` + userspace insmod).  
-**Next epic: Phase 9** (broader Linux surface). Optional: ELF ET_REL `.ko`-like loader.
+**Implication:** P7 + **P8a–8c** landed (hello/echo as `.mnx` and `.ko`).  
+**Next:** leftover P8 (IDE-as-module) or Phase 9 Linux surface.
 
 ---
 
@@ -261,14 +261,15 @@ threads, wait runs Ready **children only**, nest-safe spurious wake. Smoke: `fut
 
 ## Phase 8 — Kernel modules (north star #2)
 
-**Status (2026-08-07):** **done (practical)** — 8a loader + 8b chardev.
+**Status (2026-08-07):** **8a–8c done** — MNX1 + ELF64 ET_REL `.ko` + echo chardev.
 
-- MNX1 container (not mainline `.ko`), export table, relocs, heap mapping  
-- Kernel shell + **userspace** `/bin/insmod|rmmod|lsmod` via Linux syscalls  
-- `hello.mnx`; `echo.mnx` → `/dev/echo` with open refcount / EBUSY `rmmod`  
-- `/proc/modules`  
+- MNX1 container **and** ELF64 ET_REL `.ko` (not mainline vermagic / GPL ksymtab)
+- Export table + PC32 trampolines so `call munux_*` from high-heap images works
+- Kernel shell + **userspace** `/bin/insmod|rmmod|lsmod` via Linux syscalls
+- `hello.mnx` / `hello.ko`; `echo.mnx` / `echo.ko` → `/dev/echo` + EBUSY unload
+- `/proc/modules`
 
-Not done (optional P8 polish or P9): ELF ET_REL, vermagic, depmod, IDE-as-module.
+Still open in P8: vermagic, depmod, **IDE-as-module** (root disk chicken/egg).
 
 ### What “Linux-compatible modules” means for munux
 
@@ -287,7 +288,7 @@ Aim for **conceptual compatibility** with Linux LKMs, not binary `.ko` from main
 |-------|-------------|--------|
 | `struct module` | name, state, refcount, init/exit, section pointers | ✅ |
 | Export table | C ABI: printk, register/unregister chrdev | ✅ |
-| Loader | **MNX1** (not ET_REL `.ko`), x86_64 abs relocs | ✅ practical |
+| Loader | **MNX1** + **ELF64 ET_REL** `.ko` (PC32 trampolines) | ✅ 8c |
 | Admin | kernel shell + `init_module`/`delete_module`/`finit_module` + `/bin/*` | ✅ |
 | Memory | kmalloc heap + dual-map into kernel CR3 | ✅ workaround |
 | Safety | unload only if refcount 0; chrdev open holds ref | ✅ |
@@ -302,9 +303,9 @@ Recommended approach:
 
 ### Exit criteria
 
-- Load `hello.ko` (or `hello.mnx`) that prints on init and unloads cleanly. ✅ `.mnx`
-- Load a **char device module** that creates `/dev/echo` and works with `open`/`read`/`write`. ✅
-- Built-in IDE driver can later be recompiled as a module without API rewrite. ❌ not started
+- Load `hello.ko` (or `hello.mnx`) that prints on init and unloads cleanly. ✅ both
+- Load a **char device module** that creates `/dev/echo` and works with `open`/`read`/`write`. ✅ `.mnx` + `.ko`
+- Built-in IDE driver can later be recompiled as a module without API rewrite. ❌ still built-in `hda`
 
 ### Non-goals early (still not done)
 
@@ -352,7 +353,7 @@ Syscall coverage % is a **metric**, not a milestone by itself.
 | **M4** | **clone + TID + shared mm/files** | Threads exist | ✅ done |
 | **M5** | **signals + futex + clear_child_tid** | kill/handlers/Ctrl-C; join path | ✅ practical |
 | **M6** | **VFS ops + register_chrdev** | Pluggable drivers | ✅ P7 practical |
-| **M7** | **module loader + EXPORT_SYMBOL + hello + echo chrdev** | Loadable kernel code | ✅ P8a+b practical |
+| **M7** | **module loader + EXPORT_SYMBOL + hello + echo chrdev** | Loadable kernel code | ✅ P8a–8c (MNX1 + ET_REL) |
 
 Everything else (more syscalls, net, polish) hangs off this spine.
 
@@ -379,7 +380,7 @@ What **to** keep:
 | Identity-map kernel forever blocks high-half / modules | Plan kernel VA when modules need it; identity is OK for P7 start |
 | Nest depth ≥ 2 stays cooperative | Document; only deepen nest preempt with careful testing |
 | Rust module ABI fragility | C ABI boundary for all module exports |
-| Too many goals at once | Active epic: **Phase 9** Linux surface (not more BusyBox stubs) |
+| Too many goals at once | Finish P8 leftovers deliberately, then Phase 9 — not BusyBox stubs |
 | BusyBox regressions demoralize | Gate: suite + focused smokes after each M*, not drive design |
 
 ---
@@ -400,16 +401,16 @@ munux is a **Linux-compatible teaching/research kernel in Rust** when:
 
 ## Immediate recommendation (handoff for next session)
 
-**Phase 8 practical is done.** Do not restart P8 unless you want ELF ET_REL.
+**Phase 8c (ELF ET_REL) landed.** Remaining P8: IDE-as-module (optional), vermagic/depmod (non-goals).
 
-**Start Phase 9** — pick one high-value Linux-surface slice:
+**Next:** finish leftover P8 (IDE API / module) **or** start Phase 9 Linux surface:
 
-1. **File-backed `mmap` + ELF polish** (unlocks more musl/dynamic later)  
-2. **`readlink` / `symlink` / `statx`** (real tooling)  
-3. **`epoll`/`select`** (evented programs; pipes already exist)  
-4. Optional P8 polish only if needed: ET_REL `.ko`-like loader, vermagic, IDE-as-module  
+1. **File-backed `mmap` + ELF polish**
+2. **`readlink` / `symlink` / `statx`**
+3. **`epoll`/`select`**
+4. IDE-as-module (needs initrd or keep IDE built-in)
 
 Keep qemu-connect smokes green: `signaltest`, `clonetest`, `futextest`, `echotest`,
-`preempttest`, BusyBox suite.
+`insmod …/hello.ko`, `preempttest`.
 
 See [SMOKE_MODULE.md](SMOKE_MODULE.md) · [SMOKE_VFS.md](SMOKE_VFS.md).

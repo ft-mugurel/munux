@@ -32,13 +32,12 @@ See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phased plan.
 
 ## Current status (x86_64 `main`)
 
-**Phases 1–8 practical** are in place: mm, preempt, threads, signals, futex,
-VFS (incl. pipes/vops), and **loadable modules** (MNX1 + Linux `init_module` /
-`delete_module` / `finit_module`, `/bin/insmod|rmmod|lsmod`, `hello.mnx`,
-`echo.mnx` → `/dev/echo` with unload refcount).
+**Phases 1–8c** are in place: mm, preempt, threads, signals, futex,
+VFS (incl. pipes/vops), and **loadable modules** (MNX1 **and** ELF64 ET_REL `.ko`
++ Linux `init_module` / `delete_module` / `finit_module`, `/bin/insmod|rmmod|lsmod`,
+`hello.{mnx,ko}`, `echo.{mnx,ko}` → `/dev/echo` with unload refcount).
 
-**Next epic: Phase 9** (broader Linux surface). Optional P8 polish: ELF ET_REL
-`.ko`-style loader (not required for the north-star demo).
+**Next:** leftover P8 (IDE-as-module) or **Phase 9** Linux surface.
 
 ### Boot & build
 - Multiboot → long mode trampoline → Rust `kmain`
@@ -74,11 +73,11 @@ VFS (incl. pipes/vops), and **loadable modules** (MNX1 + Linux `init_module` /
 - ATA PIO **IDE** via blockdev; **ext2** via VFS; **`/proc`** + **`/dev`** virtual
 - FD tables: clone/share; open/read/write via VFS
 
-### Modules (P8 practical)
-- `src/module/`: `struct module`, export table, **MNX1** loader + relocs
+### Modules (P8a–8c)
+- `src/module/`: `struct module`, export table, **MNX1** + **ELF64 ET_REL** `.ko`
 - Syscalls: `init_module` (175), `delete_module` (176), `finit_module` (313)
 - `/proc/modules`; userspace `/bin/insmod` `/bin/rmmod` `/bin/lsmod`
-- `hello.mnx` (printk); `echo.mnx` registers `/dev/echo` via C-ABI `register_chrdev`
+- `hello.mnx` / `hello.ko` (printk); `echo.*` registers `/dev/echo` via C-ABI `register_chrdev`
 - Unload blocked while the device is open (`echotest` checks EBUSY)
 - Kernel debug shell also has `insmod` / `rmmod` / `lsmod` (after `exit` from sh)
 
@@ -110,12 +109,16 @@ VFS (incl. pipes/vops), and **loadable modules** (MNX1 + Linux `init_module` /
 ## Quick start
 
 ```sh
-make              # build ISO + disk + boot (run-iso)
-make run          # -kernel + IDE disk (faster iteration)
+make              # same as make run → run-iso (ISO + disk + QEMU)
+make run          # alias for run-iso (Multiboot2 ELF64 needs GRUB, not -kernel)
+make run-iso      # GRUB ISO (cdrom) + ext2 disk
 make iso          # build kernel.iso only
+make disk         # recreate build/disk.img
 make help         # all targets
 make size         # kernel / ISO size report
 ```
+
+QEMU `-kernel` **cannot** load this Multiboot2 x86_64 ELF. Always boot via ISO (`make run` / `make run-iso` / `make debug-iso`).
 
 ### Useful targets
 
@@ -123,17 +126,18 @@ make size         # kernel / ISO size report
 |--------|-------------|
 | `build` | Release kernel → `build/kernel.bin` |
 | `build_debug` | Debug symbols |
-| `run` | QEMU `-kernel` + `disk.img` on IDE index 0 |
-| `run-iso` | GRUB ISO (cdrom) + disk |
+| `run` | Alias of `run-iso` |
+| `run-iso` | GRUB ISO (cdrom) + ext2 disk |
 | `iso` | Produce `build/kernel.iso` |
 | `disk` | Recreate ext2 `build/disk.img` (+ rootfs tools) |
-| `debug` / `debug-gdb` | QEMU GDB stub + `gdb/kfs.gdb` |
+| `debug-iso` | Debug kernel + ISO + GDB stub (preferred) |
+| `debug` / `debug-gdb` | `-kernel` + GDB — **may not boot** this Multiboot2 ELF |
 | `size` | Print artifact sizes |
 | `clean` / `fclean` / `re` | Cleanup / rebuild |
 
 **IDE layout:** primary master (`index=0`) = ext2 disk; ISO uses `index=1` as cdrom.
 
-**Headless automation:** [qemu-connect](https://github.com/) (external) + `scripts/busybox_suite.py` for the strict suite.
+**Headless automation:** qemu-connect MCP/CLI. Pass **this** tree’s `build/kernel.iso` + `build/disk.img` and prompt `$`. Default env `QEMU_CONNECT_MUNUX` may point at another checkout. There is **no** in-tree `scripts/busybox_suite.py`.
 
 ---
 
@@ -148,6 +152,7 @@ make size         # kernel / ISO size report
 | `ls`, `cat`, … | `fork` + `execve` of `/bin/<cmd>` (embedded or disk) |
 | `insmod` / `rmmod` / `lsmod` / `echotest` | Loadable modules (need disk `.mnx`) |
 | `busybox …` | Static BusyBox from rootfs |
+| `cmd \| cmd` | **Not parsed** by this shell (`|` is just argv). `pipe(2)` exists for programs that call it. |
 
 ### Kernel debug shell (after `exit` from sh)
 
@@ -201,7 +206,6 @@ Coverage vs Linux: **[docs/SYSCALL_COMPARE.md](docs/SYSCALL_COMPARE.md)**.
 ├── grub/grub.cfg
 ├── userland/           # freestanding asm apps (sh, ls, cat, insmod, …)
 ├── modules/            # MNX1 sources (hello.asm, echo.asm)
-├── scripts/            # busybox_suite.py (strict regression)
 ├── docs/               # ABI, roadmap, syscall compare, suite reports
 ├── SMOKE.md
 └── src/
@@ -210,7 +214,7 @@ Coverage vs Linux: **[docs/SYSCALL_COMPARE.md](docs/SYSCALL_COMPARE.md)**.
     ├── interrupts/     # IDT, PIC, exceptions, keyboard, timer
     ├── memory/         # PMM, paging (clone_mm), heap, Multiboot
     ├── process/        # PCB, fork, clone, sched, signals, futex, sys
-    ├── module/         # loadable modules (export, MNX1, list)
+    ├── module/         # loadable modules (export, MNX1, ELF ET_REL)
     ├── tty.rs          # Ctrl-C → SIGINT hooks
     ├── drivers/ide.rs
     ├── fs/             # ext2, path, procfs, vcore/vops, vfs
@@ -245,10 +249,11 @@ rustup toolchain install nightly
 1. Manual checklist: **[SMOKE.md](SMOKE.md)**  
 2. Focused tests (userspace / kernel shell):
    - `$ signaltest` · `$ clonetest` · `$ futextest` · `$ forktest`
-   - `$ insmod /lib/modules/echo.mnx` · `$ echotest` · `$ rmmod echo`
+   - `$ insmod /lib/modules/hello.ko` · `$ rmmod hello`
+   - `$ insmod /lib/modules/echo.ko` · `$ echotest` · `$ rmmod echo`
    - `munux> preempttest` (IRQ preemption A–G)
-3. Strict BusyBox suite: `scripts/busybox_suite.py` → `docs/BUSYBOX_SUITE_REPORT.md`  
-4. Headless: `make iso disk`, then **qemu-connect** with prompt `$`
+3. BusyBox probe notes: `docs/BUSYBOX_SUITE_REPORT.md` (2026-08-02 dump + 2026-08-07 overlay)  
+4. Headless: `make iso disk`, then **qemu-connect** with this tree’s ISO/disk and prompt `$`
 
 ### Quick smoke after boot
 
@@ -257,10 +262,10 @@ $ signaltest          # caught + parent ok
 $ clonetest
 $ futextest
 $ forktest
-$ insmod /lib/modules/hello.mnx
+$ insmod /lib/modules/hello.ko
 $ lsmod
 $ rmmod hello
-$ insmod /lib/modules/echo.mnx
+$ insmod /lib/modules/echo.ko
 $ echotest            # PASS + EBUSY while open
 $ rmmod echo
 $ busybox true
@@ -275,11 +280,11 @@ Need **`make disk`** so `/lib/modules/*.mnx` and `/bin/insmod` are on the image.
 
 ## Known limitations (current)
 
-**Modules (P8 — practical, not Linux-complete)**
-- Format is **MNX1**, not a mainline Linux **`.ko`** (no ET_REL, vermagic, GPL symbols)
+**Modules (P8a–8c — conceptual LKMs, not mainline-complete)**
+- Formats: **MNX1** and ELF64 **ET_REL** `.ko` (no vermagic, GPL ksymtab, or Linux `.ko` ABI)
 - No `depmod` / module dependency tree, signing, livepatch
 - IDE is still a **built-in**, not a loadable driver
-- Heap dual-map + CR3 switch is a teaching workaround (not Linux `vmalloc` + shared kernel PDPT)
+- Heap dual-map + PC32 trampolines (not Linux `vmalloc` + shared kernel PDPT)
 
 **Process / MM**
 - **No full Linux signal frame** (`siginfo` / `ucontext` / SA_NODEFER / RT signals)

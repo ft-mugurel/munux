@@ -822,7 +822,7 @@ fn cmd_help() {
     console::println("  preempt/sched   Show IRQ preemption counter");
     console::println("  preempttest     Specific IRQ preempt checks (A-G)");
     console::println("  vfs / mounts    Phase 7 VFS mounts + chrdevs");
-    console::println("  insmod <name|path>  Load module (hello or /lib/modules/*.mnx)");
+    console::println("  insmod <name|path>  Load module (.ko / .mnx / builtin hello)");
     console::println("  rmmod <name>    Unload module");
     console::println("  lsmod           List loaded modules + export count");
     console::println("  reboot / halt   Machine control");
@@ -841,7 +841,7 @@ fn cmd_help() {
 fn cmd_insmod(rest: &str) {
     let arg = rest.split_whitespace().next().unwrap_or("");
     if arg.is_empty() {
-        console::println("usage: insmod <name|/path/to.mnx>");
+        console::println("usage: insmod <name|/path/to.ko|.mnx>");
         console::println("  bare name looks in /lib/modules/<name>.mnx");
         console::println("  'hello' falls back to builtin if file missing");
         return;

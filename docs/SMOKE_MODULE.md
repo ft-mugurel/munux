@@ -1,7 +1,7 @@
 # Smoke: Phase 8 modules (insmod / rmmod / lsmod)
 
-**Status:** Phase 8a+b **practical done** (2026-08-07) — MNX1 loader, Linux
-syscalls, userspace tools, `/dev/echo` + unload refcount.
+**Status:** Phase **8a–8c** done (2026-08-07) — MNX1 + ELF64 ET_REL `.ko`,
+Linux syscalls, userspace tools, `/dev/echo` + unload refcount.
 
 ## Why kernel shell *and* normal shell?
 
@@ -18,20 +18,23 @@ munux matches that: kernel implements the syscalls + `/proc/modules`; `/bin/insm
 ## Userspace shell (`$` prompt) — preferred
 
 ```text
+$ ls /lib/modules          # hello.ko hello.mnx echo.ko echo.mnx
 $ lsmod
-$ insmod /lib/modules/hello.mnx
+$ insmod /lib/modules/hello.ko
 $ lsmod
 $ rmmod hello
-$ lsmod
+$ insmod /lib/modules/hello.mnx    # still supported
+$ rmmod hello
 $ cat /proc/modules
 ```
 
 Expected:
 
 1. Empty `lsmod` / empty `/proc/modules` at first.
-2. `insmod` → kernel prints `hello: module loaded (mnx)`.
-3. `lsmod` → line like `hello 100 0 - Live 0x0`.
-4. `rmmod hello` → unload; list empty again.
+2. `insmod …/hello.ko` → `hello: module loaded (elf)` then `module: loaded hello`.
+3. `lsmod` → line like `hello 368 0 - Live 0x0`.
+4. `rmmod hello` → `hello: module unloaded (elf)`.
+5. `.mnx` path still prints `(mnx)` and unloads cleanly.
 
 ## Kernel debug shell (after `exit`)
 
@@ -49,17 +52,25 @@ munux> rmmod hello
 make build iso disk
 ```
 
-Produces `/bin/insmod`, `/bin/rmmod`, `/bin/lsmod` and `/lib/modules/hello.mnx`.
+Produces `/bin/insmod`, `/bin/rmmod`, `/bin/lsmod` and
+`/lib/modules/{hello,echo}.{ko,mnx}`.
 
 ## Format note
 
-`.mnx` is **munux’s** module container (MNX1), not a mainline Linux `.ko`.
-See `src/module/mnx.rs` and `modules/hello.asm`.
+| Suffix | Format | Source |
+|--------|--------|--------|
+| `.mnx` | munux **MNX1** (abs64 relocs) | `modules/hello.asm` |
+| `.ko` | ELF64 **ET_REL** (not mainline vermagic) | `modules/hello.ko.asm` |
+
+Bare `insmod hello` tries `.ko` then `.mnx` then builtin `hello`.
+Userspace `insmod` uses `finit_module`; ELF name comes from `.modinfo name=`.
+
+See `src/module/mnx.rs`, `src/module/elfrel.rs`.
 
 ## Chardev module (`echo.mnx`) — Phase 8b
 
 ```text
-$ insmod /lib/modules/echo.mnx
+$ insmod /lib/modules/echo.ko     # or echo.mnx
 $ ls /dev
 $ echotest
 $ lsmod
@@ -73,22 +84,20 @@ Expected:
 3. `echotest: PASS` — write/read round-trip, and `delete_module` returns **EBUSY** while the fd is still open
 4. After `echotest` closes, `rmmod echo` succeeds and `/dev/echo` disappears
 
-## Not yet (do **not** restart P8 unless you want these)
+## Not yet
 
 | Missing | Notes |
 |---------|--------|
-| ELF **ET_REL** / mainline **`.ko`** | MNX1 is munux’s own container (`src/module/mnx.rs`) |
-| Vermagic / param string / GPL symbols | `init_module` ignores `uargs` |
+| Mainline Linux **vermagic / ksymtab / GPL** | Our `.ko` is ET_REL + munux exports only |
 | `depmod`, dependencies, signing, livepatch | Explicit non-goals |
-| IDE as a loadable module | Still built-in `hda` |
-| Shared kernel PDPT / `vmalloc` | Heap dual-map + `map_code_into_current` workaround |
+| IDE as a loadable module | Still built-in `hda` (disk is where `.ko` lives) |
+| Shared kernel PDPT / `vmalloc` | Heap dual-map + trampolines for PC32 |
 | Module-loaded filesystems | VFS can register; no example FS module yet |
 
-**Next epic is Phase 9** (see ROADMAP handoff): file-backed mmap, symlink/statx,
-epoll/select — not more module format work unless needed.
+**Next:** leftover P8 (IDE-as-module) or Phase 9 Linux surface. See ROADMAP.
 
 ## Sources
 
-- Kernel: `src/module/` (`mod.rs`, `export.rs`, `mnx.rs`)
-- Modules: `modules/hello.asm`, `modules/echo.asm`
+- Kernel: `src/module/` (`mod.rs`, `export.rs`, `mnx.rs`, `elfrel.rs`)
+- Modules: `modules/hello.asm`, `echo.asm`, `hello.ko.asm`, `echo.ko.asm`
 - Userspace: `userland/insmod.asm`, `rmmod.asm`, `lsmod.asm`, `echotest.asm`

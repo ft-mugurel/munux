@@ -4,10 +4,10 @@
 |----------|-------------|
 | **[../README.md](../README.md)** | Project overview, build, current capabilities |
 | **[ROADMAP.md](ROADMAP.md)** | Architecture plan: mm → schedule → threads → modules |
-| **[MM.md](MM.md)** | Memory layout + phase checklist (P1–P6) |
+| **[MM.md](MM.md)** | Memory layout + phase checklist (P1–P6 foundation; P7–P8 done, P9 next) |
 | **[SMOKE_VFS.md](SMOKE_VFS.md)** | VFS mounts / fops / pipes (Phase 7 practical) |
-| **[SMOKE_MODULE.md](SMOKE_MODULE.md)** | Modules: insmod/rmmod/lsmod, hello + `/dev/echo` (P8) |
-| **[ABI.md](ABI.md)** | Syscall calling convention, process/FD model (v0.3) |
+| **[SMOKE_MODULE.md](SMOKE_MODULE.md)** | Modules: MNX1 + ELF `.ko`, hello + `/dev/echo` (P8a–8c) |
+| **[ABI.md](ABI.md)** | Syscall calling convention, process/FD model (**v0.3.1**, 76 numbers) |
 | **[SYSCALL_COMPARE.md](SYSCALL_COMPARE.md)** | Full Linux x86_64 vs munux syscall matrix |
 | **[SMOKE_PREEMPT.md](SMOKE_PREEMPT.md)** | IRQ preemption (`preempttest` A–G) |
 | **[SMOKE_CLONE.md](SMOKE_CLONE.md)** | `clone` / tid smoke |
@@ -23,4 +23,4 @@
 1. **New contributor** → README → ROADMAP → ABI  
 2. **Implementing a syscall** → ABI + SYSCALL_COMPARE  
 3. **Regression after a change** → SMOKE + focused SMOKE_* + BusyBox suite  
-4. **Planning next architecture** → ROADMAP (Phase 9 Linux surface; P8 practical done)
+4. **Planning next architecture** → ROADMAP (P8c ET_REL done; leftover IDE-as-module or Phase 9)

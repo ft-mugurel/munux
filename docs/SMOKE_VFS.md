@@ -22,9 +22,12 @@
 | `cat /ram/hello` | ramfs says hi |
 | `cat /dev/null` | empty |
 | `mkdir t` / `rmdir t` | via vops |
-| BusyBox `mv` / `ln` | rename/link when exercised |
+| BusyBox `mv` / `ln` | **PASS** (qemu-connect 2026-08-07) — `rename`/`link` |
+| `cat /proc/mounts` | `/dev/hda / ext2`, `ramfs /ram`, `proc /proc`, `devtmpfs /dev` |
 
 **Known:** `cat /dev/zero` never ends (Linux-like). Prefer bounded reads.
+
+**Pipes vs shell:** `pipe`/`pipe2`/`dup`/`dup2` are kernel syscalls. Freestanding `/bin/sh` does **not** parse `|` (it execs `echo` with extra argv). Use a userspace shell that calls `pipe(2)` (BusyBox ash) to exercise pipelines.
 
 ## Phase 7 exit
 

@@ -1,4 +1,4 @@
-; insmod <path> — load a munux MNX1 module via finit_module (Linux #313)
+; insmod <path> — load a munux module (MNX1 or ELF ET_REL .ko) via finit_module (#313)
 ; Linux x86_64: open=2 close=3 write=1 exit=60 finit_module=313
 ;
 ; Usage: insmod /lib/modules/hello.mnx
@@ -76,7 +76,7 @@ _start:
 
 section .rodata
 empty_args:	db 0
-msg_usage:	db "usage: insmod <path.mnx>", 10
+msg_usage:	db "usage: insmod <path.ko|path.mnx>", 10
 msg_usage_len equ $ - msg_usage
 msg_open:	db "insmod: cannot open module file", 10
 msg_open_len equ $ - msg_open

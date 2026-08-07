@@ -1,16 +1,16 @@
 # Linux x86_64 syscalls vs munux
 
-**Last updated:** 2026-08-07.  
+**Last updated:** 2026-08-07 (count synced to dispatch `match`; qemu-connect smoke).  
 Source of Linux names/numbers: host `/usr/include/asm/unistd_64.h`.  
-Source of munux set: `src/syscalls/mod.rs` dispatch `match` (not merely `num` constants).
+Source of munux set: `src/syscalls/mod.rs` dispatch `match` (not merely `num` constants — `READLINK` is defined but ENOSYS).
 
 **Product goal:** Linux-compatible kernel (see [ROADMAP.md](ROADMAP.md)) — not 100% syscall count for its own sake.
 
 | Metric | Value |
 |--------|------:|
 | Linux (unistd_64.h) | **385** |
-| munux dispatched | **~75** (approx; see table) |
-| Coverage | **~19%** |
+| munux dispatched | **76** |
+| Coverage | **19.7%** |
 | Notable ENOSYS | `readlink`/`symlink`/`poll`/`epoll`/`statx`/`vfork`/… |
 
 Legend in the tables below: implemented rows list munux notes; “NOT in munux” means **`-ENOSYS`**.
@@ -54,8 +54,10 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 72 | `fcntl` | FCNTL | partial |
 | 79 | `getcwd` | GETCWD | implemented |
 | 80 | `chdir` | CHDIR | implemented |
+| 82 | `rename` | RENAME | done (vops) |
 | 83 | `mkdir` | MKDIR | implemented |
 | 84 | `rmdir` | RMDIR | implemented |
+| 86 | `link` | LINK | done (vops; hard link) |
 | 87 | `unlink` | UNLINK | implemented |
 | 90 | `chmod` | CHMOD | implemented |
 | 92 | `chown` | CHOWN | stub (always success) |
@@ -70,14 +72,12 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 110 | `getppid` | GETPPID | implemented |
 | 115 | `getgroups` | GETGROUPS | implemented |
 | 158 | `arch_prctl` | ARCH_PRCTL | implemented |
-| 82 | `rename` | RENAME | done (vops) |
-| 86 | `link` | LINK | done (vops) |
 | 162 | `sync` | SYNC | stub (no-op) |
 | 175 | `init_module` | INIT_MODULE | done (MNX1 image; params ignored) |
 | 176 | `delete_module` | DELETE_MODULE | done (EBUSY if refcount > 0) |
 | 186 | `gettid` | GETTID | done (unique tid) |
 | 200 | `tkill` | TKILL | done |
-| 202 | `futex` | FUTEX | done (WAIT/WAKE + PRIVATE) |
+| 202 | `futex` | FUTEX | done (WAIT/WAKE/REQUEUE/CMP_REQUEUE + PRIVATE + relative timeout) |
 | 217 | `getdents64` | GETDENTS64 | implemented |
 | 218 | `set_tid_address` | SET_TID_ADDRESS | done (+ clear wake on exit) |
 | 228 | `clock_gettime` | CLOCK_GETTIME | implemented |
@@ -421,4 +421,4 @@ Full remaining list (alphabetical by number):
 | 470 | `listns` |
 | 471 | `rseq_slice_yield` |
 
-Total missing: **305**
+Total missing: **309** (385 − 76). The numbered list below is the Linux x86_64 set minus munux dispatch; unused holes in `unistd_64.h` are omitted.
