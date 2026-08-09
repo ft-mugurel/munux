@@ -383,7 +383,7 @@ Syscall coverage % (**88 / 385 ≈ 22.9%** today) is a **progress metric** towar
 
 ## Epic LK — Linux driver sources (linuxkpi)
 
-**Plan:** [LINUXKPI.md](LINUXKPI.md). **L0–L5 done** (virtio-blk `/dev/vda`). Parallel to P9.
+**Plan:** [LINUXKPI.md](LINUXKPI.md). **L0–L5 + virtio-net done.** Parallel to P9 (sockets next for real userspace net).
 
 Compile Linux **`.c` drivers** against munux-owned `include/linux/*.h`. Implement that C API in Rust (`extern "C"`). Do **not** load prebuilt Ubuntu `.ko` files.
 
@@ -408,7 +408,7 @@ These are **in scope**. Internals can differ from Linux; the **result** must not
 |-------|--------------------------|-------|
 | **P10** | Dynamically linked musl/glibc binaries run | File-backed ELF maps, `PT_INTERP`, auxv/`AT_*`, TLS, `MAP_SHARED` as needed |
 | **P11** | Real terminals and job control | PTYs, termios, session/pgrp, `TIOCSCTTY`, `wait`/SIGCHLD polish — needed for a DE terminal |
-| **P12** | Networking works | `socket`/`bind`/`connect`/…, loopback, then virtio-net; desktop install + browsers need this |
+| **P12** | Networking works | virtio-net + ICMP ping ✅; still need `socket`/`bind`/`connect` for userspace |
 | **P13** | Graphics + input | Framebuffer or KMS/DRM + evdev/mice/keyboard in Linux ABI form; then Xorg or a Wayland compositor |
 | **P14** | **Install and use a Linux desktop** | Package a userspace (or boot a distro rootfs), start a display manager / DE, use it like Linux |
 
@@ -505,7 +505,7 @@ Milestones on that path:
 
 **P9 (userspace):** `execveat` / `prctl` → file-map ELF / `MAP_SHARED` → dynlink.
 
-**LK (drivers):** [LINUXKPI.md](LINUXKPI.md) — L0–L5 done. Next: virtio-net after P12, or more linuxkpi as needed.
+**LK (drivers):** [LINUXKPI.md](LINUXKPI.md) — L0–L5 + virtio-net (ICMP ping). Next: BSD sockets (P12) so userspace can use the NIC.
 
 Do not reopen P8 for MNX1 features. New modules are linuxkpi C.
 

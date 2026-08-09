@@ -33,6 +33,9 @@ $ rmmod vprobe
 $ insmod /lib/modules/virtio_blk.ko
 $ ls /dev                          # vda
 $ vdatest                          # PASS if vda.img starts with VIRTIOBLK
+# virtio-net needs -netdev user -device virtio-net-pci (make run)
+$ insmod /lib/modules/virtio_net.ko  # "virtio_net: ping 10.0.2.2 PASS"
+$ rmmod virtio_net
 $ insmod /lib/modules/hello.ko
 $ lsmod
 $ rmmod hello
@@ -79,6 +82,7 @@ Produces `/bin/insmod`, `/bin/rmmod`, `/bin/lsmod` and
 | `irqtest.ko` | gcc linuxkpi `request_irq(0, SHARED)` + completion | `modules/linux/irqtest.c` |
 | `vprobe.ko` | gcc linuxkpi `pci_register_driver` | `modules/linux/vprobe.c` |
 | `virtio_blk.ko` | modern virtio-pci blk → `/dev/vda` | `modules/linux/virtio_blk.c` |
+| `virtio_net.ko` | modern virtio-pci net + ICMP ping 10.0.2.2 | `modules/linux/virtio_net.c` |
 
 Bare `insmod hello` tries `.ko` then `.mnx` then builtin `hello`.
 Userspace `insmod` uses `finit_module`; ELF name comes from `.modinfo name=`.

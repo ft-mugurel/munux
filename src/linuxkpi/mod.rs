@@ -8,6 +8,7 @@ pub mod blk;
 pub mod fs;
 pub mod irq;
 pub mod mmio;
+pub mod net;
 pub mod pci;
 pub mod sync;
 pub mod uaccess;

@@ -127,6 +127,10 @@ const EXPORT_NAMES: &[&str] = &[
     "pci_find_capability",
     "munux_add_disk",
     "munux_del_disk",
+    "munux_register_nic",
+    "munux_unregister_nic",
+    "munux_netif_rx",
+    "munux_icmp_ping",
 ];
 
 /// Look up an exported symbol by name. Returns absolute address or None.
@@ -189,6 +193,10 @@ pub fn lookup(name: &str) -> Option<u64> {
         "pci_find_capability" => Some(linuxkpi::pci::pci_find_capability as usize as u64),
         "munux_add_disk" => Some(linuxkpi::blk::munux_add_disk as usize as u64),
         "munux_del_disk" => Some(linuxkpi::blk::munux_del_disk as usize as u64),
+        "munux_register_nic" => Some(linuxkpi::net::munux_register_nic as usize as u64),
+        "munux_unregister_nic" => Some(linuxkpi::net::munux_unregister_nic as usize as u64),
+        "munux_netif_rx" => Some(linuxkpi::net::munux_netif_rx as usize as u64),
+        "munux_icmp_ping" => Some(linuxkpi::net::munux_icmp_ping as usize as u64),
         _ => None,
     }
 }

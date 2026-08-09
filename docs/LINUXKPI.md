@@ -1,6 +1,6 @@
 # Linux driver sources on munux (linuxkpi)
 
-**Status:** L0–L5 **done** (2026-08-09). virtio-blk → `/dev/vda`. Next: more virtio (net) after P12, or P9 userspace.  
+**Status:** L0–L5 + virtio-net **done** (2026-08-09). `/dev/vda` + ICMP ping via virtio-net. Next: sockets (P12) or P9 userspace.  
 **Success bar (chosen):** **compile Linux driver `.c` sources** against munux headers, `insmod` the resulting ELF `.ko`, and have the device work.  
 **Not the bar:** drop a prebuilt Ubuntu/Fedora `.ko` into `/lib/modules` and have it load. That needs one exact Linux kernel ABI (vermagic + thousands of `EXPORT_SYMBOL`s + identical struct layouts).
 
@@ -187,7 +187,9 @@ src/module/export.rs       name → address (Linux names + munux_* aliases)
 src/module/elfrel.rs       loader (L0)
 modules/linux/hello.c
 modules/linux/echo.c
-modules/linux/Makefile     gcc -ffreestanding -fno-stack-protector -c
+modules/linux/virtio_blk.c
+modules/linux/virtio_net.c
+src/net/                   ARP + IPv4 ICMP (ping smoke)
 ```
 
 Makefile sketch (host gcc, same as other userland tools):
@@ -227,7 +229,7 @@ Do **not** pause Phase 9 forever. Interleave:
 4. ~~**L4** ioremap + PCI `pci_register_driver`~~ ✅ `vprobe.ko`  
 5. ~~**L5 virtio-blk**~~ ✅ `/dev/vda` + `vdatest: PASS`  
 6. **P9** `execveat` / `prctl` — can interleave  
-7. virtio-net after P12 sockets  
+7. ~~virtio-net~~ ✅ `virtio_net.ko` pings 10.0.2.2; sockets still P12  
 
 ---
 

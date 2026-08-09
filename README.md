@@ -84,7 +84,7 @@ Destination remains a **Linux desktop** (P10–P14). IDE stays built-in.
 - `hello.mnx` / `hello.ko` (printk); `echo.*` registers `/dev/echo` via C-ABI `register_chrdev`
 - Unload blocked while the device is open (`echotest` checks EBUSY)
 - Kernel debug shell also has `insmod` / `rmmod` / `lsmod` (after `exit` from sh)
-- **linuxkpi L0–L5:** `hello_c` / `echo_c` / `irqtest` / `vprobe` / **`virtio_blk.ko`** → `/dev/vda` (`vdatest`). `make run` attaches virtio-blk-pci + `build/vda.img`. qemu-connect is IDE-only (module prints no device). Plan: [docs/LINUXKPI.md](docs/LINUXKPI.md).
+- **linuxkpi L0–L5 + virtio-net:** `virtio_blk.ko` → `/dev/vda`; **`virtio_net.ko`** ICMP ping 10.0.2.2. `make run` attaches virtio-blk-pci + virtio-net-pci (user net). qemu-connect is IDE-only. Plan: [docs/LINUXKPI.md](docs/LINUXKPI.md).
 
 ### Console
 - VGA 80×25 text, PS/2 keyboard (US QWERTY)

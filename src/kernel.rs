@@ -33,6 +33,7 @@ pub mod gdt;
 pub mod interrupts;
 pub mod linuxkpi;
 pub mod memory;
+pub mod net;
 pub mod module;
 pub mod process;
 pub mod shell;

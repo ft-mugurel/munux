@@ -323,12 +323,14 @@ MODULE_VPROBE_C		=	modules/linux/vprobe.c
 MODULE_VPROBE_KO	=	build/rootfs/lib/modules/vprobe.ko
 MODULE_VIRTIO_BLK_C	=	modules/linux/virtio_blk.c
 MODULE_VIRTIO_BLK_KO	=	build/rootfs/lib/modules/virtio_blk.ko
+MODULE_VIRTIO_NET_C	=	modules/linux/virtio_net.c
+MODULE_VIRTIO_NET_KO	=	build/rootfs/lib/modules/virtio_net.ko
 LINUXKPI_CFLAGS		=	-ffreestanding -fno-stack-protector -fno-pic -fno-plt \
 				-mcmodel=large -mno-red-zone -fno-asynchronous-unwind-tables \
 				-fno-exceptions -fno-common -mno-mmx -mno-sse -mno-sse2 \
 				-O2 -Wall -Iinclude
 
-modules: ${MODULE_HELLO_MNX} ${MODULE_ECHO_MNX} ${MODULE_HELLO_KO} ${MODULE_ECHO_KO} ${MODULE_HELLO_C_KO} ${MODULE_ECHO_C_KO} ${MODULE_IRQTEST_KO} ${MODULE_VPROBE_KO} ${MODULE_VIRTIO_BLK_KO}
+modules: ${MODULE_HELLO_MNX} ${MODULE_ECHO_MNX} ${MODULE_HELLO_KO} ${MODULE_ECHO_KO} ${MODULE_HELLO_C_KO} ${MODULE_ECHO_C_KO} ${MODULE_IRQTEST_KO} ${MODULE_VPROBE_KO} ${MODULE_VIRTIO_BLK_KO} ${MODULE_VIRTIO_NET_KO}
 
 ${MODULE_HELLO_MNX}: ${MODULE_HELLO_ASM}
 	$(call require_tool,$(NASM),nasm)
@@ -383,6 +385,12 @@ ${MODULE_VIRTIO_BLK_KO}: ${MODULE_VIRTIO_BLK_C} include/linux/pci.h include/linu
 	@mkdir -p build/rootfs/lib/modules
 	@${CC} ${LINUXKPI_CFLAGS} -c -o ${MODULE_VIRTIO_BLK_KO} ${MODULE_VIRTIO_BLK_C}
 	@echo -e "$(BOLD)$(GREEN)[✓] MODULE virtio_blk.ko (linuxkpi virtio-blk)$(RESET)"
+
+${MODULE_VIRTIO_NET_KO}: ${MODULE_VIRTIO_NET_C} include/linux/pci.h include/linux/munux_net.h include/linux/dma-mapping.h include/linux/io.h
+	$(call require_tool,$(CC),gcc)
+	@mkdir -p build/rootfs/lib/modules
+	@${CC} ${LINUXKPI_CFLAGS} -c -o ${MODULE_VIRTIO_NET_KO} ${MODULE_VIRTIO_NET_C}
+	@echo -e "$(BOLD)$(GREEN)[✓] MODULE virtio_net.ko (linuxkpi virtio-net)$(RESET)"
 
 disk: userland modules
 	@mkdir -p build/rootfs/docs build/rootfs/bin build/rootfs/lib/modules
@@ -454,6 +462,8 @@ run-iso: iso disk $(VDA_IMG)
 		-drive format=raw,file=${ISO_OUT},if=ide,index=1,media=cdrom \
 		-drive format=raw,file=${VDA_IMG},if=none,id=vd0 \
 		-device virtio-blk-pci,drive=vd0 \
+		-netdev user,id=net0 \
+		-device virtio-net-pci,netdev=net0 \
 		-boot order=d \
 		-monitor stdio
 	@echo -e "\n$(BOLD)$(CYAN)[✓] KERNEL EXIT DONE$(RESET)"
