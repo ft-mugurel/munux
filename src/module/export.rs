@@ -7,32 +7,11 @@
 use crate::console;
 
 /// printk: `void munux_printk(const char *s)` — NUL-terminated C string.
+/// NASM modules omit `\\n`; linuxkpi `printk` prints the string as-is.
 #[no_mangle]
 pub extern "C" fn munux_printk(s: *const u8) {
-    if s.is_null() {
-        return;
-    }
-    // Bound scan so a bad pointer cannot walk forever.
-    let mut n = 0usize;
-    while n < 512 {
-        let b = unsafe { core::ptr::read_volatile(s.add(n)) };
-        if b == 0 {
-            break;
-        }
-        n += 1;
-    }
-    if n == 0 {
-        return;
-    }
-    let slice = unsafe { core::slice::from_raw_parts(s, n) };
-    if let Ok(text) = core::str::from_utf8(slice) {
-        console::println(text);
-    } else {
-        for &b in slice {
-            console::put_char(b);
-        }
-        console::println("");
-    }
+    crate::linuxkpi::print_cstr(s);
+    console::put_char(b'\n');
 }
 
 /// Write an unsigned 64-bit value in decimal then newline.
@@ -103,6 +82,15 @@ const EXPORT_NAMES: &[&str] = &[
     "munux_printk_u64",
     "munux_register_chrdev",
     "munux_unregister_chrdev",
+    "printk",
+    "kmalloc",
+    "kzalloc",
+    "kfree",
+    "memcpy",
+    "memmove",
+    "memset",
+    "strlen",
+    "__stack_chk_fail",
 ];
 
 /// Look up an exported symbol by name. Returns absolute address or None.
@@ -110,11 +98,21 @@ const EXPORT_NAMES: &[&str] = &[
 /// Addresses are resolved at call time (function pointers are not valid in
 /// `const` contexts on this toolchain).
 pub fn lookup(name: &str) -> Option<u64> {
+    use crate::linuxkpi;
     match name {
         "munux_printk" => Some(munux_printk as usize as u64),
         "munux_printk_u64" => Some(munux_printk_u64 as usize as u64),
         "munux_register_chrdev" => Some(munux_register_chrdev as usize as u64),
         "munux_unregister_chrdev" => Some(munux_unregister_chrdev as usize as u64),
+        "printk" => Some(linuxkpi::printk as usize as u64),
+        "kmalloc" => Some(linuxkpi::linux_kmalloc as usize as u64),
+        "kzalloc" => Some(linuxkpi::linux_kzalloc as usize as u64),
+        "kfree" => Some(linuxkpi::linux_kfree as usize as u64),
+        "memcpy" => Some(linuxkpi::linux_memcpy as usize as u64),
+        "memmove" => Some(linuxkpi::linux_memmove as usize as u64),
+        "memset" => Some(linuxkpi::linux_memset as usize as u64),
+        "strlen" => Some(linuxkpi::linux_strlen as usize as u64),
+        "__stack_chk_fail" => Some(linuxkpi::__stack_chk_fail as usize as u64),
         _ => None,
     }
 }

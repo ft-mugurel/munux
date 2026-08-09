@@ -29,7 +29,7 @@ pub const MNX_NAME_LEN: usize = 28;
 pub const MNX_RELOC_SIZE: usize = 36; // 4 + 32
 pub const MNX_SYM_LEN: usize = 32;
 pub const MNX_EXIT_NONE: u32 = 0xFFFF_FFFF;
-pub const MNX_MAX_FILE: usize = 64 * 1024;
+pub const MNX_MAX_FILE: usize = 256 * 1024;
 pub const MNX_MAX_CODE: usize = 32 * 1024;
 pub const MNX_MAX_RELOCS: usize = 64;
 

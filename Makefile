@@ -48,6 +48,7 @@ GRUB_MODULE_DIR	=	$(shell [ -d /usr/lib/grub/i386-pc ] && echo /usr/lib/grub/i38
 QEMU_SYSTEM	=	$(shell which qemu-system-x86_64 2>/dev/null || which qemu 2>/dev/null)
 LD		=	$(shell which ld 2>/dev/null || which ld.bfd 2>/dev/null)
 NASM		=	$(shell which nasm 2>/dev/null)
+CC		=	$(shell which gcc 2>/dev/null || which cc 2>/dev/null)
 CARGO		=	$(shell which cargo 2>/dev/null)
 RUSTC		=	$(shell which rustc 2>/dev/null)
 GDB		=	$(shell which gdb-multiarch 2>/dev/null || which gdb 2>/dev/null)
@@ -109,6 +110,7 @@ help:
 	@echo -e "$(BOLD)$(GREEN)Inspect$(RESET)"
 	@echo -e "  $(YELLOW)size$(RESET)             Show kernel.bin / ISO sizes (subject ~10 MiB soft limit)"
 	@echo -e "  $(YELLOW)userland$(RESET)         Build freestanding ELF apps → build/rootfs/bin/"
+	@echo -e "  $(YELLOW)modules$(RESET)          MNX1 + NASM .ko + linuxkpi gcc hello_c.ko"
 	@echo -e "  $(YELLOW)disk$(RESET)             ext2 disk image (includes /bin/hello)"
 	@echo ""
 	@echo -e "$(BOLD)$(GREEN)Cleanup$(RESET)"
@@ -298,6 +300,7 @@ userland: ${USERLAND_SRC} ${USERLAND_LD} ${USERLAND_ECHO_SRC} ${USERLAND_CAT_SRC
 	@echo -e "$(BOLD)$(GREEN)[✓] USERLAND apps + preempt/clone/futex/signal tests embedded$(RESET)"
 
 # Phase 8: loadable modules — MNX1 + ELF64 ET_REL (.ko)
+# linuxkpi L1: gcc C modules against include/linux/*.h
 MODULE_HELLO_ASM	=	modules/hello.asm
 MODULE_HELLO_MNX	=	build/rootfs/lib/modules/hello.mnx
 MODULE_ECHO_ASM		=	modules/echo.asm
@@ -306,8 +309,14 @@ MODULE_HELLO_KO_ASM	=	modules/hello.ko.asm
 MODULE_HELLO_KO		=	build/rootfs/lib/modules/hello.ko
 MODULE_ECHO_KO_ASM	=	modules/echo.ko.asm
 MODULE_ECHO_KO		=	build/rootfs/lib/modules/echo.ko
+MODULE_HELLO_C		=	modules/linux/hello.c
+MODULE_HELLO_C_KO	=	build/rootfs/lib/modules/hello_c.ko
+LINUXKPI_CFLAGS		=	-ffreestanding -fno-stack-protector -fno-pic -fno-plt \
+				-mcmodel=large -mno-red-zone -fno-asynchronous-unwind-tables \
+				-fno-exceptions -fno-common -mno-mmx -mno-sse -mno-sse2 \
+				-O2 -Wall -Iinclude
 
-modules: ${MODULE_HELLO_MNX} ${MODULE_ECHO_MNX} ${MODULE_HELLO_KO} ${MODULE_ECHO_KO}
+modules: ${MODULE_HELLO_MNX} ${MODULE_ECHO_MNX} ${MODULE_HELLO_KO} ${MODULE_ECHO_KO} ${MODULE_HELLO_C_KO}
 
 ${MODULE_HELLO_MNX}: ${MODULE_HELLO_ASM}
 	$(call require_tool,$(NASM),nasm)
@@ -332,6 +341,12 @@ ${MODULE_ECHO_KO}: ${MODULE_ECHO_KO_ASM}
 	@mkdir -p build/rootfs/lib/modules
 	@${NASM} -f elf64 ${MODULE_ECHO_KO_ASM} -o ${MODULE_ECHO_KO}
 	@echo -e "$(BOLD)$(GREEN)[✓] MODULE echo.ko (ET_REL)$(RESET)"
+
+${MODULE_HELLO_C_KO}: ${MODULE_HELLO_C} include/linux/module.h include/linux/printk.h include/linux/init.h
+	$(call require_tool,$(CC),gcc)
+	@mkdir -p build/rootfs/lib/modules
+	@${CC} ${LINUXKPI_CFLAGS} -c -o ${MODULE_HELLO_C_KO} ${MODULE_HELLO_C}
+	@echo -e "$(BOLD)$(GREEN)[✓] MODULE hello_c.ko (linuxkpi gcc)$(RESET)"
 
 disk: userland modules
 	@mkdir -p build/rootfs/docs build/rootfs/bin build/rootfs/lib/modules
@@ -504,7 +519,7 @@ fclean: clean
 re: clean all
 
 .PHONY: all help \
-	build build_debug size disk userland \
+	build build_debug size disk userland modules \
 	run iso iso-full run-iso run-iso-full run-iso-term \
 	debug debug-iso debug-qemu debug-gdb \
 	clean fclean re

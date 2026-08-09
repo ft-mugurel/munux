@@ -1,21 +1,29 @@
-//! ELF64 **ET_REL** loader (munux `.ko` — conceptual LKM, not mainline vermagic).
+//! ELF64 **ET_REL** loader (munux `.ko` + linuxkpi gcc modules).
 //!
-//! Layout: allocatable sections packed into one `kmalloc` image, then
-//! `R_X86_64_{64,PC32,PLT32,32,32S}` applied. Undefined `PC32`/`PLT32`
-//! (typical `call munux_*`) cannot reach kernel text from the high heap, so
-//! the loader emits a tiny abs64 trampoline per unique export:
+//! Layout: allocatable PROGBITS/NOBITS packed into one `kmalloc` image, then
+//! `R_X86_64_{64,PC32,PLT32,32,32S,GOTPCREL*}` applied. Unknown non-ALLOC
+//! sections (`.comment`, `__versions`) are ignored. ALLOC `SHT_NOTE` is skipped.
+//!
+//! Undefined `PC32`/`PLT32` (typical `call printk`) cannot reach kernel text
+//! from the high heap, so the loader emits a tiny abs64 trampoline per export:
 //!
 //! ```text
 //!   mov rax, <export>
 //!   jmp rax
 //! ```
 //!
+//! GOTPCREL writes an 8-byte GOT slot with the export address.
+//!
 //! Init/exit: global `init_module` / `cleanup_module` (Linux classic names).
 //! Module name: `.modinfo` `name=…` if present, else caller hint.
 
 use super::export;
-use super::mnx::{LoadedMnx, MnxError, MNX_MAX_CODE, MNX_MAX_FILE, MNX_NAME_LEN};
+use super::mnx::{LoadedMnx, MnxError, MNX_NAME_LEN};
 use crate::memory::{kfree, kmalloc};
+
+/// gcc `.ko` files may be larger than MNX1 images.
+pub const ELF_MAX_FILE: usize = 256 * 1024;
+pub const ELF_MAX_CODE: usize = 128 * 1024;
 
 const ELFMAG: [u8; 4] = [0x7f, b'E', b'L', b'F'];
 const ELFCLASS64: u8 = 2;
@@ -28,6 +36,7 @@ const SHT_PROGBITS: u32 = 1;
 const SHT_SYMTAB: u32 = 2;
 const SHT_STRTAB: u32 = 3;
 const SHT_RELA: u32 = 4;
+const SHT_NOTE: u32 = 7;
 const SHT_NOBITS: u32 = 8;
 
 const SHF_ALLOC: u64 = 0x2;
@@ -40,12 +49,20 @@ const R_X86_64_NONE: u32 = 0;
 const R_X86_64_64: u32 = 1;
 const R_X86_64_PC32: u32 = 2;
 const R_X86_64_PLT32: u32 = 4;
+const R_X86_64_GOTPCREL: u32 = 9;
 const R_X86_64_32: u32 = 10;
 const R_X86_64_32S: u32 = 11;
+const R_X86_64_GOTPCRELX: u32 = 41;
+const R_X86_64_REX_GOTPCRELX: u32 = 42;
 
-const MAX_SECTIONS: usize = 32;
-const MAX_TRAMP: usize = 16;
+const MAX_SECTIONS: usize = 48;
+const MAX_SYMS: usize = 512;
+const MAX_RELA: usize = 1024;
+const MAX_TRAMP: usize = 32;
+const MAX_GOT: usize = 32;
 const TRAMP_STRIDE: usize = 16; // 12-byte stub + pad
+const GOT_STRIDE: usize = 8;
+const SYM_NAME_MAX: usize = 64;
 const EHSIZE: usize = 64;
 const SHSIZE: usize = 64;
 const SYMSIZE: usize = 24;
@@ -141,21 +158,19 @@ fn sh_name<'a>(buf: &'a [u8], shstr: &Shdr, name_off: u32) -> Result<&'a str, Mn
     core::str::from_utf8(&slice[..n]).map_err(|_| MnxError::BadName)
 }
 
-fn parse_modinfo_name(bytes: &[u8]) -> Option<&str> {
+fn parse_modinfo_tag<'a>(bytes: &'a [u8], tag: &str) -> Option<&'a str> {
+    let prefix = tag.as_bytes();
     let mut i = 0usize;
-    while i + 5 <= bytes.len() {
-        if &bytes[i..i + 5] == b"name=" {
-            let start = i + 5;
-            let mut end = start;
-            while end < bytes.len() && bytes[end] != 0 && bytes[end] != b'\n' {
-                end += 1;
-            }
-            if end > start {
-                return core::str::from_utf8(&bytes[start..end]).ok();
-            }
-            return None;
+    while i < bytes.len() {
+        let mut end = i;
+        while end < bytes.len() && bytes[end] != 0 && bytes[end] != b'\n' {
+            end += 1;
         }
-        i += 1;
+        let rec = &bytes[i..end];
+        if rec.len() > prefix.len() && rec.starts_with(prefix) && rec[prefix.len()] == b'=' {
+            return core::str::from_utf8(&rec[prefix.len() + 1..]).ok();
+        }
+        i = end.saturating_add(1);
     }
     None
 }
@@ -188,7 +203,7 @@ fn strtab_get<'a>(buf: &'a [u8], strtab: &Shdr, off: u32) -> Result<&'a str, Mnx
 #[derive(Clone, Copy)]
 struct Tramp {
     used: bool,
-    name: [u8; 32],
+    name: [u8; SYM_NAME_MAX],
     nlen: u8,
     addr: u64,
 }
@@ -212,7 +227,7 @@ fn emit_tramp(tramp_va: u64, dest: u64) {
 
 /// Load ELF64 ET_REL. `name_hint` used when `.modinfo` has no `name=`.
 pub fn load_from_bytes(buf: &[u8], name_hint: &str) -> Result<LoadedMnx, MnxError> {
-    if buf.len() > MNX_MAX_FILE || buf.len() < EHSIZE {
+    if buf.len() > ELF_MAX_FILE || buf.len() < EHSIZE {
         return Err(MnxError::Truncated);
     }
     if buf[..4] != ELFMAG {
@@ -263,7 +278,7 @@ pub fn load_from_bytes(buf: &[u8], name_hint: &str) -> Result<LoadedMnx, MnxErro
         if end > buf.len() {
             return Err(MnxError::Truncated);
         }
-        if let Some(n) = parse_modinfo_name(&buf[start..end]) {
+        if let Some(n) = parse_modinfo_tag(&buf[start..end], "name") {
             let b = n.as_bytes();
             let k = b.len().min(MNX_NAME_LEN);
             parsed_name[..k].copy_from_slice(&b[..k]);
@@ -280,6 +295,9 @@ pub fn load_from_bytes(buf: &[u8], name_hint: &str) -> Result<LoadedMnx, MnxErro
         if sh.flags & SHF_ALLOC == 0 {
             continue;
         }
+        if sh.typ == SHT_NOTE {
+            continue;
+        }
         if sh.typ != SHT_PROGBITS && sh.typ != SHT_NOBITS {
             continue;
         }
@@ -288,9 +306,10 @@ pub fn load_from_bytes(buf: &[u8], name_hint: &str) -> Result<LoadedMnx, MnxErro
         sec_base[i] = layout;
         layout = layout.saturating_add(sh.size);
     }
-    let tramp_off = align_up(layout, 16);
+    let got_off = align_up(layout, 8);
+    let tramp_off = align_up(got_off + (MAX_GOT * GOT_STRIDE) as u64, 16);
     let total = tramp_off as usize + MAX_TRAMP * TRAMP_STRIDE;
-    if total == 0 || total > MNX_MAX_CODE + MAX_TRAMP * TRAMP_STRIDE {
+    if total == 0 || total > ELF_MAX_CODE + MAX_GOT * GOT_STRIDE + MAX_TRAMP * TRAMP_STRIDE {
         return Err(MnxError::BadCode);
     }
 
@@ -343,18 +362,25 @@ pub fn load_from_bytes(buf: &[u8], name_hint: &str) -> Result<LoadedMnx, MnxErro
     } else {
         (symtab.size / symtab.entsize) as usize
     };
-    if nsyms > 256 || (symtab.entsize as usize) != SYMSIZE {
+    if nsyms > MAX_SYMS || (symtab.entsize as usize) != SYMSIZE {
         kfree(code);
         return Err(MnxError::BadReloc);
     }
 
     let mut tramps = [Tramp {
         used: false,
-        name: [0; 32],
+        name: [0; SYM_NAME_MAX],
         nlen: 0,
         addr: 0,
     }; MAX_TRAMP];
     let mut ntramp = 0usize;
+    let mut gots = [Tramp {
+        used: false,
+        name: [0; SYM_NAME_MAX],
+        nlen: 0,
+        addr: 0,
+    }; MAX_GOT];
+    let mut ngot = 0usize;
 
     let mut get_or_make_tramp = |name: &str, dest: u64| -> Result<u64, MnxError> {
         for t in tramps.iter() {
@@ -362,7 +388,7 @@ pub fn load_from_bytes(buf: &[u8], name_hint: &str) -> Result<LoadedMnx, MnxErro
                 return Ok(t.addr);
             }
         }
-        if ntramp >= MAX_TRAMP || name.len() > 32 {
+        if ntramp >= MAX_TRAMP || name.len() > SYM_NAME_MAX {
             return Err(MnxError::BadReloc);
         }
         let addr = image_va + tramp_off + (ntramp * TRAMP_STRIDE) as u64;
@@ -373,6 +399,28 @@ pub fn load_from_bytes(buf: &[u8], name_hint: &str) -> Result<LoadedMnx, MnxErro
         t.name[..name.len()].copy_from_slice(name.as_bytes());
         t.addr = addr;
         ntramp += 1;
+        Ok(addr)
+    };
+
+    let mut get_or_make_got = |name: &str, dest: u64| -> Result<u64, MnxError> {
+        for t in gots.iter() {
+            if tramp_matches(t, name) {
+                return Ok(t.addr);
+            }
+        }
+        if ngot >= MAX_GOT || name.len() > SYM_NAME_MAX {
+            return Err(MnxError::BadReloc);
+        }
+        let addr = image_va + got_off + (ngot * GOT_STRIDE) as u64;
+        unsafe {
+            core::ptr::write_unaligned(addr as *mut u64, dest);
+        }
+        let t = &mut gots[ngot];
+        t.used = true;
+        t.nlen = name.len() as u8;
+        t.name[..name.len()].copy_from_slice(name.as_bytes());
+        t.addr = addr;
+        ngot += 1;
         Ok(addr)
     };
 
@@ -416,7 +464,7 @@ pub fn load_from_bytes(buf: &[u8], name_hint: &str) -> Result<LoadedMnx, MnxErro
             return Err(MnxError::BadReloc);
         }
         let nrel = (rela.size / rela.entsize) as usize;
-        if nrel > 256 {
+        if nrel > MAX_RELA {
             kfree(code);
             return Err(MnxError::BadReloc);
         }
@@ -470,7 +518,36 @@ pub fn load_from_bytes(buf: &[u8], name_hint: &str) -> Result<LoadedMnx, MnxErro
             let p = image_va + sec_base[target] + r_offset;
             let loc = p as *mut u8;
             let is_pc = r_type == R_X86_64_PC32 || r_type == R_X86_64_PLT32;
-            let s = if sym.shndx == SHN_UNDEF {
+            let is_got = r_type == R_X86_64_GOTPCREL
+                || r_type == R_X86_64_GOTPCRELX
+                || r_type == R_X86_64_REX_GOTPCRELX;
+            let s = if is_got {
+                let dest = if sym.shndx == SHN_UNDEF {
+                    match export::lookup(sname) {
+                        Some(a) => a,
+                        None => {
+                            kfree(code);
+                            return Err(MnxError::Unresolved);
+                        }
+                    }
+                } else {
+                    match resolve(&sym) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            kfree(code);
+                            return Err(e);
+                        }
+                    }
+                };
+                let got_name = if sname.is_empty() { "?" } else { sname };
+                match get_or_make_got(got_name, dest) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        kfree(code);
+                        return Err(e);
+                    }
+                }
+            } else if sym.shndx == SHN_UNDEF {
                 let dest = match export::lookup(sname) {
                     Some(a) => a,
                     None => {
@@ -507,7 +584,11 @@ pub fn load_from_bytes(buf: &[u8], name_hint: &str) -> Result<LoadedMnx, MnxErro
                     }
                     true
                 }
-                R_X86_64_PC32 | R_X86_64_PLT32 => {
+                R_X86_64_PC32
+                | R_X86_64_PLT32
+                | R_X86_64_GOTPCREL
+                | R_X86_64_GOTPCRELX
+                | R_X86_64_REX_GOTPCRELX => {
                     let val = (s as i64)
                         .wrapping_add(r_addend)
                         .wrapping_sub(p as i64);

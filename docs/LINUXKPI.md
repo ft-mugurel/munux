@@ -1,6 +1,6 @@
 # Linux driver sources on munux (linuxkpi)
 
-**Status:** plan (2026-08-09). Not started.  
+**Status:** L0 + L1 **done** (2026-08-09). Next: L2 Linux chardev (`echo.c`).  
 **Success bar (chosen):** **compile Linux driver `.c` sources** against munux headers, `insmod` the resulting ELF `.ko`, and have the device work.  
 **Not the bar:** drop a prebuilt Ubuntu/Fedora `.ko` into `/lib/modules` and have it load. That needs one exact Linux kernel ABI (vermagic + thousands of `EXPORT_SYMBOL`s + identical struct layouts).
 
@@ -16,12 +16,12 @@ Related: [ROADMAP.md](ROADMAP.md) · [SMOKE_MODULE.md](SMOKE_MODULE.md) · `src/
 |-------|-------------|-----------------------------|
 | Container | ELF64 ET_REL **or** custom **MNX1** | ELF64 ET_REL from **gcc + modpost** |
 | Init symbols | `init_module` / `cleanup_module` | Same names, usually from `module_init()` + generated `.mod.c` |
-| Exports | 4 names: `munux_printk`, `munux_printk_u64`, `munux_register_chrdev`, `munux_unregister_chrdev` | Linux names: `printk`, `kmalloc`, `cdev_add`, `request_irq`, `pci_register_driver`, … |
+| Exports | `munux_*` + L1 Linux names (`printk`, `kmalloc`, `memcpy`, …). Not `cdev_add` / PCI yet | Linux names: `printk`, `kmalloc`, `cdev_add`, `request_irq`, `pci_register_driver`, … |
 | Chardev | Tiny C fops: `read(buf, len)` | `struct file_operations` (`read(file *, char __user *, size_t, loff_t *)`) |
 | `THIS_MODULE` | Slot int on chrdev | `struct module *` on `fops.owner` |
 | Headers | None (`modules/*.asm`) | `linux/module.h`, `linux/fs.h`, `linux/pci.h`, … |
-| Relocs | `R_X86_64_{64,PC32,PLT32,32,32S}` + 16 trampolines | gcc also emits **GOTPCREL**, more sections, hundreds of relocs |
-| Limits | 32 sections, 256 syms, 256 relas, 32 KiB image | Real drivers exceed all of these |
+| Relocs | `R_X86_64_{64,PC32,PLT32,32,32S,GOTPCREL*}` + trampolines + GOT | gcc also emits more types on fat drivers |
+| Limits | 48 sections, 512 syms, 1024 relas, 128 KiB ELF image | Some real drivers still exceed this |
 | IRQ / PCI / MMIO / DMA | Built-in IDE + PIC keyboard only | `request_irq`, `ioremap`, `pci_*`, `dma_alloc_coherent` |
 | Sync | None exported | `spinlock_t`, `mutex`, wait queues, `jiffies`, `msleep` |
 
@@ -89,7 +89,7 @@ munux headers are **original** compatible declarations. Do not paste Linux `uapi
 
 Work **alongside** Phase 9 (syscalls toward a desktop). linuxkpi is how we get virtio/net/gpu drivers later; it does not replace `execveat` / dynlink.
 
-### L0 — Loader can host a gcc ET_REL
+### L0 — Loader can host a gcc ET_REL ✅
 
 **Why first:** a Linux-looking `.c` will not even relocate in today’s loader.
 
@@ -100,9 +100,9 @@ Work **alongside** Phase 9 (syscalls toward a desktop). linuxkpi is how we get v
 - Still accept classic `init_module` / `cleanup_module`.
 - Keep MNX1 working (no break).
 
-**Exit:** `modules/linux/hello.c` compiled with host `gcc -ffreestanding -c` loads via `insmod` and prints (may still call `printk` only after L1 — until then, a gcc module that only `return 0` proves relocs).
+**Exit:** `modules/linux/hello.c` compiled with host `gcc -ffreestanding -c` loads via `insmod` and prints (may still call `printk` only after L1 — until then, a gcc module that only `return 0` proves relocs). ✅ (with L1)
 
-### L1 — Core linuxkpi (printk / slab / module macros)
+### L1 — Core linuxkpi (printk / slab / module macros) ✅
 
 New tree:
 
@@ -122,7 +122,7 @@ Macros (good enough; skip real `.mod.c` / initcall sections at first):
 
 Export **Linux names** (`printk`, `kmalloc`, `kzalloc`, `kfree`, `memcpy`, …). Keep `munux_*` as aliases so `hello.ko.asm` still links.
 
-**Exit:** `insmod` gcc `hello.ko` → `hello: module loaded` via `printk`; `rmmod` calls `cleanup_module`.
+**Exit:** `insmod /lib/modules/hello_c.ko` → `hello_c: linuxkpi module loaded` via `printk`; `rmmod hello_c` calls `cleanup_module`. ✅ qemu-connect 2026-08-09.
 
 ### L2 — Linux char devices (rewrite echo)
 
@@ -230,9 +230,9 @@ Install onto `build/disk.img` next to `/lib/modules/hello.ko`.
 
 Do **not** pause Phase 9 forever. Interleave:
 
-1. **P9** `execveat` / `prctl` (userspace toward desktop)  
-2. **L0 + L1** in one slice (loader + printk/kmalloc hello.c)  
-3. **L2** echo as Linux C miscdevice  
+1. ~~**L0 + L1** loader + printk/kmalloc `hello.c`~~ ✅  
+2. **L2** echo as Linux C miscdevice  
+3. **P9** `execveat` / `prctl` (userspace toward desktop) — can interleave 
 4. Continue P9 (dynlink) while L3/L4 design happens  
 5. **L5** virtio-blk when MMIO/bus exists  
 

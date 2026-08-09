@@ -5,6 +5,7 @@
 //!
 //! Admin: kernel shell + Linux `init_module` / `finit_module` / `delete_module`.
 //! Formats: **MNX1** (`module::mnx`) and ELF64 **ET_REL** `.ko` (`module::elfrel`).
+//! linuxkpi gcc modules resolve Linux names (`printk`, `kmalloc`, …) via `export`.
 //! Builtin `hello` works without disk.
 
 pub mod elfrel;
@@ -335,14 +336,15 @@ fn try_load_file(path: &str, name: &str) -> Result<(), ModuleError> {
     };
 
     // Read whole file into a temporary heap buffer.
-    let tmp = kmalloc(MNX_MAX_FILE).ok_or(ModuleError::Format(MnxError::Oom))?;
+    let max_file = elfrel::ELF_MAX_FILE.max(MNX_MAX_FILE);
+    let tmp = kmalloc(max_file).ok_or(ModuleError::Format(MnxError::Oom))?;
     let mut total = 0usize;
     loop {
-        if total >= MNX_MAX_FILE {
+        if total >= max_file {
             break;
         }
         let slice = unsafe {
-            core::slice::from_raw_parts_mut(tmp.add(total), MNX_MAX_FILE - total)
+            core::slice::from_raw_parts_mut(tmp.add(total), max_file - total)
         };
         match fs::vcore::vfs_read(&mut f, slice) {
             Ok(0) => break,

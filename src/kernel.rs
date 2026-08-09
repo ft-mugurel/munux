@@ -31,6 +31,7 @@ pub mod fd;
 pub mod fs;
 pub mod gdt;
 pub mod interrupts;
+pub mod linuxkpi;
 pub mod memory;
 pub mod module;
 pub mod process;

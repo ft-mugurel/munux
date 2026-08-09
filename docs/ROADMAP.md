@@ -383,18 +383,18 @@ Syscall coverage % (**88 / 385 ≈ 22.9%** today) is a **progress metric** towar
 
 ## Epic LK — Linux driver sources (linuxkpi)
 
-**Plan:** [LINUXKPI.md](LINUXKPI.md). **Not started.** Parallel to P9.
+**Plan:** [LINUXKPI.md](LINUXKPI.md). **L0+L1 done.** Parallel to P9.
 
 Compile Linux **`.c` drivers** against munux-owned `include/linux/*.h`. Implement that C API in Rust (`extern "C"`). Do **not** load prebuilt Ubuntu `.ko` files.
 
-| Slice | Result |
-|-------|--------|
-| **L0** | gcc ET_REL relocates (GOT/PC32, bigger limits) |
-| **L1** | `printk` / `kmalloc` / `module_init` — gcc `hello.c` loads |
-| **L2** | Linux `file_operations` / misc — `echo.c` replaces NASM echo |
-| **L3** | spinlock / wait / `request_irq` |
-| **L4** | `ioremap` + virtio-mmio or PCI probe |
-| **L5** | One upstream driver (virtio-blk recommended) |
+| Slice | Result | Status |
+|-------|--------|--------|
+| **L0** | gcc ET_REL relocates (GOT/PC32, bigger limits) | ✅ |
+| **L1** | `printk` / `kmalloc` / `module_init` — gcc `hello_c.ko` loads | ✅ |
+| **L2** | Linux `file_operations` / misc — `echo.c` replaces NASM echo | next |
+| **L3** | spinlock / wait / `request_irq` | |
+| **L4** | `ioremap` + virtio-mmio or PCI probe | |
+| **L5** | One upstream driver (virtio-blk recommended) | |
 
 MNX1 + NASM modules stay until L2 is green, then freeze.
 
@@ -505,7 +505,7 @@ Milestones on that path:
 
 **P9 (userspace):** `execveat` / `prctl` → file-map ELF / `MAP_SHARED` → dynlink.
 
-**LK (drivers):** [LINUXKPI.md](LINUXKPI.md) — L0 loader + L1 gcc `hello.c` → L2 Linux `echo.c` → later virtio.
+**LK (drivers):** [LINUXKPI.md](LINUXKPI.md) — L0+L1 done (`hello_c.ko`). Next **L2** Linux `echo.c` → later virtio.
 
 Do not reopen P8 for MNX1 features. New modules are linuxkpi C.
 
