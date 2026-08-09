@@ -383,7 +383,7 @@ Syscall coverage % (**88 / 385 ≈ 22.9%** today) is a **progress metric** towar
 
 ## Epic LK — Linux driver sources (linuxkpi)
 
-**Plan:** [LINUXKPI.md](LINUXKPI.md). **L0–L2 done.** Parallel to P9.
+**Plan:** [LINUXKPI.md](LINUXKPI.md). **L0–L3 done.** Parallel to P9.
 
 Compile Linux **`.c` drivers** against munux-owned `include/linux/*.h`. Implement that C API in Rust (`extern "C"`). Do **not** load prebuilt Ubuntu `.ko` files.
 
@@ -392,7 +392,7 @@ Compile Linux **`.c` drivers** against munux-owned `include/linux/*.h`. Implemen
 | **L0** | gcc ET_REL relocates (GOT/PC32, bigger limits) | ✅ |
 | **L1** | `printk` / `kmalloc` / `module_init` — gcc `hello_c.ko` loads | ✅ |
 | **L2** | Linux `file_operations` / misc — `echo_c.ko` + `echotest` PASS | ✅ |
-| **L3** | spinlock / wait / `request_irq` | |
+| **L3** | spinlock / completion / `request_irq` — `irqtest.ko` | ✅ |
 | **L4** | `ioremap` + virtio-mmio or PCI probe | |
 | **L5** | One upstream driver (virtio-blk recommended) | |
 
@@ -505,7 +505,7 @@ Milestones on that path:
 
 **P9 (userspace):** `execveat` / `prctl` → file-map ELF / `MAP_SHARED` → dynlink.
 
-**LK (drivers):** [LINUXKPI.md](LINUXKPI.md) — L0–L2 done (`hello_c.ko`, `echo_c.ko`). Next **L3–L5** toward virtio-blk.
+**LK (drivers):** [LINUXKPI.md](LINUXKPI.md) — L0–L3 done (`hello_c`, `echo_c`, `irqtest`). Next **L4–L5** virtio-blk.
 
 Do not reopen P8 for MNX1 features. New modules are linuxkpi C.
 

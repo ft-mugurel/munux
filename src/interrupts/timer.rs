@@ -39,8 +39,10 @@ pub fn init_timer() {
 /// Called from `isr_timer` with `frame` pointing at the IRQ stack TrapFrame.
 #[no_mangle]
 pub extern "C" fn timer_interrupt_handler(frame: *mut TrapFrame) {
-    TICKS.fetch_add(1, Ordering::Relaxed);
+    let t = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+    crate::linuxkpi::irq::set_jiffies(t);
     crate::process::on_cpu_tick();
+    crate::linuxkpi::irq::dispatch(0);
     unsafe {
         pic::eoi_master();
         // May rewrite `frame` so iretq resumes a different user task.

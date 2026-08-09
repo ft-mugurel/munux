@@ -313,12 +313,14 @@ MODULE_HELLO_C		=	modules/linux/hello.c
 MODULE_HELLO_C_KO	=	build/rootfs/lib/modules/hello_c.ko
 MODULE_ECHO_C		=	modules/linux/echo.c
 MODULE_ECHO_C_KO	=	build/rootfs/lib/modules/echo_c.ko
+MODULE_IRQTEST_C	=	modules/linux/irqtest.c
+MODULE_IRQTEST_KO	=	build/rootfs/lib/modules/irqtest.ko
 LINUXKPI_CFLAGS		=	-ffreestanding -fno-stack-protector -fno-pic -fno-plt \
 				-mcmodel=large -mno-red-zone -fno-asynchronous-unwind-tables \
 				-fno-exceptions -fno-common -mno-mmx -mno-sse -mno-sse2 \
 				-O2 -Wall -Iinclude
 
-modules: ${MODULE_HELLO_MNX} ${MODULE_ECHO_MNX} ${MODULE_HELLO_KO} ${MODULE_ECHO_KO} ${MODULE_HELLO_C_KO} ${MODULE_ECHO_C_KO}
+modules: ${MODULE_HELLO_MNX} ${MODULE_ECHO_MNX} ${MODULE_HELLO_KO} ${MODULE_ECHO_KO} ${MODULE_HELLO_C_KO} ${MODULE_ECHO_C_KO} ${MODULE_IRQTEST_KO}
 
 ${MODULE_HELLO_MNX}: ${MODULE_HELLO_ASM}
 	$(call require_tool,$(NASM),nasm)
@@ -355,6 +357,12 @@ ${MODULE_ECHO_C_KO}: ${MODULE_ECHO_C} include/linux/module.h include/linux/fs.h 
 	@mkdir -p build/rootfs/lib/modules
 	@${CC} ${LINUXKPI_CFLAGS} -c -o ${MODULE_ECHO_C_KO} ${MODULE_ECHO_C}
 	@echo -e "$(BOLD)$(GREEN)[✓] MODULE echo_c.ko (linuxkpi gcc chardev)$(RESET)"
+
+${MODULE_IRQTEST_KO}: ${MODULE_IRQTEST_C} include/linux/interrupt.h include/linux/completion.h include/linux/jiffies.h
+	$(call require_tool,$(CC),gcc)
+	@mkdir -p build/rootfs/lib/modules
+	@${CC} ${LINUXKPI_CFLAGS} -c -o ${MODULE_IRQTEST_KO} ${MODULE_IRQTEST_C}
+	@echo -e "$(BOLD)$(GREEN)[✓] MODULE irqtest.ko (linuxkpi IRQ0)$(RESET)"
 
 disk: userland modules
 	@mkdir -p build/rootfs/docs build/rootfs/bin build/rootfs/lib/modules

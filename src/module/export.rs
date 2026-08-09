@@ -97,6 +97,19 @@ const EXPORT_NAMES: &[&str] = &[
     "misc_deregister",
     "register_chrdev",
     "unregister_chrdev",
+    "jiffies",
+    "msleep",
+    "request_irq",
+    "free_irq",
+    "complete",
+    "wait_for_completion",
+    "wait_for_completion_timeout",
+    "spin_lock",
+    "spin_unlock",
+    "__spin_lock_irqsave",
+    "__spin_unlock_irqrestore",
+    "mutex_lock",
+    "mutex_unlock",
 ];
 
 /// Look up an exported symbol by name. Returns absolute address or None.
@@ -125,6 +138,23 @@ pub fn lookup(name: &str) -> Option<u64> {
         "misc_deregister" => Some(linuxkpi::fs::misc_deregister as usize as u64),
         "register_chrdev" => Some(linuxkpi::fs::register_chrdev as usize as u64),
         "unregister_chrdev" => Some(linuxkpi::fs::unregister_chrdev as usize as u64),
+        "jiffies" => Some(core::ptr::addr_of!(linuxkpi::irq::jiffies) as u64),
+        "msleep" => Some(linuxkpi::sync::msleep as usize as u64),
+        "request_irq" => Some(linuxkpi::irq::request_irq as usize as u64),
+        "free_irq" => Some(linuxkpi::irq::free_irq as usize as u64),
+        "complete" => Some(linuxkpi::sync::complete as usize as u64),
+        "wait_for_completion" => Some(linuxkpi::sync::wait_for_completion as usize as u64),
+        "wait_for_completion_timeout" => {
+            Some(linuxkpi::sync::wait_for_completion_timeout as usize as u64)
+        }
+        "spin_lock" => Some(linuxkpi::sync::spin_lock as usize as u64),
+        "spin_unlock" => Some(linuxkpi::sync::spin_unlock as usize as u64),
+        "__spin_lock_irqsave" => Some(linuxkpi::sync::__spin_lock_irqsave as usize as u64),
+        "__spin_unlock_irqrestore" => {
+            Some(linuxkpi::sync::__spin_unlock_irqrestore as usize as u64)
+        }
+        "mutex_lock" => Some(linuxkpi::sync::mutex_lock as usize as u64),
+        "mutex_unlock" => Some(linuxkpi::sync::mutex_unlock as usize as u64),
         _ => None,
     }
 }

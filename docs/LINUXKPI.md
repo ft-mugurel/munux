@@ -1,6 +1,6 @@
 # Linux driver sources on munux (linuxkpi)
 
-**Status:** L0–L2 **done** (2026-08-09). Next: L3 sync/IRQ, then virtio-blk (first hardware driver).  
+**Status:** L0–L3 **done** (2026-08-09). Next: L4 `ioremap` + virtio/PCI probe, then try virtio-blk.  
 **Success bar (chosen):** **compile Linux driver `.c` sources** against munux headers, `insmod` the resulting ELF `.ko`, and have the device work.  
 **Not the bar:** drop a prebuilt Ubuntu/Fedora `.ko` into `/lib/modules` and have it load. That needs one exact Linux kernel ABI (vermagic + thousands of `EXPORT_SYMBOL`s + identical struct layouts).
 
@@ -144,13 +144,13 @@ Need:
 
 After L2, **new modules are C + linuxkpi only.** Do not load NASM `echo.ko` and `echo_c.ko` at the same time.
 
-### L3 — Sync + IRQ
+### L3 — Sync + IRQ ✅
 
-- `spinlock_t`, `mutex`, `wait_queue_head_t`, `complete`/`wait_for_completion`
-- `jiffies`, `msleep` / `schedule_timeout` (PIT already 100 Hz)
-- `request_irq` / `free_irq` wrapping `register_interrupt_handler` + PIC unmask
+- `spinlock_t`, `mutex`, `complete` / `wait_for_completion(_timeout)`
+- `jiffies` (exported data symbol), `msleep`, `HZ=100`
+- `request_irq` / `free_irq`: IRQ0/1 chained (timer/kbd stay); IRQ2–15 get PIC stubs + unmask
 
-**Exit:** a tiny C module that requests a spare IRQ (or a test IPI-less “softirq” hook) and wakes a wait queue; no hardware yet.
+**Exit:** `insmod /lib/modules/irqtest.ko` → `irqtest: got IRQ0 (timer) PASS`. ✅ qemu-connect 2026-08-09.
 
 ### L4 — MMIO + bus probe
 
@@ -230,13 +230,11 @@ Do **not** pause Phase 9 forever. Interleave:
 
 1. ~~**L0 + L1** loader + printk/kmalloc `hello.c`~~ ✅  
 2. ~~**L2** echo as Linux C miscdevice~~ ✅  
-3. **L3** spinlock / wait / `request_irq`  
+3. ~~**L3** spinlock / wait / `request_irq`~~ ✅ `irqtest.ko`  
 4. **L4–L5** virtio probe → **try virtio-blk** (tell user — first hardware driver)  
-5. **P9** `execveat` / `prctl` — can interleave 
-4. Continue P9 (dynlink) while L3/L4 design happens  
-5. **L5** virtio-blk when MMIO/bus exists  
+5. **P9** `execveat` / `prctl` — can interleave  
 
-First implementation slice after this plan is accepted: **L0+L1** (gcc hello module).
+---
 
 ---
 

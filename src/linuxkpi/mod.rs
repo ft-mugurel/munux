@@ -5,6 +5,8 @@
 //! `compiler_builtins` (`memcpy` / `memset`) — the export table holds the address.
 
 pub mod fs;
+pub mod irq;
+pub mod sync;
 pub mod uaccess;
 
 use crate::console;

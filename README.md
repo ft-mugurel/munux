@@ -84,7 +84,7 @@ Destination remains a **Linux desktop** (P10–P14). IDE stays built-in.
 - `hello.mnx` / `hello.ko` (printk); `echo.*` registers `/dev/echo` via C-ABI `register_chrdev`
 - Unload blocked while the device is open (`echotest` checks EBUSY)
 - Kernel debug shell also has `insmod` / `rmmod` / `lsmod` (after `exit` from sh)
-- **linuxkpi L0–L2:** gcc `hello_c.ko` (`printk`) and `echo_c.ko` (Linux `misc_register` / `file_operations`; `echotest` PASS). Plan: [docs/LINUXKPI.md](docs/LINUXKPI.md). Distro `.ko` binaries stay out of scope.
+- **linuxkpi L0–L3:** gcc `hello_c.ko`, `echo_c.ko` (`echotest` PASS), `irqtest.ko` (shared IRQ0 + completion). Plan: [docs/LINUXKPI.md](docs/LINUXKPI.md). Distro `.ko` binaries stay out of scope.
 
 ### Console
 - VGA 80×25 text, PS/2 keyboard (US QWERTY)
