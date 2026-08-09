@@ -22,6 +22,9 @@ $ ls /lib/modules          # hello.ko hello.mnx hello_c.ko echo.ko echo.mnx
 $ lsmod
 $ insmod /lib/modules/hello_c.ko   # linuxkpi gcc: "hello_c: linuxkpi module loaded"
 $ rmmod hello_c
+$ insmod /lib/modules/echo_c.ko    # linuxkpi misc: /dev/echo (not together with echo.ko)
+$ echotest                         # PASS + EBUSY while open
+$ rmmod echo
 $ insmod /lib/modules/hello.ko
 $ lsmod
 $ rmmod hello
@@ -64,6 +67,7 @@ Produces `/bin/insmod`, `/bin/rmmod`, `/bin/lsmod` and
 | `.mnx` | munux **MNX1** (abs64 relocs) | `modules/hello.asm` |
 | `.ko` | ELF64 **ET_REL** (not mainline vermagic) | `modules/hello.ko.asm` |
 | `hello_c.ko` | gcc linuxkpi (`include/linux/*.h`) | `modules/linux/hello.c` |
+| `echo_c.ko` | gcc linuxkpi `misc_register` + `file_operations` | `modules/linux/echo.c` |
 
 Bare `insmod hello` tries `.ko` then `.mnx` then builtin `hello`.
 Userspace `insmod` uses `finit_module`; ELF name comes from `.modinfo name=`.

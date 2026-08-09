@@ -1,6 +1,6 @@
 # Linux driver sources on munux (linuxkpi)
 
-**Status:** L0 + L1 **done** (2026-08-09). Next: L2 Linux chardev (`echo.c`).  
+**Status:** L0–L2 **done** (2026-08-09). Next: L3 sync/IRQ, then virtio-blk (first hardware driver).  
 **Success bar (chosen):** **compile Linux driver `.c` sources** against munux headers, `insmod` the resulting ELF `.ko`, and have the device work.  
 **Not the bar:** drop a prebuilt Ubuntu/Fedora `.ko` into `/lib/modules` and have it load. That needs one exact Linux kernel ABI (vermagic + thousands of `EXPORT_SYMBOL`s + identical struct layouts).
 
@@ -124,9 +124,7 @@ Export **Linux names** (`printk`, `kmalloc`, `kzalloc`, `kfree`, `memcpy`, …).
 
 **Exit:** `insmod /lib/modules/hello_c.ko` → `hello_c: linuxkpi module loaded` via `printk`; `rmmod hello_c` calls `cleanup_module`. ✅ qemu-connect 2026-08-09.
 
-### L2 — Linux char devices (rewrite echo)
-
-This is the first **user-visible** rewrite of “our module system.”
+### L2 — Linux char devices (rewrite echo) ✅
 
 Need:
 
@@ -139,12 +137,12 @@ Need:
 
 **Exit:**
 
-1. `modules/linux/echo.c` written as a Linux `miscdevice` (or simple `register_chrdev`).
-2. `echotest` still PASSes.
-3. NASM `echo.ko.asm` / `echo.mnx` still work **or** are marked deprecated and removed after one release.
+1. `modules/linux/echo.c` written as a Linux `miscdevice`. ✅ `/lib/modules/echo_c.ko`
+2. `echotest` PASSes on `echo_c.ko` (name=`echo`, `/dev/echo`, EBUSY while open). ✅
+3. NASM `echo.ko` / `echo.mnx` still work if `echo_c` is not loaded (same `/dev/echo`). ✅
 4. Smoke: [SMOKE_MODULE.md](SMOKE_MODULE.md) updated.
 
-After L2, **new modules are C + linuxkpi only.**
+After L2, **new modules are C + linuxkpi only.** Do not load NASM `echo.ko` and `echo_c.ko` at the same time.
 
 ### L3 — Sync + IRQ
 
@@ -231,8 +229,10 @@ Install onto `build/disk.img` next to `/lib/modules/hello.ko`.
 Do **not** pause Phase 9 forever. Interleave:
 
 1. ~~**L0 + L1** loader + printk/kmalloc `hello.c`~~ ✅  
-2. **L2** echo as Linux C miscdevice  
-3. **P9** `execveat` / `prctl` (userspace toward desktop) — can interleave 
+2. ~~**L2** echo as Linux C miscdevice~~ ✅  
+3. **L3** spinlock / wait / `request_irq`  
+4. **L4–L5** virtio probe → **try virtio-blk** (tell user — first hardware driver)  
+5. **P9** `execveat` / `prctl` — can interleave 
 4. Continue P9 (dynlink) while L3/L4 design happens  
 5. **L5** virtio-blk when MMIO/bus exists  
 

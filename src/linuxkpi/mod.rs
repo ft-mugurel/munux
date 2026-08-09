@@ -1,11 +1,19 @@
-//! Linux kernel C API shims (linuxkpi L1).
+//! Linux kernel C API shims (linuxkpi L1–L2).
 //!
 //! Modules resolve these by **name** via `module::export` (not the Rust crate ABI).
 //! Keep signatures C-compatible. Do not `#[no_mangle]` names that collide with
 //! `compiler_builtins` (`memcpy` / `memset`) — the export table holds the address.
 
+pub mod fs;
+pub mod uaccess;
+
 use crate::console;
 use crate::memory;
+
+pub use fs::{
+    call_open, call_read, call_release, call_write, LinuxFileOperations, MiscDevice,
+};
+pub use uaccess::{copy_from_user, copy_to_user};
 
 /// Print a NUL-terminated C string. Skips Linux `KERN_SOH` + level if present.
 pub fn print_cstr(s: *const u8) {

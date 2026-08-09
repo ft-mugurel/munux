@@ -300,6 +300,8 @@ pub struct ChrdevEntry {
     pub mod_read: Option<ModRwFn>,
     pub mod_write: Option<ModRwFn>,
     pub mod_release: Option<ModRelFn>,
+    /// Linux `struct file_operations *` (linuxkpi L2). Null if NASM/tiny fops.
+    pub linux_fops: *const crate::linuxkpi::LinuxFileOperations,
 }
 
 static mut MOUNTS: [MountEntry; MAX_MOUNTS] = [MountEntry {
@@ -320,6 +322,7 @@ static mut CHRDEVS: [ChrdevEntry; MAX_CHRDEV] = [ChrdevEntry {
     mod_read: None,
     mod_write: None,
     mod_release: None,
+    linux_fops: core::ptr::null(),
 }; MAX_CHRDEV];
 
 static mut VFS_READY: bool = false;
@@ -353,7 +356,7 @@ pub fn register_mount(path: &str, fs_name: &'static str, root_ino: u32) -> Resul
 
 /// Register a character device name under `/dev/<name>`.
 pub fn register_chrdev(name: &str, fops_id: u8) -> Result<(), VfsError> {
-    register_chrdev_inner(name, fops_id, -1, None, None, None)
+    register_chrdev_inner(name, fops_id, -1, None, None, None, core::ptr::null())
 }
 
 /// Register a module-backed `/dev/<name>` with C-ABI read/write/release.
@@ -364,7 +367,27 @@ pub fn register_mod_chrdev(
     release: Option<ModRelFn>,
     module_slot: i32,
 ) -> Result<(), VfsError> {
-    register_chrdev_inner(name, FOPS_MOD, module_slot, read, write, release)
+    register_chrdev_inner(
+        name,
+        FOPS_MOD,
+        module_slot,
+        read,
+        write,
+        release,
+        core::ptr::null(),
+    )
+}
+
+/// Register `/dev/<name>` with Linux `file_operations` (linuxkpi).
+pub fn register_linux_chrdev(
+    name: &str,
+    fops: *const crate::linuxkpi::LinuxFileOperations,
+    module_slot: i32,
+) -> Result<(), VfsError> {
+    if fops.is_null() {
+        return Err(VfsError::Inval);
+    }
+    register_chrdev_inner(name, FOPS_MOD, module_slot, None, None, None, fops)
 }
 
 fn register_chrdev_inner(
@@ -374,6 +397,7 @@ fn register_chrdev_inner(
     read: Option<ModRwFn>,
     write: Option<ModRwFn>,
     release: Option<ModRelFn>,
+    linux_fops: *const crate::linuxkpi::LinuxFileOperations,
 ) -> Result<(), VfsError> {
     if name.is_empty() || name.len() > 11 {
         return Err(VfsError::Inval);
@@ -398,6 +422,7 @@ fn register_chrdev_inner(
             e.mod_read = read;
             e.mod_write = write;
             e.mod_release = release;
+            e.linux_fops = linux_fops;
             return Ok(());
         }
     }
@@ -422,6 +447,7 @@ pub fn unregister_chrdev(name: &str) -> Result<(), VfsError> {
                 mod_read: None,
                 mod_write: None,
                 mod_release: None,
+                linux_fops: core::ptr::null(),
             };
             return Ok(());
         }
@@ -936,6 +962,13 @@ fn strip_dev_prefix(path: &str) -> Option<&str> {
 fn open_chrdev(name: &str, readable: bool, writable: bool) -> Result<FileData, VfsError> {
     for (i, e) in chrdevs_mut().iter_mut().enumerate() {
         if e.used && chrdev_name_str(e) == name {
+            if !e.linux_fops.is_null() {
+                crate::module::map_code_into_current();
+                let rc = unsafe { crate::linuxkpi::call_open(e.linux_fops) };
+                if rc != 0 {
+                    return Err(VfsError::Fault);
+                }
+            }
             e.opens = e.opens.saturating_add(1);
             if e.module_slot >= 0 {
                 let _ = crate::module::try_get(e.module_slot as usize);
@@ -1135,10 +1168,21 @@ fn map_mod_rc(rc: i64) -> Result<usize, VfsError> {
 
 fn mod_read_op(f: &mut FileData, buf: &mut [u8]) -> Result<usize, VfsError> {
     crate::module::map_code_into_current();
-    let op = match mod_chrdev_entry(f) {
-        Some(e) => e.mod_read,
+    let (linux_fops, op) = match mod_chrdev_entry(f) {
+        Some(e) => (e.linux_fops, e.mod_read),
         None => return Err(VfsError::NoDev),
     };
+    if !linux_fops.is_null() {
+        let mut pos = f.pos as i64;
+        let rc = unsafe {
+            crate::linuxkpi::call_read(linux_fops, buf.as_mut_ptr(), buf.len() as u64, &mut pos)
+        };
+        f.pos = pos as u64;
+        return match rc {
+            Some(n) => map_mod_rc(n),
+            None => Err(VfsError::IsDir),
+        };
+    }
     match op {
         Some(fun) => map_mod_rc(fun(buf.as_mut_ptr(), buf.len() as u64)),
         None => Err(VfsError::IsDir),
@@ -1147,10 +1191,26 @@ fn mod_read_op(f: &mut FileData, buf: &mut [u8]) -> Result<usize, VfsError> {
 
 fn mod_write_op(f: &mut FileData, buf: &[u8]) -> Result<usize, VfsError> {
     crate::module::map_code_into_current();
-    let op = match mod_chrdev_entry(f) {
-        Some(e) => e.mod_write,
+    let (linux_fops, op) = match mod_chrdev_entry(f) {
+        Some(e) => (e.linux_fops, e.mod_write),
         None => return Err(VfsError::NoDev),
     };
+    if !linux_fops.is_null() {
+        let mut pos = f.pos as i64;
+        let rc = unsafe {
+            crate::linuxkpi::call_write(
+                linux_fops,
+                buf.as_ptr(),
+                buf.len() as u64,
+                &mut pos,
+            )
+        };
+        f.pos = pos as u64;
+        return match rc {
+            Some(n) => map_mod_rc(n),
+            None => Err(VfsError::IsDir),
+        };
+    }
     match op {
         Some(fun) => map_mod_rc(fun(buf.as_ptr() as *mut u8, buf.len() as u64)),
         None => Err(VfsError::IsDir),
@@ -1159,15 +1219,20 @@ fn mod_write_op(f: &mut FileData, buf: &[u8]) -> Result<usize, VfsError> {
 
 fn mod_release_op(f: &mut FileData) {
     crate::module::map_code_into_current();
-    let (rel, slot) = match mod_chrdev_entry(f) {
+    let (rel, slot, linux_fops) = match mod_chrdev_entry(f) {
         Some(e) => {
             if e.opens > 0 {
                 e.opens -= 1;
             }
-            (e.mod_release, e.module_slot)
+            (e.mod_release, e.module_slot, e.linux_fops)
         }
-        None => (None, -1),
+        None => (None, -1, core::ptr::null()),
     };
+    if !linux_fops.is_null() {
+        unsafe {
+            crate::linuxkpi::call_release(linux_fops);
+        }
+    }
     if let Some(fun) = rel {
         fun();
     }

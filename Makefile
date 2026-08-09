@@ -311,12 +311,14 @@ MODULE_ECHO_KO_ASM	=	modules/echo.ko.asm
 MODULE_ECHO_KO		=	build/rootfs/lib/modules/echo.ko
 MODULE_HELLO_C		=	modules/linux/hello.c
 MODULE_HELLO_C_KO	=	build/rootfs/lib/modules/hello_c.ko
+MODULE_ECHO_C		=	modules/linux/echo.c
+MODULE_ECHO_C_KO	=	build/rootfs/lib/modules/echo_c.ko
 LINUXKPI_CFLAGS		=	-ffreestanding -fno-stack-protector -fno-pic -fno-plt \
 				-mcmodel=large -mno-red-zone -fno-asynchronous-unwind-tables \
 				-fno-exceptions -fno-common -mno-mmx -mno-sse -mno-sse2 \
 				-O2 -Wall -Iinclude
 
-modules: ${MODULE_HELLO_MNX} ${MODULE_ECHO_MNX} ${MODULE_HELLO_KO} ${MODULE_ECHO_KO} ${MODULE_HELLO_C_KO}
+modules: ${MODULE_HELLO_MNX} ${MODULE_ECHO_MNX} ${MODULE_HELLO_KO} ${MODULE_ECHO_KO} ${MODULE_HELLO_C_KO} ${MODULE_ECHO_C_KO}
 
 ${MODULE_HELLO_MNX}: ${MODULE_HELLO_ASM}
 	$(call require_tool,$(NASM),nasm)
@@ -347,6 +349,12 @@ ${MODULE_HELLO_C_KO}: ${MODULE_HELLO_C} include/linux/module.h include/linux/pri
 	@mkdir -p build/rootfs/lib/modules
 	@${CC} ${LINUXKPI_CFLAGS} -c -o ${MODULE_HELLO_C_KO} ${MODULE_HELLO_C}
 	@echo -e "$(BOLD)$(GREEN)[✓] MODULE hello_c.ko (linuxkpi gcc)$(RESET)"
+
+${MODULE_ECHO_C_KO}: ${MODULE_ECHO_C} include/linux/module.h include/linux/fs.h include/linux/miscdevice.h include/linux/uaccess.h
+	$(call require_tool,$(CC),gcc)
+	@mkdir -p build/rootfs/lib/modules
+	@${CC} ${LINUXKPI_CFLAGS} -c -o ${MODULE_ECHO_C_KO} ${MODULE_ECHO_C}
+	@echo -e "$(BOLD)$(GREEN)[✓] MODULE echo_c.ko (linuxkpi gcc chardev)$(RESET)"
 
 disk: userland modules
 	@mkdir -p build/rootfs/docs build/rootfs/bin build/rootfs/lib/modules

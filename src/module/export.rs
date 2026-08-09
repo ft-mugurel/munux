@@ -91,6 +91,12 @@ const EXPORT_NAMES: &[&str] = &[
     "memset",
     "strlen",
     "__stack_chk_fail",
+    "copy_to_user",
+    "copy_from_user",
+    "misc_register",
+    "misc_deregister",
+    "register_chrdev",
+    "unregister_chrdev",
 ];
 
 /// Look up an exported symbol by name. Returns absolute address or None.
@@ -113,6 +119,12 @@ pub fn lookup(name: &str) -> Option<u64> {
         "memset" => Some(linuxkpi::linux_memset as usize as u64),
         "strlen" => Some(linuxkpi::linux_strlen as usize as u64),
         "__stack_chk_fail" => Some(linuxkpi::__stack_chk_fail as usize as u64),
+        "copy_to_user" => Some(linuxkpi::copy_to_user as usize as u64),
+        "copy_from_user" => Some(linuxkpi::copy_from_user as usize as u64),
+        "misc_register" => Some(linuxkpi::fs::misc_register as usize as u64),
+        "misc_deregister" => Some(linuxkpi::fs::misc_deregister as usize as u64),
+        "register_chrdev" => Some(linuxkpi::fs::register_chrdev as usize as u64),
+        "unregister_chrdev" => Some(linuxkpi::fs::unregister_chrdev as usize as u64),
         _ => None,
     }
 }
