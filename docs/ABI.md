@@ -5,7 +5,7 @@ This document freezes conventions for userspace and the kernel.
 
 | Field | Value |
 |-------|--------|
-| **Status** | **v0.3.6** — P10a PT_INTERP |
+| **Status** | **v0.3.7** — P10b ET_DYN load bias |
 | **Arch** | **x86_64** only on `main` |
 | **Goal** | Linux userspace (static musl today, glibc + a **desktop** later) uses the **same numbers, structs, and register ABI** as Linux; missing calls return **`-ENOSYS`**. Internals may differ; **results must match**. |
 
@@ -200,7 +200,7 @@ Common errno values:
 | `gettid` | Unique task id |
 | `fork` | Private CR3 (`clone_mm`) + stack copy; FDs cloned; child Ready; parent continues |
 | `clone` | Flags include `CLONE_VM` / `CLONE_FILES` / `CLONE_THREAD` / settid / TLS / stack |
-| `execve` | ELF64; FS `PT_LOAD` stream; **`PT_INTERP`** loads `/lib/ld-munux.so` (or path in `.interp`), `AT_BASE`/`AT_ENTRY` set, enter interp |
+| `execve` | ELF64 `ET_EXEC`/`ET_DYN`; `PT_INTERP`; `ET_DYN` bias `PIE_BASE`/`INTERP_BASE`; `AT_BASE`/`AT_ENTRY`; enter interp |
 | `execveat` | Same image path; `AT_FDCWD` / dirfd relative / `AT_EMPTY_PATH` (`fexecve`) |
 | `prctl` | `PR_SET/GET_NAME`, dumpable, `NO_NEW_PRIVS`, `PDEATHSIG`; unknown → `EINVAL` |
 | `exit` | One task → zombie; parent woken |
@@ -277,3 +277,4 @@ Using **wrong syscall numbers** would make Linux binaries impossible — munux k
 | **0.3.4** | P9d: `execveat`/`prctl`; **90** dispatched (2026-08-09) |
 | **0.3.5** | P9e: inode `PT_LOAD` stream + file `MAP_SHARED` writeback |
 | **0.3.6** | P10a: `PT_INTERP` + auxv `AT_BASE`; smoke `dynlinktest` |
+| **0.3.7** | P10b: `ET_DYN` load bias; smoke `dynlinkpie` |

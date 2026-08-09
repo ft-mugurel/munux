@@ -64,7 +64,7 @@ Canonical user half ends at `0x0000_8000_0000_0000` (non-canonical gap).
 
 Kernel shell: `preempt` / `preempttest` (A–G). Userspace: `clonetest`, `signaltest`, `futextest`.
 
-**Next (not mm):** P10b real `ld.so` / ET_DYN `.so` maps. Optional mm polish: COW fork, higher-half, demand paging. P8 is closed; IDE remains built-in. Destination: [ROADMAP.md](ROADMAP.md) (install a Linux DE).
+**Next (not mm):** P10c real `ld.so` + libc `.so` maps. Optional mm polish: COW fork, higher-half, demand paging. P8 is closed; IDE remains built-in. Destination: [ROADMAP.md](ROADMAP.md) (install a Linux DE).
 
 ---
 

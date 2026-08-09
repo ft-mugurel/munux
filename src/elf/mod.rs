@@ -1,4 +1,4 @@
-//! ELF64 loader for freestanding x86_64 user programs (ET_EXEC).
+//! ELF64 loader for freestanding x86_64 user programs (`ET_EXEC` / `ET_DYN`).
 
 use crate::memory::paging::{self, PAGE_PRESENT, PAGE_USER, PAGE_WRITABLE};
 use crate::memory::pmm::{self, FRAME_SIZE};
@@ -8,9 +8,15 @@ const ELFCLASS64: u8 = 2;
 const ELFDATA2LSB: u8 = 1;
 const EV_CURRENT: u8 = 1;
 const ET_EXEC: u16 = 2;
+const ET_DYN: u16 = 3;
 const EM_X86_64: u16 = 62;
 const PT_LOAD: u32 = 1;
 const PT_INTERP: u32 = 3;
+
+/// Load bias for a `PT_INTERP` that is `ET_DYN` (real `ld.so`, our ld-munux.so).
+const INTERP_BASE: u64 = 0x0000_0000_2000_0000;
+/// Load bias for a PIE main binary (`ET_DYN` executable).
+const PIE_BASE: u64 = 0x0000_0000_0040_0000;
 
 /// Cap on sum of PT_LOAD memsz (inode-backed loads; no 2 MiB kernel scratch).
 const MAX_LOAD_BYTES: u64 = 16 * 1024 * 1024;
@@ -212,8 +218,8 @@ fn validate_ehdr(h: &Ehdr) -> Result<(), &'static str> {
     if h.e_ident[6] != EV_CURRENT {
         return Err("elf: bad version");
     }
-    if h.e_type != ET_EXEC {
-        return Err("elf: need ET_EXEC");
+    if h.e_type != ET_EXEC && h.e_type != ET_DYN {
+        return Err("elf: need ET_EXEC or ET_DYN");
     }
     if h.e_machine != EM_X86_64 {
         return Err("elf: need EM_X86_64");
@@ -224,10 +230,25 @@ fn validate_ehdr(h: &Ehdr) -> Result<(), &'static str> {
     if h.e_phnum == 0 || h.e_phnum > 64 {
         return Err("elf: bad phnum");
     }
-    if h.e_entry < 0x1000 || h.e_entry >= 0x0000_8000_0000_0000 {
+    if h.e_type == ET_EXEC {
+        if h.e_entry < 0x1000 || h.e_entry >= 0x0000_8000_0000_0000 {
+            return Err("elf: bad entry");
+        }
+    } else if h.e_entry == 0 || h.e_entry >= 0x0000_8000_0000_0000 {
+        // ET_DYN: entry is an offset; checked again after applying bias.
         return Err("elf: bad entry");
     }
     Ok(())
+}
+
+fn image_bias(h: &Ehdr, is_interp: bool) -> u64 {
+    if h.e_type == ET_EXEC {
+        0
+    } else if is_interp {
+        INTERP_BASE
+    } else {
+        PIE_BASE
+    }
 }
 
 fn read_phdr(file: &[u8], phoff: u64, index: u16) -> Result<Phdr, &'static str> {
@@ -513,17 +534,18 @@ fn read_ino(ino: u32, off: u64, buf: &mut [u8]) -> Result<usize, &'static str> {
     crate::fs::ext2::read_file(ino, off as u32, buf)
 }
 
-fn load_segment_ino(ino: u32, file_size: u64, ph: &Phdr) -> Result<u64, &'static str> {
+fn load_segment_ino(ino: u32, file_size: u64, ph: &Phdr, bias: u64) -> Result<u64, &'static str> {
     if ph.p_memsz == 0 {
         return Ok(0);
     }
     if ph.p_filesz > ph.p_memsz {
         return Err("elf: filesz > memsz");
     }
-    if ph.p_vaddr < 0x1000 || ph.p_vaddr >= 0x0000_8000_0000_0000 {
+    let va = ph.p_vaddr.saturating_add(bias);
+    if va < 0x1000 || va >= 0x0000_8000_0000_0000 {
         return Err("elf: bad p_vaddr");
     }
-    let vend = ph.p_vaddr.saturating_add(ph.p_memsz);
+    let vend = va.saturating_add(ph.p_memsz);
     if vend > 0x0000_8000_0000_0000 {
         return Err("elf: segment past user space");
     }
@@ -537,7 +559,7 @@ fn load_segment_ino(ino: u32, file_size: u64, ph: &Phdr) -> Result<u64, &'static
         return Err("elf: segment too large");
     }
 
-    map_user_range(ph.p_vaddr, ph.p_vaddr.saturating_add(ph.p_memsz))?;
+    map_user_range(va, va.saturating_add(ph.p_memsz))?;
 
     if ph.p_filesz > 0 {
         let mut done = 0u64;
@@ -548,12 +570,12 @@ fn load_segment_ino(ino: u32, file_size: u64, ph: &Phdr) -> Result<u64, &'static
             if n == 0 {
                 return Err("elf: short segment read");
             }
-            write_user(ph.p_vaddr + done, &tmp[..n])?;
+            write_user(va + done, &tmp[..n])?;
             done += n as u64;
         }
     }
     if ph.p_memsz > ph.p_filesz {
-        zero_user(ph.p_vaddr + ph.p_filesz, ph.p_memsz - ph.p_filesz)?;
+        zero_user(va + ph.p_filesz, ph.p_memsz - ph.p_filesz)?;
     }
     Ok(ph.p_memsz)
 }
@@ -656,24 +678,24 @@ fn check_entry_mapped(entry: u64) -> Result<(), &'static str> {
     }
 }
 
-fn load_parts_ino(ino: u32, h: &ElfHeaders) -> Result<ImageParts, &'static str> {
+fn load_parts_ino(ino: u32, h: &ElfHeaders, bias: u64) -> Result<ImageParts, &'static str> {
     let mut total = 0u64;
     let mut image_end = 0u64;
     let mut phdr_va = 0u64;
-    let mut load_base = u64::MAX;
+    let mut min_vaddr = u64::MAX;
     for i in 0..h.ehdr.e_phnum {
         let ph = phdr_at(h, i);
         if ph.p_type != PT_LOAD {
             continue;
         }
-        total = total.saturating_add(load_segment_ino(ino, h.file_size, &ph)?);
+        total = total.saturating_add(load_segment_ino(ino, h.file_size, &ph, bias)?);
         if total > MAX_LOAD_BYTES {
             return Err("elf: image too large");
         }
-        if ph.p_vaddr < load_base {
-            load_base = ph.p_vaddr;
+        if ph.p_vaddr < min_vaddr {
+            min_vaddr = ph.p_vaddr;
         }
-        let vend = ph.p_vaddr.saturating_add(ph.p_memsz);
+        let vend = ph.p_vaddr.saturating_add(bias).saturating_add(ph.p_memsz);
         if vend > image_end {
             image_end = vend;
         }
@@ -684,43 +706,55 @@ fn load_parts_ino(ino: u32, h: &ElfHeaders) -> Result<ImageParts, &'static str> 
             && h.ehdr.e_phoff >= ph.p_offset
             && ph_end <= ph.p_offset.saturating_add(ph.p_filesz)
         {
-            phdr_va = ph.p_vaddr.saturating_add(h.ehdr.e_phoff - ph.p_offset);
+            phdr_va = ph
+                .p_vaddr
+                .saturating_add(bias)
+                .saturating_add(h.ehdr.e_phoff - ph.p_offset);
         }
     }
     if total == 0 {
         return Err("elf: no PT_LOAD segments");
     }
-    if load_base == u64::MAX {
-        load_base = 0;
-    }
-    check_entry_mapped(h.ehdr.e_entry)?;
+    let entry = h.ehdr.e_entry.saturating_add(bias);
+    check_entry_mapped(entry)?;
+    // AT_BASE is the load bias for ET_DYN; absolute min VA for ET_EXEC interp.
+    let load_base = if h.ehdr.e_type == ET_DYN {
+        bias
+    } else if min_vaddr == u64::MAX {
+        0
+    } else {
+        min_vaddr
+    };
     Ok(ImageParts {
-        entry: h.ehdr.e_entry,
+        entry,
         image_end,
         phdr_va,
         load_base,
     })
 }
 
-/// Load ET_EXEC from an ext2 inode: headers + each `PT_LOAD`.
+/// Load `ET_EXEC` / `ET_DYN` from an ext2 inode: headers + each `PT_LOAD`.
 ///
-/// If the file has `PT_INTERP`, the interpreter is loaded too (P10a). The
-/// returned `entry` is the **interpreter** entry; `AT_ENTRY` on the stack is
-/// still the main binary so a real `ld.so` (or our smoke interp) can jump there.
+/// `ET_DYN` (PIE or `ld.so`) is placed at a fixed bias (`PIE_BASE` / `INTERP_BASE`).
+/// If the file has `PT_INTERP`, the interpreter is loaded too. The returned
+/// `entry` is the **interpreter** entry; `AT_ENTRY` on the stack is still the
+/// main binary so a real `ld.so` (or our smoke interp) can jump there.
 pub fn load_from_ino(ino: u32, argv: &[&str]) -> Result<LoadedImage, &'static str> {
     if !crate::fs::is_ready() {
         return Err("no filesystem");
     }
     let headers = parse_headers(ino)?;
     let interp = find_interp_path(ino, &headers)?;
-    let main = load_parts_ino(ino, &headers)?;
+    let main_bias = image_bias(&headers.ehdr, false);
+    let main = load_parts_ino(ino, &headers, main_bias)?;
 
     let (run_entry, at_base) = if let Some((raw, len)) = interp {
         let path = core::str::from_utf8(&raw[..len]).map_err(|_| "elf: bad PT_INTERP")?;
         let cwd = crate::fs::path::cwd_inode();
         let iino = crate::fs::ext2::resolve_path(cwd, path).map_err(|_| "not found")?;
         let ih = parse_headers(iino)?;
-        let ip = load_parts_ino(iino, &ih)?;
+        let ibias = image_bias(&ih.ehdr, true);
+        let ip = load_parts_ino(iino, &ih, ibias)?;
         (ip.entry, ip.load_base)
     } else {
         (main.entry, 0)

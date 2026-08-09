@@ -1,6 +1,6 @@
 # munux roadmap — Linux-compatible kernel in Rust
 
-**Last updated:** 2026-08-09 (P10a `PT_INTERP` + custom interp smoke).
+**Last updated:** 2026-08-09 (P10b `ET_DYN` load bias).
 
 **Goal:** munux is a **Linux x86_64 kernel written in Rust**. The destination is to **install a Linux desktop environment and use the machine like a Linux system**.
 
@@ -406,7 +406,7 @@ These are **in scope**. Internals can differ from Linux; the **result** must not
 
 | Phase | Result we are aiming for | Notes |
 |-------|--------------------------|-------|
-| **P10** | Dynamically linked musl/glibc binaries run | P10a ✅ `PT_INTERP` + `AT_BASE`/`AT_ENTRY` + `/lib/ld-munux.so` smoke; still need real `ld.so` / ET_DYN / `.so` maps |
+| **P10** | Dynamically linked musl/glibc binaries run | P10a ✅ `PT_INTERP`; P10b ✅ `ET_DYN` bias (`dynlinkpie`); still need real `ld.so` + `.so` `mmap` |
 | **P11** | Real terminals and job control | PTYs, termios, session/pgrp, `TIOCSCTTY`, `wait`/SIGCHLD polish — needed for a DE terminal |
 | **P12** | Networking works | virtio-net + ICMP ping ✅; still need `socket`/`bind`/`connect` for userspace |
 | **P13** | Graphics + input | Framebuffer or KMS/DRM + evdev/mice/keyboard in Linux ABI form; then Xorg or a Wayland compositor |
@@ -501,7 +501,7 @@ Milestones on that path:
 
 **Phase 8 is complete.** Do not reopen it for “make IDE a `.ko` on ext2.”
 
-**P10a (`PT_INTERP`) landed.** Next: real musl/glibc `ld.so` (ET_DYN load bias, `mmap` `.so`, TLS).
+**P10b (`ET_DYN` load bias) landed.** Next: real musl/glibc `ld.so` + libc `.so` maps / TLS.
 
 **P9 leftover:** COW fork / demand paging as needed by dynlink.
 
