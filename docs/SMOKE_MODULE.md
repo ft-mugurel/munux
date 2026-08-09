@@ -89,7 +89,8 @@ Expected:
 | Missing | Notes |
 |---------|--------|
 | Mainline Linux **vermagic / ksymtab / GPL** | Our `.ko` is ET_REL + munux exports only |
-| `depmod`, dependencies, signing, livepatch | Explicit non-goals |
+| Compile Linux **driver `.c`** (linuxkpi) | **Planned** — [LINUXKPI.md](LINUXKPI.md); not P8 leftover |
+| `depmod`, signing, **distro** `.ko` binaries | Still out of scope |
 | IDE as a `.ko` on ext2 | **Not a bug / not unfinished P8.** Root is on `hda`; `insmod` needs that disk. IDE stays **built-in**. Initrd + optional ATA module is later boot work. |
 | Shared kernel PDPT / `vmalloc` | Heap dual-map + trampolines for PC32 |
 | Module-loaded filesystems | VFS can register; no example FS module yet |

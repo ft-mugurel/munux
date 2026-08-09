@@ -26,9 +26,10 @@ BusyBox / static musl binaries are **probes and regression tests**, not the prod
 
 1. ~~**Per-process address spaces** and a real process model~~ ✅  
 2. ~~**Threads** (`clone`, TID, futex, TLS) + signals~~ ✅ (practical slices)  
-3. ~~**Loadable kernel modules** (export table, init/exit, chardev)~~ ✅ practical (MNX1 + ELF ET_REL `.ko`, not mainline vermagic)  
+3. ~~**Loadable kernel modules** (export table, init/exit, chardev)~~ ✅ practical (MNX1 + ELF ET_REL `.ko`)  
 4. **Phase 9** — grow the Linux surface (`execveat`/`prctl` next)  
-5. **Later** — dynlink/glibc, PTYs/job control, networking, graphics+input, **installable desktop**
+5. **linuxkpi** — compile Linux driver `.c` ([docs/LINUXKPI.md](docs/LINUXKPI.md)); not distro `.ko` blobs  
+6. **Later** — dynlink/glibc, PTYs/job control, networking, graphics+input, **installable desktop**
 
 ---
 
@@ -83,6 +84,7 @@ Destination remains a **Linux desktop** (P10–P14). IDE stays built-in.
 - `hello.mnx` / `hello.ko` (printk); `echo.*` registers `/dev/echo` via C-ABI `register_chrdev`
 - Unload blocked while the device is open (`echotest` checks EBUSY)
 - Kernel debug shell also has `insmod` / `rmmod` / `lsmod` (after `exit` from sh)
+- **Next (linuxkpi):** compile Linux driver **sources** — [docs/LINUXKPI.md](docs/LINUXKPI.md). Distro `.ko` binaries stay out of scope.
 
 ### Console
 - VGA 80×25 text, PS/2 keyboard (US QWERTY)
@@ -104,6 +106,7 @@ Destination remains a **Linux desktop** (P10–P14). IDE stays built-in.
 | **[docs/SMOKE_FUTEX.md](docs/SMOKE_FUTEX.md)** | Futex join smoke |
 | **[docs/SMOKE_VFS.md](docs/SMOKE_VFS.md)** | VFS mounts / fops / pipes (Phase 7) |
 | **[docs/SMOKE_MODULE.md](docs/SMOKE_MODULE.md)** | Modules: insmod/rmmod/lsmod, hello + `/dev/echo` |
+| **[docs/LINUXKPI.md](docs/LINUXKPI.md)** | Plan: Linux driver sources (linuxkpi) |
 | **[docs/BUSYBOX_SUITE_REPORT.md](docs/BUSYBOX_SUITE_REPORT.md)** | Strict BusyBox regression suite |
 | **[SMOKE.md](SMOKE.md)** | Manual smoke checklist |
 
@@ -283,9 +286,10 @@ Need **`make disk`** so `/lib/modules/*.mnx` and `/bin/insmod` are on the image.
 
 ## Known limitations (current)
 
-**Modules (P8a–8c — conceptual LKMs, not mainline-complete)**
-- Formats: **MNX1** and ELF64 **ET_REL** `.ko` (no vermagic, GPL ksymtab, or Linux `.ko` ABI)
-- No `depmod` / module dependency tree, signing, livepatch
+**Modules (P8a–8c done; linuxkpi planned)**
+- Formats today: **MNX1** and ELF64 **ET_REL** `.ko` with `munux_*` exports (NASM hello/echo)
+- **Plan:** compile Linux driver **sources** — [docs/LINUXKPI.md](docs/LINUXKPI.md). Distro `.ko` binaries / vermagic still out of scope
+- No `depmod` / signing / livepatch
 - IDE/`hda` is **intentionally built-in** (root filesystem lives on that disk; a disk `.ko` would need initrd)
 - Heap dual-map + PC32 trampolines (not Linux `vmalloc` + shared kernel PDPT)
 

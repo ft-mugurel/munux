@@ -1,6 +1,6 @@
 # munux roadmap — Linux-compatible kernel in Rust
 
-**Last updated:** 2026-08-09 (goal: Linux desktop results; P9a–P9c already landed).
+**Last updated:** 2026-08-09 (desktop goal + linuxkpi plan for Linux driver sources).
 
 **Goal:** munux is a **Linux x86_64 kernel written in Rust**. The destination is to **install a Linux desktop environment and use the machine like a Linux system**.
 
@@ -8,13 +8,14 @@ Think **clang vs gcc**: same job, different implementation. Internals may differ
 
 BusyBox / static musl binaries are **probes and regression tests**, not the product. Syscall coverage is a **progress metric** toward real Linux userspace (glibc, dynlink, a DE), not a vanity checklist and not something to stop at “architecture only.”
 
-**Related docs:** [README](../README.md) · [ABI](ABI.md) · [MM](MM.md) · [SYSCALL_COMPARE](SYSCALL_COMPARE.md) · [SMOKE_PREEMPT](SMOKE_PREEMPT.md) · [SMOKE_CLONE](SMOKE_CLONE.md) · [SMOKE_SIGNAL](SMOKE_SIGNAL.md) · [SMOKE_FUTEX](SMOKE_FUTEX.md) · [SMOKE_VFS](SMOKE_VFS.md) · [SMOKE_MODULE](SMOKE_MODULE.md) · [BusyBox suite](BUSYBOX_SUITE_REPORT.md)
+**Related docs:** [README](../README.md) · [ABI](ABI.md) · [MM](MM.md) · [SYSCALL_COMPARE](SYSCALL_COMPARE.md) · [SMOKE_PREEMPT](SMOKE_PREEMPT.md) · [SMOKE_CLONE](SMOKE_CLONE.md) · [SMOKE_SIGNAL](SMOKE_SIGNAL.md) · [SMOKE_FUTEX](SMOKE_FUTEX.md) · [SMOKE_VFS](SMOKE_VFS.md) · [SMOKE_MODULE](SMOKE_MODULE.md) · [LINUXKPI](LINUXKPI.md) · [BusyBox suite](BUSYBOX_SUITE_REPORT.md)
 
 **North stars:**
 
 1. **Linux userspace results** — eventually a desktop (display + input + shell + apps) on munux, same as on Linux.
 2. **Architecture spine (done)** — isolated processes, joinable threads, loadable drivers. That was the *path*, not the finish line.
 3. **Grow the ABI on purpose** until a real distro userspace + DE works.
+4. **Linux driver sources** (linuxkpi) — compile upstream `.c` against munux headers; not distro `.ko` binaries. See [LINUXKPI.md](LINUXKPI.md).
 
 ---
 
@@ -74,9 +75,12 @@ BusyBox / static musl binaries are **probes and regression tests**, not the prod
                        ▼
   P8  Kernel modules (loader, symbols, init/exit, refcount)
                        │
-                       ▼
-  P9  Broader Linux surface (syscalls, mmap, FS, poll)   ← current
-                       │
+          ┌────────────┴────────────┐
+          ▼                         ▼
+  P9  Linux userspace surface    LK  linuxkpi (compile Linux .c drivers)
+      (syscalls, mmap, …)  ←now     L0 loader → L1 printk → L2 cdev → virtio
+          │                         │
+          └────────────┬────────────┘
                        ▼
   P10 Dynamic linking + ELF file maps (musl/glibc-class process)
                        │
@@ -288,18 +292,21 @@ threads, wait runs Ready **children only**, nest-safe spurious wake. Smoke: `fut
 - `hello.mnx` / `hello.ko`; `echo.mnx` / `echo.ko` → `/dev/echo` + EBUSY unload
 - `/proc/modules`
 
-Vermagic, `depmod`, signing, and mainline `.ko` ABI were **non-goals**, not leftover P8 work.
+Vermagic, `depmod`, signing, and **prebuilt distro `.ko` files** remain out of P8.
+**New epic [LINUXKPI](LINUXKPI.md):** compile Linux **driver sources** against munux `include/linux/*.h` (clang vs gcc for drivers).
 
 ### What “Linux-compatible modules” means for munux
 
-Aim for **conceptual compatibility** with Linux LKMs, not binary `.ko` from mainline Linux (that requires identical kernel ABI, GPL symbols, version magic — unrealistic early).
+**P8 (done):** conceptual LKM lifecycle — ELF ET_REL + tiny `munux_*` exports + NASM hello/echo.
+
+**Next (linuxkpi):** same lifecycle, **Linux C API** so upstream driver `.c` files build and run. Not Ubuntu’s prebuilt `.ko`.
 
 **Target:**
 
-1. Load an **ELF relocatable object** from the filesystem (or initrd).
-2. Resolve symbols against a kernel **export table** (`EXPORT_SYMBOL`-like).
-3. Call `init()`; on unload call `exit()` if refcount allows.
-4. Modules register drivers/FS via the VFS/device API from P7.
+1. Load an **ELF relocatable object** from the filesystem (or initrd). ✅
+2. Resolve symbols against a kernel **export table** (`EXPORT_SYMBOL`-like). ✅ munux names; Linux names in LK
+3. Call `init()`; on unload call `exit()` if refcount allows. ✅
+4. Modules register drivers/FS via the VFS/device API from P7. ✅ tiny fops; Linux `file_operations` in L2
 
 ### Deliverables
 
@@ -346,8 +353,10 @@ Optional later (not P8, not a Phase 9 gate):
 ### Non-goals (not “unfinished P8”)
 
 - Livepatch, module signing, full mainline vermagic, dependency trees (`depmod`)
-- Binary compatibility with Linux `.ko` files
+- Binary compatibility with **distro** Linux `.ko` files (Ubuntu/Fedora blobs)
 - Unloading `hda` while `/` is mounted on it
+
+Source-compatible Linux drivers are **not** a P8 leftover — they are epic **LK** ([LINUXKPI.md](LINUXKPI.md)).
 
 ---
 
@@ -372,6 +381,25 @@ Syscall coverage % (**88 / 385 ≈ 22.9%** today) is a **progress metric** towar
 
 ---
 
+## Epic LK — Linux driver sources (linuxkpi)
+
+**Plan:** [LINUXKPI.md](LINUXKPI.md). **Not started.** Parallel to P9.
+
+Compile Linux **`.c` drivers** against munux-owned `include/linux/*.h`. Implement that C API in Rust (`extern "C"`). Do **not** load prebuilt Ubuntu `.ko` files.
+
+| Slice | Result |
+|-------|--------|
+| **L0** | gcc ET_REL relocates (GOT/PC32, bigger limits) |
+| **L1** | `printk` / `kmalloc` / `module_init` — gcc `hello.c` loads |
+| **L2** | Linux `file_operations` / misc — `echo.c` replaces NASM echo |
+| **L3** | spinlock / wait / `request_irq` |
+| **L4** | `ioremap` + virtio-mmio or PCI probe |
+| **L5** | One upstream driver (virtio-blk recommended) |
+
+MNX1 + NASM modules stay until L2 is green, then freeze.
+
+---
+
 ## Phases 10–14 — Path to a Linux desktop
 
 These are **in scope**. Internals can differ from Linux; the **result** must not.
@@ -389,6 +417,8 @@ These are **in scope**. Internals can differ from Linux; the **result** must not
 **Not OK to differ:** userspace-visible ABI and behavior that a DE, libc, or package manager relies on.
 
 SMP, ACPI, initrd, and “optional disk `.ko` after initrd” are **boot/scale** work that a serious desktop install will eventually want — not leftover P8.
+
+Linux **driver sources** (virtio-blk/net, later GPU) go through [LINUXKPI.md](LINUXKPI.md) (L0–L5), in parallel with P9.
 
 ---
 
@@ -471,11 +501,13 @@ Milestones on that path:
 
 **Phase 8 is complete.** Do not reopen it for “make IDE a `.ko` on ext2.”
 
-**P9c (`poll` / `select` / `epoll`) landed.** Next Phase 9 slice (still toward the desktop, one step):
+**P9c (`poll` / `select` / `epoll`) landed.** Two tracks from here:
 
-1. **`execveat` / `prctl`**
-2. ELF loader using file maps / `MAP_SHARED` writeback (feeds P10 dynlink)
-3. `ppoll` sigmask / edge-triggered epoll polish
+**P9 (userspace):** `execveat` / `prctl` → file-map ELF / `MAP_SHARED` → dynlink.
+
+**LK (drivers):** [LINUXKPI.md](LINUXKPI.md) — L0 loader + L1 gcc `hello.c` → L2 Linux `echo.c` → later virtio.
+
+Do not reopen P8 for MNX1 features. New modules are linuxkpi C.
 
 Keep qemu-connect smokes green: `signaltest`, `clonetest`, `futextest`, `echotest`,
 `insmod …/hello.ko`, `preempttest`.

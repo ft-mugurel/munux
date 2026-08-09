@@ -7,6 +7,7 @@
 | **[MM.md](MM.md)** | Memory layout + phase checklist (P1–P6 foundation; P7–P8 done, P9 next) |
 | **[SMOKE_VFS.md](SMOKE_VFS.md)** | VFS mounts / fops / pipes (Phase 7 practical) |
 | **[SMOKE_MODULE.md](SMOKE_MODULE.md)** | Modules: MNX1 + ELF `.ko`, hello + `/dev/echo` (P8a–8c) |
+| **[LINUXKPI.md](LINUXKPI.md)** | Plan: compile Linux driver sources (linuxkpi L0–L5) |
 | **[ABI.md](ABI.md)** | Syscall calling convention, process/FD model (**v0.3.3**, 88 numbers) |
 | **[SYSCALL_COMPARE.md](SYSCALL_COMPARE.md)** | Full Linux x86_64 vs munux syscall matrix |
 | **[SMOKE_PREEMPT.md](SMOKE_PREEMPT.md)** | IRQ preemption (`preempttest` A–G) |
@@ -23,4 +24,4 @@
 1. **New contributor** → README → ROADMAP → ABI  
 2. **Implementing a syscall** → ABI + SYSCALL_COMPARE  
 3. **Regression after a change** → SMOKE + focused SMOKE_* + BusyBox suite  
-4. **Planning next work** → ROADMAP (desktop is the destination; next slice is execveat/prctl)
+4. **Planning next work** → ROADMAP (desktop destination) + [LINUXKPI.md](LINUXKPI.md) for Linux drivers
