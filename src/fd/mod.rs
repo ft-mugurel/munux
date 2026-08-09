@@ -533,6 +533,14 @@ pub fn sys_open_path(path: &str, flags: u64) -> Result<usize, FdError> {
     open_path(path, flags)
 }
 
+/// Install an already-built VFS `FileData` into the current FD table.
+pub fn sys_install_file(data: crate::fs::vcore::FileData) -> Result<usize, FdError> {
+    if !is_ready() {
+        return Err(FdError::BadFd);
+    }
+    with_current(|t| t.install(File::from_vfs(data)))
+}
+
 pub fn sys_pipe() -> Result<(usize, usize), FdError> {
     if !is_ready() {
         return Err(FdError::BadFd);

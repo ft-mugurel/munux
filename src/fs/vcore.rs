@@ -1041,6 +1041,43 @@ fn ext2_open(path: &str, flags: u32, readable: bool, writable: bool) -> Result<F
     })
 }
 
+/// Open `path` relative to an already-resolved directory inode (ext2).
+/// Used by `openat(dirfd, "name")` for ld.so / libc.
+pub fn vfs_open_rel(dir_ino: u32, path: &str, flags: u32) -> Result<FileData, VfsError> {
+    if path.is_empty() || path.starts_with('/') {
+        return Err(VfsError::Inval);
+    }
+    if !crate::fs::is_ready() {
+        return Err(VfsError::NoEnt);
+    }
+    const O_DIRECTORY: u32 = 0o200000;
+    const O_ACCMODE: u32 = 3;
+    const O_RDONLY: u32 = 0;
+    const O_RDWR: u32 = 2;
+    let acc = flags & O_ACCMODE;
+    let readable = acc == O_RDONLY || acc == O_RDWR;
+    let writable = acc == 1 || acc == O_RDWR;
+    if !ext2::inode_is_dir(dir_ino) {
+        return Err(VfsError::NotDir);
+    }
+    let ino = ext2::resolve_path(dir_ino, path).map_err(|_| VfsError::NoEnt)?;
+    let is_dir = ext2::inode_is_dir(ino);
+    if flags & O_DIRECTORY != 0 && !is_dir {
+        return Err(VfsError::NotDir);
+    }
+    if is_dir && writable {
+        return Err(VfsError::IsDir);
+    }
+    Ok(FileData {
+        pos: 0,
+        readable: if is_dir { true } else { readable },
+        writable: if is_dir { false } else { writable },
+        private: ino as u64,
+        is_dir,
+        fops_id: if is_dir { FOPS_EXT2_DIR } else { FOPS_EXT2_FILE },
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Ops implementations
 // ---------------------------------------------------------------------------

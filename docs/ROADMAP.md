@@ -1,6 +1,6 @@
 # munux roadmap — Linux-compatible kernel in Rust
 
-**Last updated:** 2026-08-09 (P10b `ET_DYN` load bias).
+**Last updated:** 2026-08-09 (P10c glibc `hello_dyn`).
 
 **Goal:** munux is a **Linux x86_64 kernel written in Rust**. The destination is to **install a Linux desktop environment and use the machine like a Linux system**.
 
@@ -377,7 +377,7 @@ Prioritize by **what Linux userspace (and later a DE) actually needs**, not by �
 | Medium | `vfork`, richer `clone3`, waitid | glibc/musl spawn paths |
 | Later in P9 | COW fork, demand paging, shared-anon mmap | `MAP_SHARED` file writeback ✅ P9e (no EOF-extend / COW) |
 
-Syscall coverage % (**90 / 385 ≈ 23.4%** today) is a **progress metric** toward the desktop, not a vanity KPI and not a reason to stop. Implement what userspace needs with **Linux semantics**; skip Linux-internal-only or obsolete calls until something actually requires them.
+Syscall coverage % (**95 / 385 ≈ 24.7%** today) is a **progress metric** toward the desktop, not a vanity KPI and not a reason to stop. Implement what userspace needs with **Linux semantics**; skip Linux-internal-only or obsolete calls until something actually requires them.
 
 ---
 
@@ -406,7 +406,7 @@ These are **in scope**. Internals can differ from Linux; the **result** must not
 
 | Phase | Result we are aiming for | Notes |
 |-------|--------------------------|-------|
-| **P10** | Dynamically linked musl/glibc binaries run | P10a ✅ `PT_INTERP`; P10b ✅ `ET_DYN` bias (`dynlinkpie`); still need real `ld.so` + `.so` `mmap` |
+| **P10** | Dynamically linked musl/glibc binaries run | P10a–c ✅ interp + `ET_DYN` + **glibc `hello_dyn`**; TLS/pthread / more libs still open |
 | **P11** | Real terminals and job control | PTYs, termios, session/pgrp, `TIOCSCTTY`, `wait`/SIGCHLD polish — needed for a DE terminal |
 | **P12** | Networking works | virtio-net + ICMP ping ✅; still need `socket`/`bind`/`connect` for userspace |
 | **P13** | Graphics + input | Framebuffer or KMS/DRM + evdev/mice/keyboard in Linux ABI form; then Xorg or a Wayland compositor |
@@ -501,7 +501,7 @@ Milestones on that path:
 
 **Phase 8 is complete.** Do not reopen it for “make IDE a `.ko` on ext2.”
 
-**P10b (`ET_DYN` load bias) landed.** Next: real musl/glibc `ld.so` + libc `.so` maps / TLS.
+**P10c (glibc `hello_dyn`) landed.** Next: more of libc (TLS/pthread), then P11 PTYs.
 
 **P9 leftover:** COW fork / demand paging as needed by dynlink.
 

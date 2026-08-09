@@ -9,8 +9,8 @@ pub const MAX_PROCESSES: usize = 16;
 pub const MAX_CHILDREN: usize = 8;
 pub const PROC_SIG_QUEUE: usize = 16;
 pub const MAX_SIGNALS: usize = 32;
-/// Max anonymous `mmap` regions tracked per process.
-pub const MAX_MMAPS: usize = 16;
+/// Max mmap regions tracked per process (ld.so maps several libc segments).
+pub const MAX_MMAPS: usize = 32;
 
 /// One mmap region (page-aligned addr/len). File `MAP_SHARED` stores inode +
 /// file offset so `munmap` / exec can write pages back.

@@ -33,6 +33,7 @@ From freestanding **`$`**:
 - [ ] `p9test` — A–H + `p9test: ALL PASS` (`prctl` + `execveat`)
 - [ ] `dynlinktest` — ET_EXEC + ET_DYN interp; `dynlinktest: ALL PASS`
 - [ ] `dynlinkpie` — ET_DYN PIE main + ET_DYN interp; `dynlinkpie: ALL PASS`
+- [ ] `hello_dyn` — real glibc `ld.so` + `libc.so.6`; `hello_dyn: ALL PASS`
 - [ ] `busybox true` — returns to `$`
 - [ ] Optional Ctrl-C: `busybox sleep 30` then **Ctrl+C** → back to `$` (shell stays alive)
 

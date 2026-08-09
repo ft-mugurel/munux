@@ -107,6 +107,11 @@ pub mod num {
     pub const FINIT_MODULE: u64 = 313;
     /// Linux execveat(dirfd, pathname, argv, envp, flags).
     pub const EXECVEAT: u64 = 322;
+    pub const PREAD64: u64 = 17;
+    pub const SET_ROBUST_LIST: u64 = 273;
+    pub const GETRANDOM: u64 = 318;
+    pub const PRLIMIT64: u64 = 302;
+    pub const RSEQ: u64 = 334;
 }
 
 /// Linux-style: return `-errno` as `u64` bit pattern (negative i64).
@@ -548,6 +553,11 @@ pub extern "C" fn syscall_dispatch(
         num::INIT_MODULE => sys_init_module(a1, a2, a3),
         num::DELETE_MODULE => sys_delete_module(a1, a2),
         num::FINIT_MODULE => sys_finit_module(a1, a2, a3),
+        num::PREAD64 => sys_pread64(a1, a2, a3, a4),
+        num::SET_ROBUST_LIST => sys_set_robust_list(a1, a2),
+        num::GETRANDOM => sys_getrandom(a1, a2, a3),
+        num::PRLIMIT64 => sys_prlimit64(a1, a2, a3, a4),
+        num::RSEQ => 0u64, // glibc probes; no restartable sequences yet
         num::EXIT => {
             let status = a1 as i32;
             finish_exit(status, false);
@@ -1540,6 +1550,67 @@ fn sys_close(fd: u64) -> u64 {
     }
 }
 
+/// Linux pread64(fd, buf, count, offset) — read without moving the fd offset.
+fn sys_pread64(fd: u64, buf: u64, count: u64, offset: u64) -> u64 {
+    let len = count.min(4096) as usize;
+    if len == 0 {
+        return 0;
+    }
+    if !user_ptr_ok(buf, len as u64) {
+        return errno::neg(errno::EFAULT);
+    }
+    let mut tmp = [0u8; 4096];
+    match crate::fd::sys_read_at(fd, offset, &mut tmp[..len]) {
+        Ok(n) => {
+            unsafe {
+                core::ptr::copy_nonoverlapping(tmp.as_ptr(), buf as *mut u8, n);
+            }
+            n as u64
+        }
+        Err(e) => map_fd_err(e),
+    }
+}
+
+/// Linux set_robust_list — glibc always calls this; no robust futex yet.
+fn sys_set_robust_list(_head: u64, _len: u64) -> u64 {
+    0
+}
+
+/// Linux prlimit64 — glibc queries stack/nofile; report unlimited.
+fn sys_prlimit64(_pid: u64, _resource: u64, _new: u64, old: u64) -> u64 {
+    if old != 0 {
+        if !user_ptr_ok(old, 16) {
+            return errno::neg(errno::EFAULT);
+        }
+        unsafe {
+            core::ptr::write_volatile(old as *mut u64, u64::MAX);
+            core::ptr::write_volatile((old + 8) as *mut u64, u64::MAX);
+        }
+    }
+    0
+}
+
+/// Linux getrandom(buf, buflen, flags) — not crypto; timer-mixed bytes for ld.so/TLS.
+fn sys_getrandom(buf: u64, buflen: u64, _flags: u64) -> u64 {
+    let len = buflen.min(256);
+    if len == 0 {
+        return 0;
+    }
+    if !user_ptr_ok(buf, len) {
+        return errno::neg(errno::EFAULT);
+    }
+    let mut seed = crate::interrupts::timer::uptime_ns();
+    for i in 0..len as usize {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1);
+        unsafe {
+            core::ptr::write_volatile((buf as *mut u8).add(i), (seed >> 33) as u8);
+        }
+    }
+    len
+}
+
 /// Linux open(path, flags, mode) — mode ignored for creat defaults in fd layer.
 fn sys_open(path_ptr: u64, flags: u64, _mode: u64) -> u64 {
     let mut path_buf = [0u8; 256];
@@ -1569,14 +1640,25 @@ fn sys_openat(dirfd: u64, path_ptr: u64, flags: u64, mode: u64) -> u64 {
         Ok(s) => s,
         Err(_) => return errno::neg(errno::ENOENT),
     };
-    // Relative openat via dirfd not yet supported (no per-fd cwd).
-    if !path.starts_with('/') && dirfd as i32 != AT_FDCWD {
-        return errno::neg(errno::ENOSYS);
-    }
     let _ = mode;
-    match fd::sys_open_path(path, flags) {
-        Ok(fd) => fd as u64,
-        Err(e) => map_fd_err(e),
+    if path.starts_with('/') || dirfd as i32 == AT_FDCWD {
+        return match fd::sys_open_path(path, flags) {
+            Ok(fd) => fd as u64,
+            Err(e) => map_fd_err(e),
+        };
+    }
+    // Relative to an open directory fd (ld.so: openat(/lib64, "libc.so.6")).
+    let dino = match crate::fd::sys_fd_inode(dirfd) {
+        Ok(i) => i,
+        Err(crate::fd::FdError::BadFd) => return errno::neg(errno::EBADF),
+        Err(_) => return errno::neg(errno::ENOTDIR),
+    };
+    match crate::fs::vcore::vfs_open_rel(dino, path, flags as u32) {
+        Ok(data) => match crate::fd::sys_install_file(data) {
+            Ok(fd) => fd as u64,
+            Err(e) => map_fd_err(e),
+        },
+        Err(e) => map_vfs_stat_err(e),
     }
 }
 

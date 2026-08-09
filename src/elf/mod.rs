@@ -341,11 +341,11 @@ fn exec_stack_top() -> (u64, u64) {
 }
 
 /// Build a Linux-like initial stack:
-/// `[argc][argv…][NULL][envp NULL][auxv… AT_NULL][strings][16B random]`
+/// `[argc][argv…][NULL][envp…][NULL][auxv… AT_NULL][strings][16B random]`
 ///
 /// `argv` strings are copied onto the stack (max 6 args, 64 bytes each).
-/// Auxv is required by musl's `__init_libc` (it walks pairs until `AT_NULL`).
-pub fn setup_stack(argv: &[&str], aux: &AuxInfo) -> Result<u64, &'static str> {
+/// `env` max 4 strings, 96 bytes each (`LD_LIBRARY_PATH` for ld.so).
+pub fn setup_stack(argv: &[&str], env: &[&str], aux: &AuxInfo) -> Result<u64, &'static str> {
     let (stack_top, pages) = exec_stack_top();
     // Cap at 256 pages (1 MiB) — matches child-stack sizing for BusyBox.
     let pages = pages.max(1).min(256);
@@ -388,6 +388,18 @@ pub fn setup_stack(argv: &[&str], aux: &AuxInfo) -> Result<u64, &'static str> {
         str_ptrs[i] = top;
     }
 
+    let nenv = core::cmp::min(env.len(), 4);
+    let mut env_ptrs = [0u64; 4];
+    for i in 0..nenv {
+        let bytes = env[i].as_bytes();
+        let len = core::cmp::min(bytes.len(), 96);
+        top -= (len as u64) + 1;
+        top &= !7;
+        write_user(top, &bytes[..len])?;
+        write_user(top + len as u64, &[0u8])?;
+        env_ptrs[i] = top;
+    }
+
     // Aux vector entries: (type, value) pairs, terminated by (AT_NULL, 0).
     // Count pairs including AT_NULL.
     let mut aux_pairs: [(u64, u64); 16] = [(0, 0); 16];
@@ -416,8 +428,8 @@ pub fn setup_stack(argv: &[&str], aux: &AuxInfo) -> Result<u64, &'static str> {
     push_aux(&mut aux_pairs, &mut naux, AT_NULL, 0);
 
     // Words below strings:
-    // argc + narg argv ptrs + argv NULL + env NULL + naux*(type,value)
-    let words = 1 + narg + 1 + 1 + naux * 2;
+    // argc + narg argv ptrs + argv NULL + nenv env ptrs + env NULL + naux*(type,value)
+    let words = 1 + narg + 1 + nenv + 1 + naux * 2;
     let mut sp = top - (words as u64) * 8;
     sp &= !0xF;
 
@@ -430,6 +442,10 @@ pub fn setup_stack(argv: &[&str], aux: &AuxInfo) -> Result<u64, &'static str> {
     }
     write_user(sp + off, &0u64.to_le_bytes())?; // argv NULL
     off += 8;
+    for i in 0..nenv {
+        write_user(sp + off, &env_ptrs[i].to_le_bytes())?;
+        off += 8;
+    }
     write_user(sp + off, &0u64.to_le_bytes())?; // envp NULL
     off += 8;
     for i in 0..naux {
@@ -519,7 +535,7 @@ pub fn load_bytes_argv(file: &[u8], argv: &[&str]) -> Result<LoadedImage, &'stat
         phnum: ehdr.e_phnum as u64,
         base: 0,
     };
-    let stack_top = setup_stack(argv, &aux)?;
+    let stack_top = setup_stack(argv, &[], &aux)?;
     Ok(LoadedImage {
         entry: ehdr.e_entry,
         stack_top,
@@ -772,7 +788,11 @@ pub fn load_from_ino(ino: u32, argv: &[&str]) -> Result<LoadedImage, &'static st
         phnum: headers.ehdr.e_phnum as u64,
         base: at_base,
     };
-    let stack_top = setup_stack(argv, &aux)?;
+    let env = [
+        "LD_LIBRARY_PATH=/lib64:/usr/lib64:/lib:/usr/lib",
+        "PATH=/bin",
+    ];
+    let stack_top = setup_stack(argv, &env, &aux)?;
     Ok(LoadedImage {
         entry: run_entry,
         stack_top,

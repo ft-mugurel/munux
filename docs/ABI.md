@@ -5,7 +5,7 @@ This document freezes conventions for userspace and the kernel.
 
 | Field | Value |
 |-------|--------|
-| **Status** | **v0.3.7** — P10b ET_DYN load bias |
+| **Status** | **v0.3.8** — P10c glibc hello_dyn |
 | **Arch** | **x86_64** only on `main` |
 | **Goal** | Linux userspace (static musl today, glibc + a **desktop** later) uses the **same numbers, structs, and register ABI** as Linux; missing calls return **`-ENOSYS`**. Internals may differ; **results must match**. |
 
@@ -35,7 +35,7 @@ Same as Linux x86_64:
 
 Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.  
 Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` constants).  
-**90** numbers are dispatched (quality varies: full / partial / stub). Guest `uname` strings are still `sysname=munux`, `release=0.2.0`, `version=munux 0.2 x86_64` (independent of this ABI doc version).
+**95** numbers are dispatched (quality varies: full / partial / stub). Guest `uname` strings are still `sysname=munux`, `release=0.2.0`, `version=munux 0.2 x86_64` (independent of this ABI doc version).
 
 | # | Linux name | munux status |
 |--:|------------|--------------|
@@ -56,6 +56,7 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` consta
 | 14 | `rt_sigprocmask` | done (64-bit mask) |
 | 15 | `rt_sigreturn` | done (restorer trampoline) |
 | 16 | `ioctl` | **partial** (TTY probes) |
+| 17 | `pread64` | done (ld.so) |
 | 19 | `readv` | done |
 | 20 | `writev` | done |
 | 21 | `access` | done |
@@ -109,7 +110,7 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` consta
 | 231 | `exit_group` | done (tear down thread group; one zombie) |
 | 234 | `tgkill` | done (tgid + tid directed) |
 | 235 | `utimes` | done |
-| 257 | `openat` | partial (`AT_FDCWD` / absolute) |
+| 257 | `openat` | done (`AT_FDCWD` / abs / dirfd relative) |
 | 258 | `mkdirat` | partial |
 | 261 | `futimesat` | partial |
 | 262 | `newfstatat` | done |
@@ -125,10 +126,14 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` consta
 | 232 | `epoll_wait` | done (level-triggered) |
 | 233 | `epoll_ctl` | done (ADD/DEL/MOD) |
 | 271 | `ppoll` | done (sigmask ignored) |
+| 273 | `set_robust_list` | stub (glibc) |
 | 291 | `epoll_create1` | done (CLOEXEC ignored) |
+| 302 | `prlimit64` | stub (unlimited) |
 | 313 | `finit_module` | done (load from fd; MNX1 or ELF ET_REL) |
+| 318 | `getrandom` | done (timer-mixed) |
 | 322 | `execveat` | done (P9d; `AT_FDCWD` / dirfd relative / `AT_EMPTY_PATH`; `AT_SYMLINK_NOFOLLOW`) |
 | 332 | `statx` | done (basic stats; `AT_SYMLINK_NOFOLLOW`) |
+| 334 | `rseq` | stub (glibc probe) |
 
 **Notable still ENOSYS** (among others): `pselect6`, `epoll_pwait`,
 `vfork`, `dup3`, `statfs`, `getpriority`/`setpriority`,
@@ -278,3 +283,4 @@ Using **wrong syscall numbers** would make Linux binaries impossible — munux k
 | **0.3.5** | P9e: inode `PT_LOAD` stream + file `MAP_SHARED` writeback |
 | **0.3.6** | P10a: `PT_INTERP` + auxv `AT_BASE`; smoke `dynlinktest` |
 | **0.3.7** | P10b: `ET_DYN` load bias; smoke `dynlinkpie` |
+| **0.3.8** | P10c: glibc `ld.so`+`libc` `hello_dyn`; pread64/getrandom/prlimit64/rseq/robust_list |

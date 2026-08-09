@@ -243,9 +243,13 @@ USERLAND_DYNLINKPIE	=	build/rootfs/bin/dynlinkpie
 USERLAND_DYNLINKPIE_SRC	=	userland/dynlinkpie.S
 USERLAND_DYNINTERP	=	build/rootfs/lib/ld-munux.so
 USERLAND_DYNINTERP_SRC	=	userland/dyninterp.S
+USERLAND_HELLO_DYN	=	build/rootfs/bin/hello_dyn
+USERLAND_HELLO_DYN_SRC	=	userland/hello_dyn.c
+HOST_LDSO		=	$(firstword $(wildcard /lib64/ld-linux-x86-64.so.2 /usr/lib64/ld-linux-x86-64.so.2))
+HOST_LIBC		=	$(firstword $(wildcard /lib64/libc.so.6 /usr/lib64/libc.so.6 /usr/lib/libc.so.6))
 
 # Freestanding x86_64 ET_EXEC + embed into Rust
-userland: ${USERLAND_SRC} ${USERLAND_LD} ${USERLAND_ECHO_SRC} ${USERLAND_CAT_SRC} ${USERLAND_LS_SRC} ${USERLAND_FORKTEST_SRC} ${USERLAND_EXECTEST_SRC} ${USERLAND_SH_SRC} ${USERLAND_VI_SRC} ${USERLAND_UNAME_SRC} ${USERLAND_ARCHPRCTL_SRC} ${USERLAND_BRKTEST_SRC} ${USERLAND_MMAPTEST_SRC} ${USERLAND_POLLTEST_SRC} ${USERLAND_P9TEST_SRC} ${USERLAND_PREEMPTTEST_SRC} ${USERLAND_CLONETEST_SRC} ${USERLAND_FUTEXTEST_SRC} ${USERLAND_SIGNALTEST_SRC} ${USERLAND_INSMOD_SRC} ${USERLAND_RMMOD_SRC} ${USERLAND_LSMOD_SRC} ${USERLAND_ECHOTEST_SRC} ${USERLAND_VDATEST_SRC} ${USERLAND_DYNLINKTEST_SRC} ${USERLAND_DYNLINKPIE_SRC} ${USERLAND_DYNINTERP_SRC}
+userland: ${USERLAND_SRC} ${USERLAND_LD} ${USERLAND_ECHO_SRC} ${USERLAND_CAT_SRC} ${USERLAND_LS_SRC} ${USERLAND_FORKTEST_SRC} ${USERLAND_EXECTEST_SRC} ${USERLAND_SH_SRC} ${USERLAND_VI_SRC} ${USERLAND_UNAME_SRC} ${USERLAND_ARCHPRCTL_SRC} ${USERLAND_BRKTEST_SRC} ${USERLAND_MMAPTEST_SRC} ${USERLAND_POLLTEST_SRC} ${USERLAND_P9TEST_SRC} ${USERLAND_PREEMPTTEST_SRC} ${USERLAND_CLONETEST_SRC} ${USERLAND_FUTEXTEST_SRC} ${USERLAND_SIGNALTEST_SRC} ${USERLAND_INSMOD_SRC} ${USERLAND_RMMOD_SRC} ${USERLAND_LSMOD_SRC} ${USERLAND_ECHOTEST_SRC} ${USERLAND_VDATEST_SRC} ${USERLAND_DYNLINKTEST_SRC} ${USERLAND_DYNLINKPIE_SRC} ${USERLAND_DYNINTERP_SRC} ${USERLAND_HELLO_DYN_SRC}
 	$(call require_tool,$(NASM),nasm)
 	$(call require_tool,$(LD),ld)
 	@mkdir -p build/userland build/rootfs/bin
@@ -318,6 +322,17 @@ userland: ${USERLAND_SRC} ${USERLAND_LD} ${USERLAND_ECHO_SRC} ${USERLAND_CAT_SRC
 	@${CC} -nostdlib -shared -fPIC -Wl,-e,_start -o ${USERLAND_DYNINTERP} ${USERLAND_DYNINTERP_SRC}
 	@${CC} -nostdlib -no-pie -Wl,--dynamic-linker=/lib/ld-munux.so -o ${USERLAND_DYNLINKTEST} ${USERLAND_DYNLINKTEST_SRC}
 	@${CC} -nostdlib -pie -fPIC -Wl,--dynamic-linker=/lib/ld-munux.so -o ${USERLAND_DYNLINKPIE} ${USERLAND_DYNLINKPIE_SRC}
+	@${CC} -o ${USERLAND_HELLO_DYN} ${USERLAND_HELLO_DYN_SRC}
+	@mkdir -p build/rootfs/lib64 build/rootfs/usr/lib64 build/rootfs/usr/lib
+	@if [ -n "$(HOST_LDSO)" ] && [ -n "$(HOST_LIBC)" ]; then \
+		cp -f "$(HOST_LDSO)" build/rootfs/lib64/ld-linux-x86-64.so.2; \
+		cp -f "$(HOST_LIBC)" build/rootfs/lib64/libc.so.6; \
+		cp -f "$(HOST_LIBC)" build/rootfs/usr/lib64/libc.so.6; \
+		cp -f "$(HOST_LIBC)" build/rootfs/lib/libc.so.6; \
+		echo -e "$(BOLD)$(GREEN)[✓] glibc ld.so + libc.so.6 → /lib64 /usr/lib64 /lib$(RESET)"; \
+	else \
+		echo -e "$(YELLOW)[i] host glibc ld.so/libc not found — hello_dyn will miss interpreter$(RESET)"; \
+	fi
 	@echo -e "$(BOLD)$(GREEN)[✓] USERLAND apps + preempt/clone/futex/signal tests embedded$(RESET)"
 
 # Phase 8: loadable modules — MNX1 + ELF64 ET_REL (.ko)
@@ -410,7 +425,7 @@ ${MODULE_VIRTIO_NET_KO}: ${MODULE_VIRTIO_NET_C} include/linux/pci.h include/linu
 	@echo -e "$(BOLD)$(GREEN)[✓] MODULE virtio_net.ko (linuxkpi virtio-net)$(RESET)"
 
 disk: userland modules
-	@mkdir -p build/rootfs/docs build/rootfs/bin build/rootfs/lib build/rootfs/lib/modules
+	@mkdir -p build/rootfs/docs build/rootfs/bin build/rootfs/lib build/rootfs/lib64 build/rootfs/usr/lib64 build/rootfs/lib/modules
 	@echo 'Hello from munux ext2!' > build/rootfs/hello.txt
 	@echo 'second line' >> build/rootfs/hello.txt
 	@echo 'readme content' > build/rootfs/docs/readme.txt

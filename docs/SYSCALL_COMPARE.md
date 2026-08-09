@@ -1,16 +1,16 @@
 # Linux x86_64 syscalls vs munux
 
-**Last updated:** 2026-08-09 (P9d: 90 dispatched; goal text: desktop Linux results).  
+**Last updated:** 2026-08-09 (P10c: 95 dispatched; glibc `hello_dyn`).  
 Source of Linux names/numbers: host `/usr/include/asm/unistd_64.h`.  
 Source of munux set: `src/syscalls/mod.rs` dispatch `match` (not merely `num` constants — `READLINK` is defined but ENOSYS).
 
-**Product goal:** install and use a **Linux desktop** on munux (clang vs gcc: same results, different kernel). Coverage **90 / 385** is a **progress metric** toward that — implement what userspace needs with Linux semantics; do not treat “architecture only” as done. See [ROADMAP.md](ROADMAP.md).
+**Product goal:** install and use a **Linux desktop** on munux (clang vs gcc: same results, different kernel). Coverage **95 / 385** is a **progress metric** toward that — implement what userspace needs with Linux semantics; do not treat “architecture only” as done. See [ROADMAP.md](ROADMAP.md).
 
 | Metric | Value |
 |--------|------:|
 | Linux (unistd_64.h) | **385** |
-| munux dispatched | **90** |
-| Coverage | **23.4%** |
+| munux dispatched | **95** |
+| Coverage | **24.7%** |
 | Notable ENOSYS | `vfork`/`pselect6`/sockets/… |
 
 Legend in the tables below: implemented rows list munux notes; “NOT in munux” means **`-ENOSYS`**.
@@ -36,6 +36,7 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 14 | `rt_sigprocmask` | RT_SIGPROCMASK | done (64-bit mask) |
 | 15 | `rt_sigreturn` | RT_SIGRETURN | done (restorer) |
 | 16 | `ioctl` | IOCTL | partial (TTY probes) |
+| 17 | `pread64` | PREAD64 | done (P10c; ld.so) |
 | 19 | `readv` | READV | implemented |
 | 20 | `writev` | WRITEV | implemented |
 | 21 | `access` | ACCESS | implemented |
@@ -89,7 +90,7 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 231 | `exit_group` | EXIT_GROUP | done (thread group) |
 | 234 | `tgkill` | TGKILL | done |
 | 235 | `utimes` | UTIMES | implemented |
-| 257 | `openat` | OPENAT | partial (AT_FDCWD/abs) |
+| 257 | `openat` | OPENAT | done (AT_FDCWD / abs / dirfd relative) |
 | 258 | `mkdirat` | MKDIRAT | partial |
 | 261 | `futimesat` | FUTIMESAT | partial |
 | 262 | `newfstatat` | NEWFSTATAT | implemented |
@@ -103,12 +104,16 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 232 | `epoll_wait` | EPOLL_WAIT | done (level-triggered) |
 | 233 | `epoll_ctl` | EPOLL_CTL | done |
 | 271 | `ppoll` | PPOLL | done (sigmask ignored) |
+| 273 | `set_robust_list` | SET_ROBUST_LIST | stub (P10c; glibc always calls) |
 | 280 | `utimensat` | UTIMENSAT | partial |
 | 291 | `epoll_create1` | EPOLL_CREATE1 | done |
 | 293 | `pipe2` | PIPE2 | done (flags ignored) |
+| 302 | `prlimit64` | PRLIMIT64 | stub (P10c; unlimited) |
 | 313 | `finit_module` | FINIT_MODULE | done (load from fd; MNX1 or ELF ET_REL) |
+| 318 | `getrandom` | GETRANDOM | done (P10c; timer-mixed bytes) |
 | 322 | `execveat` | EXECVEAT | done (P9d; AT_FDCWD / dirfd / AT_EMPTY_PATH) |
 | 332 | `statx` | STATX | done (basic mask; AT_SYMLINK_NOFOLLOW) |
+| 334 | `rseq` | RSEQ | stub (P10c; glibc probe) |
 
 ## Linux syscalls NOT in munux (ENOSYS)
 
@@ -133,7 +138,6 @@ Full remaining list (alphabetical by number):
 
 | # | name |
 |--:|------|
-| 17 | `pread64` |
 | 18 | `pwrite64` |
 | 24 | `sched_yield` |
 | 25 | `mremap` |
@@ -312,7 +316,6 @@ Full remaining list (alphabetical by number):
 | 265 | `linkat` |
 | 270 | `pselect6` |
 | 272 | `unshare` |
-| 273 | `set_robust_list` |
 | 274 | `get_robust_list` |
 | 275 | `splice` |
 | 276 | `tee` |
@@ -338,7 +341,6 @@ Full remaining list (alphabetical by number):
 | 299 | `recvmmsg` |
 | 300 | `fanotify_init` |
 | 301 | `fanotify_mark` |
-| 302 | `prlimit64` |
 | 303 | `name_to_handle_at` |
 | 304 | `open_by_handle_at` |
 | 305 | `clock_adjtime` |
@@ -353,7 +355,6 @@ Full remaining list (alphabetical by number):
 | 315 | `sched_getattr` |
 | 316 | `renameat2` |
 | 317 | `seccomp` |
-| 318 | `getrandom` |
 | 319 | `memfd_create` |
 | 320 | `kexec_file_load` |
 | 321 | `bpf` |
@@ -367,7 +368,6 @@ Full remaining list (alphabetical by number):
 | 330 | `pkey_alloc` |
 | 331 | `pkey_free` |
 | 333 | `io_pgetevents` |
-| 334 | `rseq` |
 | 335 | `uretprobe` |
 | 336 | `uprobe` |
 | 424 | `pidfd_send_signal` |
