@@ -31,6 +31,7 @@ From freestanding **`$`**:
 - [ ] `mmaptest` — A–F + `ALL PASS` (incl. `MAP_SHARED` writeback; run twice)
 - [ ] `polltest` — A–F + `ALL PASS` (run twice; also `/bin/polltest`)
 - [ ] `p9test` — A–H + `p9test: ALL PASS` (`prctl` + `execveat`)
+- [ ] `dynlinktest` — interp auxv then main; `dynlinktest: ALL PASS`
 - [ ] `busybox true` — returns to `$`
 - [ ] Optional Ctrl-C: `busybox sleep 30` then **Ctrl+C** → back to `$` (shell stays alive)
 

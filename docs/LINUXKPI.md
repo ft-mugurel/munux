@@ -231,6 +231,7 @@ Do **not** pause Phase 9 forever. Interleave:
 6. ~~**P9** `execveat` / `prctl`~~ ✅  
 7. ~~virtio-net~~ ✅ `virtio_net.ko` pings 10.0.2.2; sockets still P12  
 8. ~~**P9e** file-map ELF + file `MAP_SHARED`~~ ✅  
+9. ~~**P10a** `PT_INTERP`~~ ✅ `dynlinktest`; real musl/glibc `ld.so` still open  
 
 ---
 

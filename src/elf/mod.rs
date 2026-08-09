@@ -10,6 +10,7 @@ const EV_CURRENT: u8 = 1;
 const ET_EXEC: u16 = 2;
 const EM_X86_64: u16 = 62;
 const PT_LOAD: u32 = 1;
+const PT_INTERP: u32 = 3;
 
 /// Cap on sum of PT_LOAD memsz (inode-backed loads; no 2 MiB kernel scratch).
 const MAX_LOAD_BYTES: u64 = 16 * 1024 * 1024;
@@ -282,6 +283,8 @@ pub struct AuxInfo {
     pub phdr: u64,
     pub phent: u64,
     pub phnum: u64,
+    /// Interpreter load address (`AT_BASE`); 0 if statically linked.
+    pub base: u64,
 }
 
 // Linux uapi/linux/auxvec.h
@@ -380,7 +383,7 @@ pub fn setup_stack(argv: &[&str], aux: &AuxInfo) -> Result<u64, &'static str> {
         push_aux(&mut aux_pairs, &mut naux, AT_PHENT, aux.phent);
         push_aux(&mut aux_pairs, &mut naux, AT_PHNUM, aux.phnum);
     }
-    push_aux(&mut aux_pairs, &mut naux, AT_BASE, 0); // static ET_EXEC
+    push_aux(&mut aux_pairs, &mut naux, AT_BASE, aux.base);
     push_aux(&mut aux_pairs, &mut naux, AT_FLAGS, 0);
     push_aux(&mut aux_pairs, &mut naux, AT_ENTRY, aux.entry);
     push_aux(&mut aux_pairs, &mut naux, AT_UID, 0);
@@ -493,6 +496,7 @@ pub fn load_bytes_argv(file: &[u8], argv: &[&str]) -> Result<LoadedImage, &'stat
         phdr: phdr_va,
         phent: ehdr.e_phentsize as u64,
         phnum: ehdr.e_phnum as u64,
+        base: 0,
     };
     let stack_top = setup_stack(argv, &aux)?;
     Ok(LoadedImage {
@@ -554,12 +558,20 @@ fn load_segment_ino(ino: u32, file_size: u64, ph: &Phdr) -> Result<u64, &'static
     Ok(ph.p_memsz)
 }
 
-/// Load ET_EXEC from an ext2 inode: only headers + each `PT_LOAD` are read.
-/// Used by `execve` / `execveat` so the whole file is not staged in a kernel buffer.
-pub fn load_from_ino(ino: u32, argv: &[&str]) -> Result<LoadedImage, &'static str> {
-    if !crate::fs::is_ready() {
-        return Err("no filesystem");
-    }
+struct ElfHeaders {
+    ehdr: Ehdr,
+    phbuf: [u8; 4096],
+    file_size: u64,
+}
+
+struct ImageParts {
+    entry: u64,
+    image_end: u64,
+    phdr_va: u64,
+    load_base: u64,
+}
+
+fn parse_headers(ino: u32) -> Result<ElfHeaders, &'static str> {
     if crate::fs::ext2::inode_is_dir(ino) {
         return Err("is a directory");
     }
@@ -567,7 +579,6 @@ pub fn load_from_ino(ino: u32, argv: &[&str]) -> Result<LoadedImage, &'static st
     if file_size < 64 {
         return Err("elf: short read");
     }
-
     let mut ehbuf = [0u8; 64];
     let n = read_ino(ino, 0, &mut ehbuf)?;
     if n < 64 {
@@ -575,7 +586,6 @@ pub fn load_from_ino(ino: u32, argv: &[&str]) -> Result<LoadedImage, &'static st
     }
     let ehdr = read_ehdr(&ehbuf)?;
     validate_ehdr(&ehdr)?;
-
     let phoff = ehdr.e_phoff;
     let phnum = ehdr.e_phnum as usize;
     let phentsz = ehdr.e_phentsize as usize;
@@ -591,68 +601,146 @@ pub fn load_from_ino(ino: u32, argv: &[&str]) -> Result<LoadedImage, &'static st
     if got < ph_bytes {
         return Err("elf: truncated phdr");
     }
+    Ok(ElfHeaders {
+        ehdr,
+        phbuf,
+        file_size,
+    })
+}
 
+fn phdr_at(h: &ElfHeaders, i: u16) -> Phdr {
+    let off = i as usize * h.ehdr.e_phentsize as usize;
+    unsafe { core::ptr::read_unaligned(h.phbuf.as_ptr().add(off) as *const Phdr) }
+}
+
+fn find_interp_path(ino: u32, h: &ElfHeaders) -> Result<Option<([u8; 128], usize)>, &'static str> {
+    for i in 0..h.ehdr.e_phnum {
+        let ph = phdr_at(h, i);
+        if ph.p_type != PT_INTERP {
+            continue;
+        }
+        if ph.p_filesz == 0 || ph.p_filesz > 127 {
+            return Err("elf: bad PT_INTERP");
+        }
+        let mut buf = [0u8; 128];
+        let n = read_ino(ino, ph.p_offset, &mut buf[..ph.p_filesz as usize])?;
+        if n == 0 {
+            return Err("elf: empty PT_INTERP");
+        }
+        let mut len = 0usize;
+        while len < n && buf[len] != 0 {
+            len += 1;
+        }
+        if len == 0 {
+            return Err("elf: empty PT_INTERP");
+        }
+        return Ok(Some((buf, len)));
+    }
+    Ok(None)
+}
+
+fn check_entry_mapped(entry: u64) -> Result<(), &'static str> {
+    let page = entry & !0xFFF;
+    match paging::virt_to_phys(page) {
+        None => Err("elf: entry page unmapped"),
+        Some(_) => {
+            let b0 = unsafe { core::ptr::read_volatile(entry as *const u8) };
+            let b1 = unsafe { core::ptr::read_volatile((entry + 1) as *const u8) };
+            let b2 = unsafe { core::ptr::read_volatile((entry + 2) as *const u8) };
+            if b0 == 0 && b1 == 0 && b2 == 0 {
+                Err("elf: entry page zero")
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+fn load_parts_ino(ino: u32, h: &ElfHeaders) -> Result<ImageParts, &'static str> {
     let mut total = 0u64;
     let mut image_end = 0u64;
     let mut phdr_va = 0u64;
-    for i in 0..ehdr.e_phnum {
-        let off = i as usize * phentsz;
-        let ph = unsafe { core::ptr::read_unaligned(phbuf.as_ptr().add(off) as *const Phdr) };
+    let mut load_base = u64::MAX;
+    for i in 0..h.ehdr.e_phnum {
+        let ph = phdr_at(h, i);
         if ph.p_type != PT_LOAD {
             continue;
         }
-        total = total.saturating_add(load_segment_ino(ino, file_size, &ph)?);
+        total = total.saturating_add(load_segment_ino(ino, h.file_size, &ph)?);
         if total > MAX_LOAD_BYTES {
             return Err("elf: image too large");
+        }
+        if ph.p_vaddr < load_base {
+            load_base = ph.p_vaddr;
         }
         let vend = ph.p_vaddr.saturating_add(ph.p_memsz);
         if vend > image_end {
             image_end = vend;
         }
-        let ph_end = ehdr.e_phoff.saturating_add(
-            (ehdr.e_phnum as u64).saturating_mul(ehdr.e_phentsize as u64),
+        let ph_end = h.ehdr.e_phoff.saturating_add(
+            (h.ehdr.e_phnum as u64).saturating_mul(h.ehdr.e_phentsize as u64),
         );
         if phdr_va == 0
-            && ehdr.e_phoff >= ph.p_offset
+            && h.ehdr.e_phoff >= ph.p_offset
             && ph_end <= ph.p_offset.saturating_add(ph.p_filesz)
         {
-            phdr_va = ph.p_vaddr.saturating_add(ehdr.e_phoff - ph.p_offset);
+            phdr_va = ph.p_vaddr.saturating_add(h.ehdr.e_phoff - ph.p_offset);
         }
     }
     if total == 0 {
         return Err("elf: no PT_LOAD segments");
     }
+    if load_base == u64::MAX {
+        load_base = 0;
+    }
+    check_entry_mapped(h.ehdr.e_entry)?;
+    Ok(ImageParts {
+        entry: h.ehdr.e_entry,
+        image_end,
+        phdr_va,
+        load_base,
+    })
+}
 
-    let brk_start = page_up(image_end);
+/// Load ET_EXEC from an ext2 inode: headers + each `PT_LOAD`.
+///
+/// If the file has `PT_INTERP`, the interpreter is loaded too (P10a). The
+/// returned `entry` is the **interpreter** entry; `AT_ENTRY` on the stack is
+/// still the main binary so a real `ld.so` (or our smoke interp) can jump there.
+pub fn load_from_ino(ino: u32, argv: &[&str]) -> Result<LoadedImage, &'static str> {
+    if !crate::fs::is_ready() {
+        return Err("no filesystem");
+    }
+    let headers = parse_headers(ino)?;
+    let interp = find_interp_path(ino, &headers)?;
+    let main = load_parts_ino(ino, &headers)?;
+
+    let (run_entry, at_base) = if let Some((raw, len)) = interp {
+        let path = core::str::from_utf8(&raw[..len]).map_err(|_| "elf: bad PT_INTERP")?;
+        let cwd = crate::fs::path::cwd_inode();
+        let iino = crate::fs::ext2::resolve_path(cwd, path).map_err(|_| "not found")?;
+        let ih = parse_headers(iino)?;
+        let ip = load_parts_ino(iino, &ih)?;
+        (ip.entry, ip.load_base)
+    } else {
+        (main.entry, 0)
+    };
+
+    let brk_start = page_up(main.image_end);
     if brk_start < 0x1000 || brk_start >= 0x0000_8000_0000_0000 {
         return Err("elf: bad brk start");
     }
 
-    {
-        let entry = ehdr.e_entry;
-        let page = entry & !0xFFF;
-        match paging::virt_to_phys(page) {
-            None => return Err("elf: entry page unmapped"),
-            Some(_) => {
-                let b0 = unsafe { core::ptr::read_volatile(entry as *const u8) };
-                let b1 = unsafe { core::ptr::read_volatile((entry + 1) as *const u8) };
-                let b2 = unsafe { core::ptr::read_volatile((entry + 2) as *const u8) };
-                if b0 == 0 && b1 == 0 && b2 == 0 {
-                    return Err("elf: entry page zero");
-                }
-            }
-        }
-    }
-
     let aux = AuxInfo {
-        entry: ehdr.e_entry,
-        phdr: phdr_va,
-        phent: ehdr.e_phentsize as u64,
-        phnum: ehdr.e_phnum as u64,
+        entry: main.entry,
+        phdr: main.phdr_va,
+        phent: headers.ehdr.e_phentsize as u64,
+        phnum: headers.ehdr.e_phnum as u64,
+        base: at_base,
     };
     let stack_top = setup_stack(argv, &aux)?;
     Ok(LoadedImage {
-        entry: ehdr.e_entry,
+        entry: run_entry,
         stack_top,
         brk_start,
     })
