@@ -28,6 +28,35 @@ pub fn getppid() -> Pid {
     table::with_current(|p| p.parent).unwrap_or(-1)
 }
 
+/// Deliver each child's `PR_SET_PDEATHSIG` when `dying` (this task) exits.
+fn notify_pdeath(dying: Pid) {
+    let mut kids = [(-1i32, 0u32); super::pcb::MAX_PROCESSES];
+    let mut n = 0usize;
+    table::for_each_process(|_i, p| {
+        if !p.used || p.pid == dying {
+            return;
+        }
+        if p.parent == dying && p.pdeathsig != 0 && p.state != ProcessState::Zombie {
+            if n < kids.len() {
+                kids[n] = (p.pid, p.pdeathsig);
+                n += 1;
+            }
+        }
+    });
+    for i in 0..n {
+        let (tid, sig) = kids[i];
+        if tid > 0 && sig != 0 {
+            // Queue only — do not `proc_kill`/`terminate_group` from inside
+            // `exit_user` (nested exit smashes the dying task's nest frame).
+            let _ = table::with_pid(tid, |p| {
+                let _ = p.push_signal(sig);
+                p.force_fatal_sig = sig;
+            });
+            let _ = crate::process::sched::wake_up(tid);
+        }
+    }
+}
+
 /// Terminate current process as zombie and switch to parent.
 ///
 /// For cooperative user tasks: after this returns, the kernel calls
@@ -59,6 +88,9 @@ pub fn exit_user(status: i32) {
         (tgid, p.parent)
     })
     .unwrap_or((pid, 1));
+
+    // Linux prctl(PR_SET_PDEATHSIG): children of this task get the signal now.
+    notify_pdeath(pid);
 
     if pid == 1 {
         crate::console::println("fatal: init (pid 1) exited");

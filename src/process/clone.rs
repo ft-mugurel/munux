@@ -55,8 +55,19 @@ pub fn clone_from_user(
     // Shared address space.
     let parent_idx = table::current_index();
     let parent_pid = table::current_pid();
-    let (uid, cwd, parent_cr3, parent_tgid, heap_base, heap_size, mmaps, mmap_bump, gs_base) =
-        match table::with_current(|p| {
+    let (
+        uid,
+        cwd,
+        parent_cr3,
+        parent_tgid,
+        heap_base,
+        heap_size,
+        mmaps,
+        mmap_bump,
+        gs_base,
+        dumpable,
+        no_new_privs,
+    ) = match table::with_current(|p| {
             let cr3 = if p.cr3 != 0 {
                 p.cr3
             } else {
@@ -73,6 +84,8 @@ pub fn clone_from_user(
                 p.mmaps,
                 p.mmap_bump,
                 p.gs_base,
+                p.dumpable,
+                p.no_new_privs,
             )
         }) {
             Some(x) => x,
@@ -128,6 +141,9 @@ pub fn clone_from_user(
         p.mmaps = mmaps;
         p.mmap_bump = mmap_bump;
         p.set_name(if is_thread { "thread" } else { "clonevm" });
+        p.dumpable = dumpable;
+        p.no_new_privs = no_new_privs;
+        p.pdeathsig = 0;
         if flags & CLONE_CHILD_CLEARTID != 0 {
             p.clear_child_tid = child_tid;
         }

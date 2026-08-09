@@ -64,7 +64,7 @@ Canonical user half ends at `0x0000_8000_0000_0000` (non-canonical gap).
 
 Kernel shell: `preempt` / `preempttest` (A–G). Userspace: `clonetest`, `signaltest`, `futextest`.
 
-**Next (not mm):** Phase 9 Linux surface toward a real userspace / desktop (`execveat`/`prctl` next). Optional mm polish: COW fork, higher-half, demand paging. P8 is closed; IDE remains built-in. Destination: [ROADMAP.md](ROADMAP.md) (install a Linux DE).
+**Next (not mm):** Phase 9 file-map ELF / `MAP_SHARED` toward dynlink (P10). Optional mm polish: COW fork, higher-half, demand paging. P8 is closed; IDE remains built-in. Destination: [ROADMAP.md](ROADMAP.md) (install a Linux DE).
 
 ---
 

@@ -228,7 +228,7 @@ Do **not** pause Phase 9 forever. Interleave:
 3. ~~**L3** spinlock / wait / `request_irq`~~ ✅ `irqtest.ko`  
 4. ~~**L4** ioremap + PCI `pci_register_driver`~~ ✅ `vprobe.ko`  
 5. ~~**L5 virtio-blk**~~ ✅ `/dev/vda` + `vdatest: PASS`  
-6. **P9** `execveat` / `prctl` — can interleave  
+6. ~~**P9** `execveat` / `prctl`~~ ✅  
 7. ~~virtio-net~~ ✅ `virtio_net.ko` pings 10.0.2.2; sockets still P12  
 
 ---

@@ -1,17 +1,17 @@
 # Linux x86_64 syscalls vs munux
 
-**Last updated:** 2026-08-09 (count still 88; goal text: desktop Linux results).  
+**Last updated:** 2026-08-09 (P9d: 90 dispatched; goal text: desktop Linux results).  
 Source of Linux names/numbers: host `/usr/include/asm/unistd_64.h`.  
 Source of munux set: `src/syscalls/mod.rs` dispatch `match` (not merely `num` constants — `READLINK` is defined but ENOSYS).
 
-**Product goal:** install and use a **Linux desktop** on munux (clang vs gcc: same results, different kernel). Coverage **88 / 385** is a **progress metric** toward that — implement what userspace needs with Linux semantics; do not treat “architecture only” as done. See [ROADMAP.md](ROADMAP.md).
+**Product goal:** install and use a **Linux desktop** on munux (clang vs gcc: same results, different kernel). Coverage **90 / 385** is a **progress metric** toward that — implement what userspace needs with Linux semantics; do not treat “architecture only” as done. See [ROADMAP.md](ROADMAP.md).
 
 | Metric | Value |
 |--------|------:|
 | Linux (unistd_64.h) | **385** |
-| munux dispatched | **88** |
-| Coverage | **22.9%** |
-| Notable ENOSYS | `vfork`/`prctl`/`pselect6`/sockets/… |
+| munux dispatched | **90** |
+| Coverage | **23.4%** |
+| Notable ENOSYS | `vfork`/`pselect6`/sockets/… |
 
 Legend in the tables below: implemented rows list munux notes; “NOT in munux” means **`-ENOSYS`**.
 
@@ -75,6 +75,7 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 108 | `getegid` | GETEGID | implemented (0) |
 | 110 | `getppid` | GETPPID | implemented |
 | 115 | `getgroups` | GETGROUPS | implemented |
+| 157 | `prctl` | PRCTL | done (P9d; name/dumpable/nnp/pdeathsig) |
 | 158 | `arch_prctl` | ARCH_PRCTL | implemented |
 | 162 | `sync` | SYNC | stub (no-op) |
 | 175 | `init_module` | INIT_MODULE | done (MNX1 image; params ignored) |
@@ -106,6 +107,7 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 291 | `epoll_create1` | EPOLL_CREATE1 | done |
 | 293 | `pipe2` | PIPE2 | done (flags ignored) |
 | 313 | `finit_module` | FINIT_MODULE | done (load from fd; MNX1 or ELF ET_REL) |
+| 322 | `execveat` | EXECVEAT | done (P9d; AT_FDCWD / dirfd / AT_EMPTY_PATH) |
 | 332 | `statx` | STATX | done (basic mask; AT_SYMLINK_NOFOLLOW) |
 
 ## Linux syscalls NOT in munux (ENOSYS)
@@ -222,7 +224,6 @@ Full remaining list (alphabetical by number):
 | 154 | `modify_ldt` |
 | 155 | `pivot_root` |
 | 156 | `_sysctl` |
-| 157 | `prctl` |
 | 159 | `adjtimex` |
 | 160 | `setrlimit` |
 | 161 | `chroot` |
@@ -356,7 +357,6 @@ Full remaining list (alphabetical by number):
 | 319 | `memfd_create` |
 | 320 | `kexec_file_load` |
 | 321 | `bpf` |
-| 322 | `execveat` |
 | 323 | `userfaultfd` |
 | 324 | `membarrier` |
 | 325 | `mlock2` |

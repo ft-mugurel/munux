@@ -30,6 +30,7 @@ From freestanding **`$`**:
 - [ ] `forktest` — still green
 - [ ] `mmaptest` — A–E + `ALL PASS` (run twice; also `/bin/mmaptest`)
 - [ ] `polltest` — A–F + `ALL PASS` (run twice; also `/bin/polltest`)
+- [ ] `p9test` — A–H + `p9test: ALL PASS` (`prctl` + `execveat`)
 - [ ] `busybox true` — returns to `$`
 - [ ] Optional Ctrl-C: `busybox sleep 30` then **Ctrl+C** → back to `$` (shell stays alive)
 

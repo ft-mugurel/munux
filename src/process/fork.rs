@@ -39,6 +39,8 @@ pub fn fork_from_user(user_rip: u64, user_rsp: u64, user_rflags: u64) -> Result<
         sig_handlers,
         sig_ignore,
         sig_blocked,
+        dumpable,
+        no_new_privs,
     ) = match table::with_current(|p| {
         let cr3 = if p.cr3 != 0 {
             p.cr3
@@ -58,6 +60,8 @@ pub fn fork_from_user(user_rip: u64, user_rsp: u64, user_rflags: u64) -> Result<
             p.sig_handlers,
             p.sig_ignore,
             p.sig_blocked,
+            p.dumpable,
+            p.no_new_privs,
         )
     }) {
         Some(x) => x,
@@ -139,6 +143,9 @@ pub fn fork_from_user(user_rip: u64, user_rsp: u64, user_rflags: u64) -> Result<
         p.sig_blocked = sig_blocked;
         p.sig_in_handler = false;
         p.force_fatal_sig = 0;
+        p.dumpable = dumpable;
+        p.no_new_privs = no_new_privs;
+        p.pdeathsig = 0; // Linux: not inherited across fork
         p.set_name("forked");
     });
 

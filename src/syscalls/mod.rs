@@ -51,7 +51,8 @@ pub mod num {
     pub const EXIT_GROUP: u64 = 231; // musl/glibc often use this
     pub const UNAME: u64 = 63;
     pub const GETDENTS64: u64 = 217;
-    pub const ARCH_PRCTL: u64 = 158; // planned (musl TLS)
+    pub const PRCTL: u64 = 157; // process control (name, dumpable, nnp, pdeathsig)
+    pub const ARCH_PRCTL: u64 = 158; // musl TLS
     pub const BRK: u64 = 12;
     pub const MMAP: u64 = 9;
     pub const MPROTECT: u64 = 10;
@@ -104,6 +105,8 @@ pub mod num {
     pub const DELETE_MODULE: u64 = 176;
     /// Optional: load from open fd (modern insmod); not required if open+read+init_module.
     pub const FINIT_MODULE: u64 = 313;
+    /// Linux execveat(dirfd, pathname, argv, envp, flags).
+    pub const EXECVEAT: u64 = 322;
 }
 
 /// Linux-style: return `-errno` as `u64` bit pattern (negative i64).
@@ -537,11 +540,13 @@ pub extern "C" fn syscall_dispatch(
         num::FORK => sys_fork(),
         num::CLONE => sys_clone(a1, a2, a3, a4, a5),
         num::EXECVE => sys_execve(a1, a2, a3),
+        num::EXECVEAT => sys_execveat(a1, a2, a3, a4, a5),
         num::WAIT4 => sys_wait4(a1, a2, a3),
         num::GETCWD => sys_getcwd(a1, a2),
         num::CHDIR => sys_chdir(a1),
         num::GETDENTS64 => sys_getdents64(a1, a2, a3),
         num::UNAME => sys_uname(a1),
+        num::PRCTL => sys_prctl(a1, a2, a3, a4, a5),
         num::ARCH_PRCTL => sys_arch_prctl(a1, a2),
         num::BRK => sys_brk(a1),
         num::MMAP => {
@@ -1178,6 +1183,130 @@ fn sys_arch_prctl(code: u64, arg: u64) -> u64 {
         _ => {
             console::print("syscall: arch_prctl unknown code=");
             console::write_hex64(code);
+            console::println("");
+            errno::neg(errno::EINVAL)
+        }
+    }
+}
+
+// Linux include/uapi/linux/prctl.h (subset userspace actually calls).
+const PR_SET_PDEATHSIG: u64 = 1;
+const PR_GET_PDEATHSIG: u64 = 2;
+const PR_GET_DUMPABLE: u64 = 3;
+const PR_SET_DUMPABLE: u64 = 4;
+const PR_SET_NAME: u64 = 15;
+const PR_GET_NAME: u64 = 16;
+const PR_GET_SECCOMP: u64 = 21;
+const PR_SET_SECCOMP: u64 = 22;
+const PR_CAPBSET_READ: u64 = 23;
+const PR_SET_NO_NEW_PRIVS: u64 = 38;
+const PR_GET_NO_NEW_PRIVS: u64 = 39;
+const PR_GET_TID_ADDRESS: u64 = 40;
+const PR_SET_PTRACER: u64 = 0x5961_6d61; // "Yama"
+
+/// Linux prctl(2) — process control used by musl, sandboxes, and tooling.
+fn sys_prctl(option: u64, arg2: u64, _arg3: u64, _arg4: u64, _arg5: u64) -> u64 {
+    match option {
+        PR_SET_PDEATHSIG => {
+            let sig = arg2 as u32;
+            if sig != 0 && (sig >= crate::process::pcb::MAX_SIGNALS as u32) {
+                return errno::neg(errno::EINVAL);
+            }
+            let _ = crate::process::with_current(|p| {
+                p.pdeathsig = sig;
+            });
+            0
+        }
+        PR_GET_PDEATHSIG => {
+            if !user_ptr_ok(arg2, 4) {
+                return errno::neg(errno::EFAULT);
+            }
+            let sig = crate::process::with_current(|p| p.pdeathsig).unwrap_or(0);
+            unsafe {
+                core::ptr::write_volatile(arg2 as *mut i32, sig as i32);
+            }
+            0
+        }
+        PR_GET_DUMPABLE => crate::process::with_current(|p| p.dumpable as u64).unwrap_or(1),
+        PR_SET_DUMPABLE => {
+            if arg2 > 2 {
+                return errno::neg(errno::EINVAL);
+            }
+            let _ = crate::process::with_current(|p| {
+                p.dumpable = arg2 as u8;
+            });
+            0
+        }
+        PR_SET_NAME => {
+            if arg2 == 0 || !user_ptr_ok(arg2, 1) {
+                return errno::neg(errno::EFAULT);
+            }
+            let mut buf = [0u8; 16];
+            for i in 0..15 {
+                if !user_ptr_ok(arg2 + i as u64, 1) {
+                    break;
+                }
+                let b = unsafe { core::ptr::read_volatile((arg2 as usize + i) as *const u8) };
+                if b == 0 {
+                    break;
+                }
+                buf[i] = b;
+            }
+            let len = buf.iter().position(|&c| c == 0).unwrap_or(15);
+            let s = core::str::from_utf8(&buf[..len]).unwrap_or("?");
+            let _ = crate::process::with_current(|p| p.set_name(s));
+            0
+        }
+        PR_GET_NAME => {
+            if !user_ptr_ok(arg2, 16) {
+                return errno::neg(errno::EFAULT);
+            }
+            let name = crate::process::with_current(|p| p.name).unwrap_or([0; 16]);
+            unsafe {
+                core::ptr::copy_nonoverlapping(name.as_ptr(), arg2 as *mut u8, 16);
+            }
+            0
+        }
+        PR_GET_SECCOMP => 0, // SECCOMP_MODE_DISABLED
+        PR_SET_SECCOMP => errno::neg(errno::EINVAL),
+        PR_CAPBSET_READ => {
+            // Single-user: every valid cap is in the bounding set.
+            if arg2 >= 64 {
+                errno::neg(errno::EINVAL)
+            } else {
+                1
+            }
+        }
+        PR_SET_NO_NEW_PRIVS => {
+            if arg2 != 1 {
+                return errno::neg(errno::EINVAL);
+            }
+            let _ = crate::process::with_current(|p| {
+                p.no_new_privs = true;
+            });
+            0
+        }
+        PR_GET_NO_NEW_PRIVS => {
+            if crate::process::with_current(|p| p.no_new_privs).unwrap_or(false) {
+                1
+            } else {
+                0
+            }
+        }
+        PR_GET_TID_ADDRESS => {
+            if !user_ptr_ok(arg2, 8) {
+                return errno::neg(errno::EFAULT);
+            }
+            let addr = crate::process::with_current(|p| p.clear_child_tid).unwrap_or(0);
+            unsafe {
+                core::ptr::write_volatile(arg2 as *mut u64, addr);
+            }
+            0
+        }
+        PR_SET_PTRACER => 0, // no ptrace yet; sandboxes probe this
+        _ => {
+            console::print("syscall: prctl unknown option=");
+            console::write_u64(option);
             console::println("");
             errno::neg(errno::EINVAL)
         }
@@ -2616,6 +2745,12 @@ fn sys_finit_module(fd: u64, _uargs: u64, _flags: u64) -> u64 {
 // ENOTDIR used above
 // add to errno module - I used ENOTDIR without defining it
 fn copy_user_path(path_ptr: u64, out: &mut [u8]) -> Result<usize, u64> {
+    copy_user_cpath(path_ptr, out, false)
+}
+
+/// Copy a NUL-terminated user path. Empty string is `ENOENT` unless `allow_empty`
+/// (needed for `execveat(..., "", ..., AT_EMPTY_PATH)` / `fexecve`).
+fn copy_user_cpath(path_ptr: u64, out: &mut [u8], allow_empty: bool) -> Result<usize, u64> {
     if path_ptr == 0 {
         return Err(errno::neg(errno::EFAULT));
     }
@@ -2633,7 +2768,7 @@ fn copy_user_path(path_ptr: u64, out: &mut [u8]) -> Result<usize, u64> {
         out[n] = b;
         n += 1;
     }
-    if n == 0 {
+    if n == 0 && !allow_empty {
         return Err(errno::neg(errno::ENOENT));
     }
     // If we filled max without NUL, path too long
@@ -2764,7 +2899,10 @@ fn sys_clone(flags: u64, stack: u64, parent_tid: u64, child_tid: u64, tls: u64) 
     }
 }
 
-/// Linux execve(path, argv, envp) — envp ignored; argv up to 3 user strings.
+const ARGV_MAX: usize = 6;
+const AT_EMPTY_PATH: u64 = 0x1000;
+
+/// Linux execve(path, argv, envp) — envp ignored; argv up to 6 user strings.
 /// On success does not return to the old image (nested enter + exit chain).
 fn sys_execve(path_ptr: u64, argv_ptr: u64, _envp: u64) -> u64 {
     let mut path_buf = [0u8; 256];
@@ -2776,22 +2914,126 @@ fn sys_execve(path_ptr: u64, argv_ptr: u64, _envp: u64) -> u64 {
         Ok(s) => s,
         Err(_) => return errno::neg(errno::ENOENT),
     };
+    do_execve_path(path, argv_ptr)
+}
 
-    // Collect argv strings (max 6) into kernel buffers.
-    // BusyBox needs e.g. argv=["busybox","cp","a","b"] or tar with flags.
-    const ARGV_MAX: usize = 6;
+/// Linux execveat(dirfd, pathname, argv, envp, flags).
+///
+/// Supports `AT_FDCWD` / absolute path (same as `execve`), relative path from a
+/// directory fd, and `AT_EMPTY_PATH` (`fexecve` — execute the open file).
+/// `AT_SYMLINK_NOFOLLOW` fails with `ELOOP` if the last component is a symlink.
+fn sys_execveat(dirfd: u64, path_ptr: u64, argv_ptr: u64, _envp: u64, flags: u64) -> u64 {
+    const ALLOWED: u64 = AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW;
+    if flags & !ALLOWED != 0 {
+        return errno::neg(errno::EINVAL);
+    }
+    let mut path_buf = [0u8; 256];
+    let n = match copy_user_cpath(path_ptr, &mut path_buf, true) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
+    let path = match core::str::from_utf8(&path_buf[..n]) {
+        Ok(s) => s,
+        Err(_) => return errno::neg(errno::ENOENT),
+    };
+    let follow_last = flags & AT_SYMLINK_NOFOLLOW == 0;
+
+    if path.is_empty() {
+        if flags & AT_EMPTY_PATH == 0 {
+            return errno::neg(errno::ENOENT);
+        }
+        return do_execve_fd(dirfd, argv_ptr);
+    }
+    if path.starts_with('/') || dirfd as i32 == -100 {
+        if !follow_last {
+            match resolve_user_ino(path, false) {
+                Ok(ino) => {
+                    if crate::fs::ext2::inode_is_lnk(ino) {
+                        return errno::neg(errno::ELOOP);
+                    }
+                }
+                Err(e) => return e,
+            }
+        }
+        return do_execve_path(path, argv_ptr);
+    }
+    // Relative to dirfd (must be an open directory).
+    let dir_ino = match crate::fd::sys_fd_inode(dirfd) {
+        Ok(i) => i,
+        Err(crate::fd::FdError::BadFd) => return errno::neg(errno::EBADF),
+        Err(_) => return errno::neg(errno::ENOTDIR),
+    };
+    if !crate::fs::ext2::inode_is_dir(dir_ino) {
+        return errno::neg(errno::ENOTDIR);
+    }
+    let ino = match if follow_last {
+        crate::fs::ext2::resolve_path(dir_ino, path)
+    } else {
+        crate::fs::ext2::resolve_lpath(dir_ino, path)
+    } {
+        Ok(i) => i,
+        Err("too many symlinks") => return errno::neg(errno::ELOOP),
+        Err("not a directory") => return errno::neg(errno::ENOTDIR),
+        Err(_) => return errno::neg(errno::ENOENT),
+    };
+    if !follow_last && crate::fs::ext2::inode_is_lnk(ino) {
+        return errno::neg(errno::ELOOP);
+    }
+    if crate::fs::ext2::inode_is_dir(ino) {
+        return errno::neg(errno::EACCES);
+    }
+    let hint = path.rsplit('/').next().unwrap_or(path);
+    do_execve_ino(ino, hint, argv_ptr)
+}
+
+fn do_execve_fd(fd: u64, argv_ptr: u64) -> u64 {
+    let ino = match crate::fd::sys_fd_inode(fd) {
+        Ok(i) => i,
+        Err(crate::fd::FdError::BadFd) => return errno::neg(errno::EBADF),
+        Err(_) => return errno::neg(errno::EACCES),
+    };
+    if crate::fs::ext2::inode_is_dir(ino) {
+        return errno::neg(errno::EACCES);
+    }
+    do_execve_ino(ino, "fdexec", argv_ptr)
+}
+
+fn do_execve_path(path: &str, argv_ptr: u64) -> u64 {
+    let (abuf, arg_lens, argc) = collect_argv(path, argv_ptr);
+    let mut refs: [&str; ARGV_MAX] = [""; ARGV_MAX];
+    for i in 0..argc {
+        refs[i] = core::str::from_utf8(&abuf[i][..arg_lens[i]]).unwrap_or("?");
+    }
+    let argv_slice = &refs[..argc];
+    let image = match load_exec_image(path, argv_slice) {
+        Ok(img) => img,
+        Err(e) => return map_exec_err(e),
+    };
+    commit_exec(image, refs[0])
+}
+
+fn do_execve_ino(ino: u32, argv0_hint: &str, argv_ptr: u64) -> u64 {
+    let (abuf, arg_lens, argc) = collect_argv(argv0_hint, argv_ptr);
+    let mut refs: [&str; ARGV_MAX] = [""; ARGV_MAX];
+    for i in 0..argc {
+        refs[i] = core::str::from_utf8(&abuf[i][..arg_lens[i]]).unwrap_or("?");
+    }
+    let argv_slice = &refs[..argc];
+    let image = match load_elf_from_ino(ino, argv_slice) {
+        Ok(img) => img,
+        Err(e) => return map_exec_err(e),
+    };
+    commit_exec(image, refs[0])
+}
+
+fn collect_argv(argv0_default: &str, argv_ptr: u64) -> ([[u8; 64]; ARGV_MAX], [usize; ARGV_MAX], usize) {
     let mut abuf = [[0u8; 64]; ARGV_MAX];
     let mut arg_lens = [0usize; ARGV_MAX];
-
-    let argv0_default = path.rsplit('/').next().unwrap_or(path);
-    // Default argv[0] from path basename (overwritten if user argv provided)
     let dlen = core::cmp::min(argv0_default.len(), 63);
-    abuf[0][..dlen].copy_from_slice(argv0_default.as_bytes());
+    abuf[0][..dlen].copy_from_slice(&argv0_default.as_bytes()[..dlen]);
     arg_lens[0] = dlen;
     let mut argc = 1usize;
-
     if argv_ptr != 0 && user_ptr_ok(argv_ptr, 8) {
-        // argv is char**; read pointers until NULL
         let mut n = 0usize;
         for i in 0..ARGV_MAX as u64 {
             let p = unsafe { core::ptr::read_volatile((argv_ptr + i * 8) as *const u64) };
@@ -2810,35 +3052,29 @@ fn sys_execve(path_ptr: u64, argv_ptr: u64, _envp: u64) -> u64 {
             argc = n;
         }
     }
+    (abuf, arg_lens, argc)
+}
 
-    // Build &str view array for the loader (stack/auxv).
-    let mut refs: [&str; ARGV_MAX] = [""; ARGV_MAX];
-    for i in 0..argc {
-        refs[i] = core::str::from_utf8(&abuf[i][..arg_lens[i]]).unwrap_or("?");
-    }
-    let argv_slice = &refs[..argc];
-
-    let image = match load_exec_image(path, argv_slice) {
-        Ok(img) => img,
-        Err(e) => {
-            return match e {
-                "no filesystem" | "not found" | "ENOENT" => errno::neg(errno::ENOENT),
-                "is a directory" => errno::neg(errno::EISDIR),
-                "OOM" | "elf: OOM page" | "oom" => errno::neg(errno::ENOMEM),
-                "elf: entry page zero" | "elf: entry page unmapped" | "elf: map vanished" => {
-                    errno::neg(errno::ENOEXEC)
-                }
-                _ if e.starts_with("elf:") => errno::neg(errno::ENOEXEC),
-                _ => errno::neg(errno::ENOENT),
-            };
+fn map_exec_err(e: &str) -> u64 {
+    match e {
+        "no filesystem" | "not found" | "ENOENT" => errno::neg(errno::ENOENT),
+        "is a directory" => errno::neg(errno::EACCES),
+        "OOM" | "elf: OOM page" | "oom" => errno::neg(errno::ENOMEM),
+        "elf: entry page zero" | "elf: entry page unmapped" | "elf: map vanished" => {
+            errno::neg(errno::ENOEXEC)
         }
-    };
+        _ if e.starts_with("elf:") => errno::neg(errno::ENOEXEC),
+        _ => errno::neg(errno::ENOENT),
+    }
+}
 
-    // New image: drop old anonymous maps before replacing metadata.
+/// Install a newly loaded ELF and enter it. Does not return on the success path
+/// that the parent later resumes via nest / trap.
+fn commit_exec(image: crate::elf::LoadedImage, argv0: &str) -> u64 {
     crate::process::clear_mmaps();
 
     let _ = crate::process::with_current(|p| {
-        p.set_name(refs[0]);
+        p.set_name(argv0);
         p.user_rip = image.entry;
         p.user_rsp = image.stack_top;
         p.user_rax = 0;
@@ -2848,20 +3084,12 @@ fn sys_execve(path_ptr: u64, argv_ptr: u64, _envp: u64) -> u64 {
         // Fresh heap from ELF image end (Linux start_brk).
         p.heap_base = image.brk_start;
         p.heap_size = 0;
+        // dumpable / no_new_privs / pdeathsig kept across exec (Linux).
     });
     crate::x86::msr::set_fs_base(0);
     crate::x86::msr::set_gs_base(0);
 
-    // Nested enter: new image runs until exit (exit_user → parent).
-    // enter_user_nested returns after the image's exit pops *this* nest frame.
     enter_user_nested(image.entry, image.stack_top, 0);
-    // Current is already the parent. Do **not** always pop another nest frame:
-    // under IRQ preemption the child may have run without a wait-nest, so the
-    // only remaining frame belongs to the shell/`run` launcher — popping it
-    // here steals that frame and causes #UD on later shell exit.
-    //
-    // depth > 1  → wait (or deeper) still owns a frame under the launcher → pop
-    // depth <= 1 → only launcher frame left (or none) → resume parent trap
     extern "C" {
         fn get_enter_nest_depth() -> u64;
     }
@@ -2961,6 +3189,12 @@ fn load_exec_image(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage,
     {
         return load(crate::embedded_polltest::POLLTEST_ELF);
     }
+    if path == "p9test"
+        || path == "/bin/p9test"
+        || path.ends_with("/p9test")
+    {
+        return load(crate::embedded_p9test::P9TEST_ELF);
+    }
     if path == "preempttest"
         || path == "/bin/preempttest"
         || path.ends_with("/preempttest")
@@ -2995,6 +3229,13 @@ fn load_elf_from_fs(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage
     }
     let cwd = crate::fs::path::cwd_inode();
     let ino = crate::fs::ext2::resolve_path(cwd, path).map_err(|_| "not found")?;
+    load_elf_from_ino(ino, argv)
+}
+
+fn load_elf_from_ino(ino: u32, argv: &[&str]) -> Result<crate::elf::LoadedImage, &'static str> {
+    if !crate::fs::is_ready() {
+        return Err("no filesystem");
+    }
     if crate::fs::ext2::inode_is_dir(ino) {
         return Err("is a directory");
     }

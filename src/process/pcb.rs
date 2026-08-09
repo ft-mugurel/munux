@@ -146,8 +146,15 @@ pub struct Process {
     /// True while executing a user signal handler (not nested for this slice).
     pub sig_in_handler: bool,
 
-    /// Name for debugging
+    /// Name for debugging / `prctl(PR_SET_NAME)` (`TASK_COMM_LEN` = 16).
     pub name: [u8; 16],
+    /// `prctl(PR_SET_DUMPABLE)` — 0/1/2; default 1 (Linux `SUID_DUMP_USER`).
+    pub dumpable: u8,
+    /// `prctl(PR_SET_NO_NEW_PRIVS)` — once 1, stays 1 (no setuid effect here).
+    pub no_new_privs: bool,
+    /// `prctl(PR_SET_PDEATHSIG)` — signal delivered when the parent task exits.
+    /// 0 = none. Not inherited across `fork`/`clone` (Linux).
+    pub pdeathsig: u32,
 }
 
 impl Process {
@@ -194,6 +201,9 @@ impl Process {
             sig_restore: TrapFrame::zero(),
             sig_in_handler: false,
             name: [0; 16],
+            dumpable: 1,
+            no_new_privs: false,
+            pdeathsig: 0,
         }
     }
 

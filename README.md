@@ -27,7 +27,7 @@ BusyBox / static musl binaries are **probes and regression tests**, not the prod
 1. ~~**Per-process address spaces** and a real process model~~ ✅  
 2. ~~**Threads** (`clone`, TID, futex, TLS) + signals~~ ✅ (practical slices)  
 3. ~~**Loadable kernel modules** (export table, init/exit, chardev)~~ ✅ practical (MNX1 + ELF ET_REL `.ko`)  
-4. **Phase 9** — grow the Linux surface (`execveat`/`prctl` next)  
+4. **Phase 9** — grow the Linux surface (file-map ELF / `MAP_SHARED` next)  
 5. **linuxkpi** — compile Linux driver `.c` ([docs/LINUXKPI.md](docs/LINUXKPI.md)); not distro `.ko` blobs  
 6. **Later** — dynlink/glibc, PTYs/job control, networking, graphics+input, **installable desktop**
 
@@ -40,7 +40,7 @@ VFS (incl. pipes/vops), and **loadable modules** (MNX1 **and** ELF64 ET_REL `.ko
 + Linux `init_module` / `delete_module` / `finit_module`, `/bin/insmod|rmmod|lsmod`,
 `hello.{mnx,ko}`, `echo.{mnx,ko}` → `/dev/echo` with unload refcount).
 
-**Phase 9a–9c** in: symlink/statx, file mmap, **poll/select/epoll**. Next: `execveat`/`prctl`.  
+**Phase 9a–9d** in: symlink/statx, file mmap, poll/select/epoll, **`execveat`/`prctl`**. Next: file-map ELF / `MAP_SHARED`.  
 Destination remains a **Linux desktop** (P10–P14). IDE stays built-in.
 
 ### Boot & build

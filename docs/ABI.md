@@ -5,7 +5,7 @@ This document freezes conventions for userspace and the kernel.
 
 | Field | Value |
 |-------|--------|
-| **Status** | **v0.3.3** — P9c poll/select/epoll |
+| **Status** | **v0.3.4** — P9d execveat/prctl |
 | **Arch** | **x86_64** only on `main` |
 | **Goal** | Linux userspace (static musl today, glibc + a **desktop** later) uses the **same numbers, structs, and register ABI** as Linux; missing calls return **`-ENOSYS`**. Internals may differ; **results must match**. |
 
@@ -35,7 +35,7 @@ Same as Linux x86_64:
 
 Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.  
 Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` constants).  
-**88** numbers are dispatched (quality varies: full / partial / stub). Guest `uname` strings are still `sysname=munux`, `release=0.2.0`, `version=munux 0.2 x86_64` (independent of this ABI doc version).
+**90** numbers are dispatched (quality varies: full / partial / stub). Guest `uname` strings are still `sysname=munux`, `release=0.2.0`, `version=munux 0.2 x86_64` (independent of this ABI doc version).
 
 | # | Linux name | munux status |
 |--:|------------|--------------|
@@ -95,6 +95,7 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` consta
 | 108 | `getegid` | done (0) |
 | 110 | `getppid` | done |
 | 115 | `getgroups` | done |
+| 157 | `prctl` | done (P9d; name/dumpable/nnp/pdeathsig/seccomp-get/ptracer) |
 | 158 | `arch_prctl` | done (`ARCH_SET/GET_FS/GS`; TLS) |
 | 162 | `sync` | **stub** (no-op; write-through FS) |
 | 175 | `init_module` | done (MNX1 image; params ignored) |
@@ -126,11 +127,12 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` consta
 | 271 | `ppoll` | done (sigmask ignored) |
 | 291 | `epoll_create1` | done (CLOEXEC ignored) |
 | 313 | `finit_module` | done (load from fd; MNX1 or ELF ET_REL) |
+| 322 | `execveat` | done (P9d; `AT_FDCWD` / dirfd relative / `AT_EMPTY_PATH`; `AT_SYMLINK_NOFOLLOW`) |
 | 332 | `statx` | done (basic stats; `AT_SYMLINK_NOFOLLOW`) |
 
 **Notable still ENOSYS** (among others): `pselect6`, `epoll_pwait`,
 `vfork`, `dup3`, `statfs`, `getpriority`/`setpriority`,
-`setpgid`/`getpgrp`/`setsid`, `prctl`, `execveat`, sockets. Full matrix: **[SYSCALL_COMPARE.md](SYSCALL_COMPARE.md)**.
+`setpgid`/`getpgrp`/`setsid`, sockets. Full matrix: **[SYSCALL_COMPARE.md](SYSCALL_COMPARE.md)**.
 
 Unimplemented numbers return **`-ENOSYS` (`-38`)** and log `syscall: ENOSYS n=…`.
 
@@ -199,6 +201,8 @@ Common errno values:
 | `fork` | Private CR3 (`clone_mm`) + stack copy; FDs cloned; child Ready; parent continues |
 | `clone` | Flags include `CLONE_VM` / `CLONE_FILES` / `CLONE_THREAD` / settid / TLS / stack |
 | `execve` | Load ELF64 into current task; argv copied; envp ignored |
+| `execveat` | Same image path; `AT_FDCWD` / dirfd relative / `AT_EMPTY_PATH` (`fexecve`) |
+| `prctl` | `PR_SET/GET_NAME`, dumpable, `NO_NEW_PRIVS`, `PDEATHSIG`; unknown → `EINVAL` |
 | `exit` | One task → zombie; parent woken |
 | `exit_group` | Tear down thread group; one zombie for wait |
 | `wait4` | Reap zombie; schedules Ready children cooperatively |
@@ -250,7 +254,7 @@ Foundation for threads is in; polish and next architecture:
 3. ~~Signals (`rt_sigreturn`, delivery, `tgkill`, Ctrl-C)~~ ✅ (practical slices)  
 4. Full signal frames (`siginfo`/`ucontext`), absolute/PI futex, musl pthread soak  
 5. ~~`pipe`/`dup`, `rename`/`link`, VFS + modules~~ ✅ P7–P8c  
-6. ~~`readlink`/`symlink`/`statx`~~ ✅ P9a; ~~file mmap~~ ✅ P9b; ~~poll/select/epoll~~ ✅ P9c
+6. ~~`readlink`/`symlink`/`statx`~~ ✅ P9a; ~~file mmap~~ ✅ P9b; ~~poll/select/epoll~~ ✅ P9c; ~~`execveat`/`prctl`~~ ✅ P9d
 
 Using **wrong syscall numbers** would make Linux binaries impossible — munux keeps Linux numbers from v0.2 forward.
 
@@ -270,3 +274,4 @@ Using **wrong syscall numbers** would make Linux binaries impossible — munux k
 | **0.3.1** | Doc sync with P7d/P8 dispatch: pipe/dup/rename/link/modules (2026-08-07) |
 | **0.3.2** | P9a: `symlink`/`readlink`/`statx`; **81** dispatched (2026-08-07) |
 | **0.3.3** | P9c: poll/select/epoll; **88** dispatched |
+| **0.3.4** | P9d: `execveat`/`prctl`; **90** dispatched (2026-08-09) |
