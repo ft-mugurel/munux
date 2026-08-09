@@ -66,6 +66,24 @@ static mut BINDS: [Binding; MAX_BIND] = [Binding {
     drv: core::ptr::null_mut(),
 }; MAX_BIND];
 
+fn devs_mut() -> &'static mut [PciDev; MAX_DEV] {
+    unsafe { &mut *core::ptr::addr_of_mut!(DEVS) }
+}
+
+fn ndev() -> usize {
+    unsafe { core::ptr::read(core::ptr::addr_of!(NDEV)) }
+}
+
+fn set_ndev(n: usize) {
+    unsafe {
+        core::ptr::write(core::ptr::addr_of_mut!(NDEV), n);
+    }
+}
+
+fn binds_mut() -> &'static mut [Binding; MAX_BIND] {
+    unsafe { &mut *core::ptr::addr_of_mut!(BINDS) }
+}
+
 fn cfg_addr(bus: u32, slot: u32, func: u32, offset: u32) -> u32 {
     0x8000_0000 | (bus << 16) | (slot << 11) | (func << 8) | (offset & 0xFC)
 }
@@ -85,13 +103,12 @@ fn write_cfg(bus: u32, slot: u32, func: u32, offset: u32, val: u32) {
 }
 
 fn push_dev(d: PciDev) {
-    unsafe {
-        if NDEV >= MAX_DEV {
-            return;
-        }
-        DEVS[NDEV] = d;
-        NDEV += 1;
+    let n = ndev();
+    if n >= MAX_DEV {
+        return;
     }
+    devs_mut()[n] = d;
+    set_ndev(n + 1);
 }
 
 fn scan_func(bus: u32, slot: u32, func: u32) {
@@ -119,9 +136,7 @@ fn scan_func(bus: u32, slot: u32, func: u32) {
 
 /// Scan bus 0 (QEMU i440FX). Call once after PIC init.
 pub fn init() {
-    unsafe {
-        NDEV = 0;
-    }
+    set_ndev(0);
     for slot in 0..32u32 {
         let id = read_cfg(0, slot, 0, 0);
         if (id & 0xFFFF) == 0xFFFF {
@@ -134,17 +149,17 @@ pub fn init() {
         }
     }
     console::print("pci: devices=");
-    console::write_u64(unsafe { NDEV as u64 });
+    console::write_u64(ndev() as u64);
     console::println("");
-    unsafe {
-        for i in 0..NDEV {
-            let d = DEVS[i];
-            console::print("  ");
-            console::write_hex64(d.vendor as u64);
-            console::print(":");
-            console::write_hex64(d.device as u64);
-            console::println("");
-        }
+    let n = ndev();
+    let dtab = devs_mut();
+    for i in 0..n {
+        let d = dtab[i];
+        console::print("  ");
+        console::write_hex64(d.vendor as u64);
+        console::print(":");
+        console::write_hex64(d.device as u64);
+        console::println("");
     }
 }
 
@@ -172,18 +187,16 @@ fn id_match(id: &PciDeviceId, d: &PciDev) -> bool {
 }
 
 fn already_bound(dev_i: usize) -> bool {
-    unsafe { BINDS.iter().any(|b| b.used && b.dev_i == dev_i) }
+    binds_mut().iter().any(|b| b.used && b.dev_i == dev_i)
 }
 
 fn bind(dev_i: usize, drv: *mut PciDriver) -> bool {
-    unsafe {
-        for b in BINDS.iter_mut() {
-            if !b.used {
-                b.used = true;
-                b.dev_i = dev_i;
-                b.drv = drv;
-                return true;
-            }
+    for b in binds_mut().iter_mut() {
+        if !b.used {
+            b.used = true;
+            b.dev_i = dev_i;
+            b.drv = drv;
+            return true;
         }
     }
     false
@@ -205,19 +218,19 @@ pub extern "C" fn pci_register_driver(drv: *mut PciDriver) -> i32 {
         if id_end(id) {
             break;
         }
-        unsafe {
-            for di in 0..NDEV {
-                if already_bound(di) {
-                    continue;
-                }
-                if !id_match(id, &DEVS[di]) {
-                    continue;
-                }
-                if let Some(p) = probe {
-                    let rc = p(core::ptr::addr_of_mut!(DEVS[di]), id);
-                    if rc == 0 {
-                        let _ = bind(di, drv);
-                    }
+        let n = ndev();
+        let dtab = devs_mut();
+        for di in 0..n {
+            if already_bound(di) {
+                continue;
+            }
+            if !id_match(id, &dtab[di]) {
+                continue;
+            }
+            if let Some(p) = probe {
+                let rc = p(core::ptr::addr_of_mut!(dtab[di]), id);
+                if rc == 0 {
+                    let _ = bind(di, drv);
                 }
             }
         }
@@ -234,15 +247,14 @@ pub extern "C" fn pci_unregister_driver(drv: *mut PciDriver) {
         return;
     }
     let remove = unsafe { (*drv).remove };
-    unsafe {
-        for b in BINDS.iter_mut() {
-            if b.used && b.drv == drv {
-                if let Some(r) = remove {
-                    r(core::ptr::addr_of_mut!(DEVS[b.dev_i]));
-                }
-                b.used = false;
-                b.drv = core::ptr::null_mut();
+    let dtab = devs_mut();
+    for b in binds_mut().iter_mut() {
+        if b.used && b.drv == drv {
+            if let Some(r) = remove {
+                r(core::ptr::addr_of_mut!(dtab[b.dev_i]));
             }
+            b.used = false;
+            b.drv = core::ptr::null_mut();
         }
     }
 }
