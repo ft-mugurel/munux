@@ -41,6 +41,7 @@ pub fn clone_from_user(
     user_rip: u64,
     user_rsp: u64,
     user_rflags: u64,
+    child_trap: TrapFrame,
 ) -> Result<i32, i32> {
     // CSIGNAL low bits ignored (signal on death) for now.
     let _csignal = flags & 0xff;
@@ -48,7 +49,17 @@ pub fn clone_from_user(
     if flags & CLONE_VM == 0 {
         // Process-like: private mm via fork path, then fix stack/tid flags.
         let child = fork_from_user(user_rip, user_rsp, user_rflags)?;
-        apply_clone_post(child, flags, stack, parent_tid, child_tid, tls, user_rip, user_rflags)?;
+        apply_clone_post(
+            child,
+            flags,
+            stack,
+            parent_tid,
+            child_tid,
+            tls,
+            user_rip,
+            user_rflags,
+            child_trap,
+        )?;
         return Ok(child);
     }
 
@@ -135,7 +146,11 @@ pub fn clone_from_user(
         p.user_rsp = child_rsp;
         p.user_rflags = user_rflags | 0x200;
         p.user_rax = 0;
-        p.trap = TrapFrame::from_user_entry(p.user_rip, p.user_rsp, p.user_rflags, 0);
+        p.trap = child_trap;
+        p.trap.rax = 0;
+        p.trap.rsp = child_rsp;
+        p.trap.rip = user_rip;
+        p.trap.rflags = p.user_rflags;
         p.trap_valid = true;
         p.entered_via_nest = false;
         p.mmaps = mmaps;
@@ -176,6 +191,7 @@ fn apply_clone_post(
     tls: u64,
     user_rip: u64,
     user_rflags: u64,
+    child_trap: TrapFrame,
 ) -> Result<(), i32> {
     let parent_tgid = table::with_current(|p| if p.tgid != 0 { p.tgid } else { p.pid }).unwrap_or(1);
     let parent_idx = table::current_index();
@@ -189,13 +205,15 @@ fn apply_clone_post(
             p.tgid = parent_tgid;
             p.set_name("thread");
         }
+        p.user_rip = user_rip;
+        p.user_rflags = user_rflags | 0x200;
+        p.trap = child_trap;
+        p.trap.rax = 0;
+        p.trap.rip = user_rip;
+        p.trap.rflags = p.user_rflags;
         if stack != 0 {
             p.user_rsp = stack;
             p.trap.rsp = stack;
-            p.user_rip = user_rip;
-            p.trap.rip = user_rip;
-            p.user_rflags = user_rflags | 0x200;
-            p.trap.rflags = p.user_rflags;
         }
         if flags & CLONE_SETTLS != 0 {
             p.fs_base = tls;

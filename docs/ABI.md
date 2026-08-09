@@ -5,7 +5,7 @@ This document freezes conventions for userspace and the kernel.
 
 | Field | Value |
 |-------|--------|
-| **Status** | **v0.3.8** — P10c glibc hello_dyn |
+| **Status** | **v0.3.9** — P10d clone3 + CLONE_SETTLS |
 | **Arch** | **x86_64** only on `main` |
 | **Goal** | Linux userspace (static musl today, glibc + a **desktop** later) uses the **same numbers, structs, and register ABI** as Linux; missing calls return **`-ENOSYS`**. Internals may differ; **results must match**. |
 
@@ -35,7 +35,7 @@ Same as Linux x86_64:
 
 Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.  
 Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` constants).  
-**95** numbers are dispatched (quality varies: full / partial / stub). Guest `uname` strings are still `sysname=munux`, `release=0.2.0`, `version=munux 0.2 x86_64` (independent of this ABI doc version).
+**96** numbers are dispatched (quality varies: full / partial / stub). Guest `uname` strings are still `sysname=munux`, `release=0.2.0`, `version=munux 0.2 x86_64` (independent of this ABI doc version).
 
 | # | Linux name | munux status |
 |--:|------------|--------------|
@@ -134,6 +134,7 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` consta
 | 322 | `execveat` | done (P9d; `AT_FDCWD` / dirfd relative / `AT_EMPTY_PATH`; `AT_SYMLINK_NOFOLLOW`) |
 | 332 | `statx` | done (basic stats; `AT_SYMLINK_NOFOLLOW`) |
 | 334 | `rseq` | stub (glibc probe) |
+| 435 | `clone3` | done (P10d; `clone_args` flags…tls; stack+size; child inherits GPRs) |
 
 **Notable still ENOSYS** (among others): `pselect6`, `epoll_pwait`,
 `vfork`, `dup3`, `statfs`, `getpriority`/`setpriority`,
@@ -205,6 +206,7 @@ Common errno values:
 | `gettid` | Unique task id |
 | `fork` | Private CR3 (`clone_mm`) + stack copy; FDs cloned; child Ready; parent continues |
 | `clone` | Flags include `CLONE_VM` / `CLONE_FILES` / `CLONE_THREAD` / settid / TLS / stack |
+| `clone3` | `struct clone_args` (≥64 B); `stack` is the low address; child RSP = stack+size; GPRs inherited (glibc `rdx`=fn / `r8`=arg) |
 | `execve` | ELF64 `ET_EXEC`/`ET_DYN`; `PT_INTERP`; `ET_DYN` bias `PIE_BASE`/`INTERP_BASE`; `AT_BASE`/`AT_ENTRY`; enter interp |
 | `execveat` | Same image path; `AT_FDCWD` / dirfd relative / `AT_EMPTY_PATH` (`fexecve`) |
 | `prctl` | `PR_SET/GET_NAME`, dumpable, `NO_NEW_PRIVS`, `PDEATHSIG`; unknown → `EINVAL` |
@@ -214,7 +216,7 @@ Common errno values:
 | Signals | `kill`/`tkill`/`tgkill`, `rt_sigaction`/`rt_sigprocmask`/`rt_sigreturn`; default terminate + user handlers |
 | Futex | `FUTEX_WAIT`/`WAKE`/`REQUEUE`/`CMP_REQUEUE` (+PRIVATE, relative timeout); `clear_child_tid` wake on exit |
 | cwd | Per-process (not yet real `CLONE_FS` object share) |
-| TLS | Per-task `fs_base` / `gs_base`; `arch_prctl` |
+| TLS | Per-task `fs_base` / `gs_base`; `arch_prctl`; `CLONE_SETTLS`; do not reload FS/GS selectors on enter (would clear base MSRs) |
 | Scheduling | Timer user→user preempt; nest depth ≥ 2 stays cooperative |
 
 **Userspace shell:** freestanding `/bin/sh` (builtins + fork/exec); ignores SIGINT/SIGQUIT. BusyBox applets used as probes toward a full Linux userspace / desktop.
@@ -284,3 +286,4 @@ Using **wrong syscall numbers** would make Linux binaries impossible — munux k
 | **0.3.6** | P10a: `PT_INTERP` + auxv `AT_BASE`; smoke `dynlinktest` |
 | **0.3.7** | P10b: `ET_DYN` load bias; smoke `dynlinkpie` |
 | **0.3.8** | P10c: glibc `ld.so`+`libc` `hello_dyn`; pread64/getrandom/prlimit64/rseq/robust_list |
+| **0.3.9** | P10d: `clone3` + `CLONE_SETTLS` + GPR inherit; smokes `tlsclone` / glibc `clonec` |

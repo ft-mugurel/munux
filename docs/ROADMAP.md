@@ -1,6 +1,6 @@
 # munux roadmap — Linux-compatible kernel in Rust
 
-**Last updated:** 2026-08-09 (P10c glibc `hello_dyn`).
+**Last updated:** 2026-08-09 (P10d clone3 + CLONE_SETTLS).
 
 **Goal:** munux is a **Linux x86_64 kernel written in Rust**. The destination is to **install a Linux desktop environment and use the machine like a Linux system**.
 
@@ -28,7 +28,7 @@ BusyBox / static musl binaries are **probes and regression tests**, not the prod
 | Memory | **Per-process CR3** + `clone_mm`; identity kernel window | OK for threads; high-half later |
 | Processes | PCB tid/tgid; fork private mm; wait/exit_group | OK |
 | Scheduling | Timer user→user preempt (`TrapFrame`); nest policy depth ≤ 1 | OK for user threads |
-| Threads | **`clone`**, shared mm/files, gettid/tgid | OK (no full musl pthread suite yet) |
+| Threads | **`clone`/`clone3`**, shared mm/files, gettid/tgid, SETTLS | OK (no full nptl `pthread_create` soak yet) |
 | Signals | kill/tgkill, masks, handlers, rt_sigreturn, Ctrl-C | OK for practical use |
 | Futex | WAIT/WAKE/REQUEUE + timeout + clear_child_tid | OK basic join |
 | FS | **VFS P7 practical**: fops, mounts, proc, mutations, pipes | OK for modules |
@@ -374,7 +374,7 @@ Prioritize by **what Linux userspace (and later a DE) actually needs**, not by �
 | High | ~~`execveat`, `prctl`~~ ✅ P9d | Tooling / process control |
 | Medium | ~~`epoll`/`select`~~ ✅ P9c level-triggered | `ppoll` sigmask / ET epoll later |
 | Medium | `mount`/`umount`, ramfs, better `/proc`/`sys` | Module-loaded FS + install story |
-| Medium | `vfork`, richer `clone3`, waitid | glibc/musl spawn paths |
+| Medium | `vfork`, richer `clone3` (set_tid/cgroup), waitid | glibc/musl spawn paths |
 | Later in P9 | COW fork, demand paging, shared-anon mmap | `MAP_SHARED` file writeback ✅ P9e (no EOF-extend / COW) |
 
 Syscall coverage % (**95 / 385 ≈ 24.7%** today) is a **progress metric** toward the desktop, not a vanity KPI and not a reason to stop. Implement what userspace needs with **Linux semantics**; skip Linux-internal-only or obsolete calls until something actually requires them.
@@ -406,7 +406,7 @@ These are **in scope**. Internals can differ from Linux; the **result** must not
 
 | Phase | Result we are aiming for | Notes |
 |-------|--------------------------|-------|
-| **P10** | Dynamically linked musl/glibc binaries run | P10a–c ✅ interp + `ET_DYN` + **glibc `hello_dyn`**; TLS/pthread / more libs still open |
+| **P10** | Dynamically linked musl/glibc binaries run | P10a–d ✅ interp + `ET_DYN` + **glibc `hello_dyn`** + `clone3`/`CLONE_SETTLS`; full `pthread_create` still open |
 | **P11** | Real terminals and job control | PTYs, termios, session/pgrp, `TIOCSCTTY`, `wait`/SIGCHLD polish — needed for a DE terminal |
 | **P12** | Networking works | virtio-net + ICMP ping ✅; still need `socket`/`bind`/`connect` for userspace |
 | **P13** | Graphics + input | Framebuffer or KMS/DRM + evdev/mice/keyboard in Linux ABI form; then Xorg or a Wayland compositor |
@@ -489,11 +489,11 @@ Milestones on that path:
 | Horizon | Result | Status |
 |---------|--------|--------|
 | Spine | Isolated processes, joinable threads, loadable drivers | ✅ P1–P8 |
-| Probe userspace | Static musl / BusyBox: fork, exec, pthread path, futex, mmap, files | 🟡 partial (no full musl pthread / dynlink) |
-| Real userspace | Dynamically linked glibc/musl, PTYs, net, graphics/input | ❌ P10–P13 not started |
+| Probe userspace | Static musl / BusyBox: fork, exec, pthread path, futex, mmap, files | 🟡 partial (no full musl/glibc pthread soak) |
+| Real userspace | Dynamically linked glibc/musl, PTYs, net, graphics/input | 🟡 P10a–d in; P11–P13 still open |
 | **Desktop** | Install a DE and use it as a daily Linux machine | ❌ P14 — **the product goal** |
 
-**Today:** spine is in; ~23% of Linux x86_64 syscalls dispatched; BusyBox/static musl are probes. That is **early** on the path to a desktop, not a reason to redefine the goal.
+**Today:** spine is in; ~25% of Linux x86_64 syscalls dispatched; BusyBox/static musl/glibc hello are probes. That is **early** on the path to a desktop, not a reason to redefine the goal.
 
 ---
 
@@ -501,7 +501,7 @@ Milestones on that path:
 
 **Phase 8 is complete.** Do not reopen it for “make IDE a `.ko` on ext2.”
 
-**P10c (glibc `hello_dyn`) landed.** Next: more of libc (TLS/pthread), then P11 PTYs.
+**P10d (`clone3` + `CLONE_SETTLS`) landed.** Smokes: `tlsclone`, glibc `clonec`. Full nptl `pthread_create` still open. Next: P11 PTYs.
 
 **P9 leftover:** COW fork / demand paging as needed by dynlink.
 

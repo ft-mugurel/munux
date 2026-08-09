@@ -221,6 +221,8 @@ EMBEDDED_PREEMPTTEST_RS	=	src/embedded_preempttest.rs
 USERLAND_CLONETEST	=	build/rootfs/bin/clonetest
 USERLAND_CLONETEST_SRC	=	userland/clonetest.asm
 EMBEDDED_CLONETEST_RS	=	src/embedded_clonetest.rs
+USERLAND_TLSCLONE	=	build/rootfs/bin/tlsclone
+USERLAND_TLSCLONE_SRC	=	userland/tlsclone.asm
 USERLAND_FUTEXTEST	=	build/rootfs/bin/futextest
 USERLAND_FUTEXTEST_SRC	=	userland/futextest.asm
 EMBEDDED_FUTEXTEST_RS	=	src/embedded_futextest.rs
@@ -245,11 +247,15 @@ USERLAND_DYNINTERP	=	build/rootfs/lib/ld-munux.so
 USERLAND_DYNINTERP_SRC	=	userland/dyninterp.S
 USERLAND_HELLO_DYN	=	build/rootfs/bin/hello_dyn
 USERLAND_HELLO_DYN_SRC	=	userland/hello_dyn.c
+USERLAND_CLONEC		=	build/rootfs/bin/clonec
+USERLAND_CLONEC_SRC	=	userland/clonec.c
+USERLAND_PTHREADTEST	=	build/rootfs/bin/pthreadtest
+USERLAND_PTHREADTEST_SRC	=	userland/pthreadtest.c
 HOST_LDSO		=	$(firstword $(wildcard /lib64/ld-linux-x86-64.so.2 /usr/lib64/ld-linux-x86-64.so.2))
 HOST_LIBC		=	$(firstword $(wildcard /lib64/libc.so.6 /usr/lib64/libc.so.6 /usr/lib/libc.so.6))
 
 # Freestanding x86_64 ET_EXEC + embed into Rust
-userland: ${USERLAND_SRC} ${USERLAND_LD} ${USERLAND_ECHO_SRC} ${USERLAND_CAT_SRC} ${USERLAND_LS_SRC} ${USERLAND_FORKTEST_SRC} ${USERLAND_EXECTEST_SRC} ${USERLAND_SH_SRC} ${USERLAND_VI_SRC} ${USERLAND_UNAME_SRC} ${USERLAND_ARCHPRCTL_SRC} ${USERLAND_BRKTEST_SRC} ${USERLAND_MMAPTEST_SRC} ${USERLAND_POLLTEST_SRC} ${USERLAND_P9TEST_SRC} ${USERLAND_PREEMPTTEST_SRC} ${USERLAND_CLONETEST_SRC} ${USERLAND_FUTEXTEST_SRC} ${USERLAND_SIGNALTEST_SRC} ${USERLAND_INSMOD_SRC} ${USERLAND_RMMOD_SRC} ${USERLAND_LSMOD_SRC} ${USERLAND_ECHOTEST_SRC} ${USERLAND_VDATEST_SRC} ${USERLAND_DYNLINKTEST_SRC} ${USERLAND_DYNLINKPIE_SRC} ${USERLAND_DYNINTERP_SRC} ${USERLAND_HELLO_DYN_SRC}
+userland: ${USERLAND_SRC} ${USERLAND_LD} ${USERLAND_ECHO_SRC} ${USERLAND_CAT_SRC} ${USERLAND_LS_SRC} ${USERLAND_FORKTEST_SRC} ${USERLAND_EXECTEST_SRC} ${USERLAND_SH_SRC} ${USERLAND_VI_SRC} ${USERLAND_UNAME_SRC} ${USERLAND_ARCHPRCTL_SRC} ${USERLAND_BRKTEST_SRC} ${USERLAND_MMAPTEST_SRC} ${USERLAND_POLLTEST_SRC} ${USERLAND_P9TEST_SRC} ${USERLAND_PREEMPTTEST_SRC} ${USERLAND_CLONETEST_SRC} ${USERLAND_TLSCLONE_SRC} ${USERLAND_FUTEXTEST_SRC} ${USERLAND_SIGNALTEST_SRC} ${USERLAND_INSMOD_SRC} ${USERLAND_RMMOD_SRC} ${USERLAND_LSMOD_SRC} ${USERLAND_ECHOTEST_SRC} ${USERLAND_VDATEST_SRC} ${USERLAND_DYNLINKTEST_SRC} ${USERLAND_DYNLINKPIE_SRC} ${USERLAND_DYNINTERP_SRC} ${USERLAND_HELLO_DYN_SRC} ${USERLAND_CLONEC_SRC} ${USERLAND_PTHREADTEST_SRC}
 	$(call require_tool,$(NASM),nasm)
 	$(call require_tool,$(LD),ld)
 	@mkdir -p build/userland build/rootfs/bin
@@ -285,6 +291,8 @@ userland: ${USERLAND_SRC} ${USERLAND_LD} ${USERLAND_ECHO_SRC} ${USERLAND_CAT_SRC
 	@${LD} -m ${LD_EMUL} -T ${USERLAND_LD} -o ${USERLAND_PREEMPTTEST} build/userland/preempttest.o
 	@${NASM} -f ${NASM_FMT} ${USERLAND_CLONETEST_SRC} -o build/userland/clonetest.o
 	@${LD} -m ${LD_EMUL} -T ${USERLAND_LD} -o ${USERLAND_CLONETEST} build/userland/clonetest.o
+	@${NASM} -f ${NASM_FMT} ${USERLAND_TLSCLONE_SRC} -o build/userland/tlsclone.o
+	@${LD} -m ${LD_EMUL} -T ${USERLAND_LD} -o ${USERLAND_TLSCLONE} build/userland/tlsclone.o
 	@${NASM} -f ${NASM_FMT} ${USERLAND_FUTEXTEST_SRC} -o build/userland/futextest.o
 	@${LD} -m ${LD_EMUL} -T ${USERLAND_LD} -o ${USERLAND_FUTEXTEST} build/userland/futextest.o
 	@${NASM} -f ${NASM_FMT} ${USERLAND_SIGNALTEST_SRC} -o build/userland/signaltest.o
@@ -323,6 +331,8 @@ userland: ${USERLAND_SRC} ${USERLAND_LD} ${USERLAND_ECHO_SRC} ${USERLAND_CAT_SRC
 	@${CC} -nostdlib -no-pie -Wl,--dynamic-linker=/lib/ld-munux.so -o ${USERLAND_DYNLINKTEST} ${USERLAND_DYNLINKTEST_SRC}
 	@${CC} -nostdlib -pie -fPIC -Wl,--dynamic-linker=/lib/ld-munux.so -o ${USERLAND_DYNLINKPIE} ${USERLAND_DYNLINKPIE_SRC}
 	@${CC} -o ${USERLAND_HELLO_DYN} ${USERLAND_HELLO_DYN_SRC}
+	@${CC} -o ${USERLAND_CLONEC} ${USERLAND_CLONEC_SRC}
+	@${CC} -pthread -o ${USERLAND_PTHREADTEST} ${USERLAND_PTHREADTEST_SRC}
 	@mkdir -p build/rootfs/lib64 build/rootfs/usr/lib64 build/rootfs/usr/lib
 	@if [ -n "$(HOST_LDSO)" ] && [ -n "$(HOST_LIBC)" ]; then \
 		cp -f "$(HOST_LDSO)" build/rootfs/lib64/ld-linux-x86-64.so.2; \

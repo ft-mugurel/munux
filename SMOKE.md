@@ -26,6 +26,8 @@ From freestanding **`$`**:
 
 - [ ] `signaltest` — prints `caught` then `parent ok`
 - [ ] `clonetest` — child + parent ok
+- [ ] `tlsclone` — `CLONE_SETTLS` + `clone3` trampoline; `tlsclone: ALL PASS`
+- [ ] `clonec` — glibc `clone()` trampoline; `clonec: ALL PASS`
 - [ ] `futextest` — child + parent ok (join via futex / clear_child_tid)
 - [ ] `forktest` — still green
 - [ ] `mmaptest` — A–F + `ALL PASS` (incl. `MAP_SHARED` writeback; run twice)

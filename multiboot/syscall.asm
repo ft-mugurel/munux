@@ -22,7 +22,7 @@ saved_kernel_rsp_depth:
 	dq 0
 saved_kernel_rsp_stack:
 	times MAX_ENTER_NEST dq 0
-; Snapshot at syscall entry (for fork)
+; Snapshot at syscall entry (for fork/clone child GPR inherit)
 last_user_rip:
 	dq 0
 last_user_rsp:
@@ -31,6 +31,28 @@ last_user_rflags:
 	dq 0
 ; 6th syscall arg (user r9) — avoid SysV stack arg for a6 in Rust.
 last_user_r9:
+	dq 0
+last_user_rdi:
+	dq 0
+last_user_rsi:
+	dq 0
+last_user_rdx:
+	dq 0
+last_user_r8:
+	dq 0
+last_user_r10:
+	dq 0
+last_user_rbx:
+	dq 0
+last_user_rbp:
+	dq 0
+last_user_r12:
+	dq 0
+last_user_r13:
+	dq 0
+last_user_r14:
+	dq 0
+last_user_r15:
 	dq 0
 
 section .text
@@ -43,10 +65,22 @@ global last_user_rip
 global last_user_rsp
 global last_user_rflags
 global last_user_r9
+global last_user_rdi
+global last_user_rsi
+global last_user_rdx
+global last_user_r8
+global last_user_r10
+global last_user_rbx
+global last_user_rbp
+global last_user_r12
+global last_user_r13
+global last_user_r14
+global last_user_r15
 global get_enter_nest_depth
 global resume_user_trap
 
 extern syscall_dispatch
+extern enter_user_frame
 
 ; Called from Rust: set_syscall_kstack(u64)
 set_syscall_kstack:
@@ -99,6 +133,17 @@ syscall_entry:
 	mov [rel last_user_rip], rcx
 	mov [rel last_user_rflags], r11
 	mov [rel last_user_r9], r9	; 6th arg (futex val3, …)
+	mov [rel last_user_rdi], rdi
+	mov [rel last_user_rsi], rsi
+	mov [rel last_user_rdx], rdx
+	mov [rel last_user_r8], r8
+	mov [rel last_user_r10], r10
+	mov [rel last_user_rbx], rbx
+	mov [rel last_user_rbp], rbp
+	mov [rel last_user_r12], r12
+	mov [rel last_user_r13], r13
+	mov [rel last_user_r14], r14
+	mov [rel last_user_r15], r15
 
 	; Save user stack pointer
 	mov [rel saved_user_rsp], rsp
@@ -184,7 +229,6 @@ enter_user_mode:
 	push r13
 	push r14
 	push r15
-	mov r8, rdx			; save initial user rax
 
 	; Nest: store this frame's RSP
 	mov rax, [rel saved_kernel_rsp_depth]
@@ -203,31 +247,34 @@ enter_user_mode:
 	push qword 0x23			; CS
 	push rdi			; entry RIP
 
-	; User data segments
+	; User data segments. Do **not** load FS/GS — that clears the 64-bit
+	; base MSRs and would drop TLS (CLONE_SETTLS / arch_prctl).
 	mov ax, 0x1B
 	mov ds, ax
 	mov es, ax
-	mov fs, ax
-	mov gs, ax
 
-	; Initial user regs
-	mov rax, r8
-	xor rbx, rbx
-	xor rcx, rcx
-	xor rdx, rdx
-	xor rsi, rsi
-	mov rdi, [rel enter_user_rdi]	; signal number or 0
-	xor rbp, rbp
-	xor r8, r8
-	xor r9, r9
-	xor r10, r10
-	xor r11, r11
-	xor r12, r12
-	xor r13, r13
-	xor r14, r14
-	xor r15, r15
-
-	; clear sticky enter_user_rdi after consume
+	; GPRs from enter_user_frame (clone3 child keeps rdx=fn / r8=arg).
+	; RIP-relative address of the Rust #[no_mangle] static.
+	lea r11, [rel enter_user_frame]
+	mov rax, [r11 + 0]
+	mov rbx, [r11 + 8]
+	mov rcx, [r11 + 16]
+	mov rdx, [r11 + 24]
+	mov rsi, [r11 + 32]
+	mov rbp, [r11 + 48]
+	mov r8,  [r11 + 56]
+	mov r9,  [r11 + 64]
+	mov r10, [r11 + 72]
+	mov r12, [r11 + 88]
+	mov r13, [r11 + 96]
+	mov r14, [r11 + 104]
+	mov r15, [r11 + 112]
+	mov rdi, [rel enter_user_rdi]
+	test rdi, rdi
+	jnz .got_rdi
+	mov rdi, [r11 + 40]
+.got_rdi:
+	mov r11, [r11 + 80]
 	mov qword [rel enter_user_rdi], 0
 
 	iretq

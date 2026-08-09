@@ -40,6 +40,7 @@ pub mod num {
     pub const GETGROUPS: u64 = 115;
     pub const GETPID: u64 = 39;
     pub const CLONE: u64 = 56;
+    pub const CLONE3: u64 = 435;
     pub const FORK: u64 = 57;
     pub const GETTID: u64 = 186;
     pub const EXECVE: u64 = 59;
@@ -218,8 +219,44 @@ extern "C" {
     static last_user_rflags: u64;
     /// 6th syscall argument (user r9) saved at `syscall_entry`.
     static last_user_r9: u64;
+    static last_user_rdi: u64;
+    static last_user_rsi: u64;
+    static last_user_rdx: u64;
+    static last_user_r8: u64;
+    static last_user_r10: u64;
+    static last_user_rbx: u64;
+    static last_user_rbp: u64;
+    static last_user_r12: u64;
+    static last_user_r13: u64;
+    static last_user_r14: u64;
+    static last_user_r15: u64;
     /// Optional user RDI for enter_user_mode (signal handler arg).
     static mut enter_user_rdi: u64;
+}
+
+/// Filled before `enter_user_mode` so clone children keep parent GPRs / TLS path.
+#[no_mangle]
+pub static mut enter_user_frame: crate::process::TrapFrame = crate::process::TrapFrame::zero();
+
+fn child_trap_from_syscall(rip: u64, rsp: u64, rflags: u64, rax: u64) -> crate::process::TrapFrame {
+    let mut t = crate::process::TrapFrame::from_user_entry(rip, rsp, rflags, rax);
+    unsafe {
+        t.rdi = core::ptr::read_volatile(core::ptr::addr_of!(last_user_rdi));
+        t.rsi = core::ptr::read_volatile(core::ptr::addr_of!(last_user_rsi));
+        t.rdx = core::ptr::read_volatile(core::ptr::addr_of!(last_user_rdx));
+        t.r8 = core::ptr::read_volatile(core::ptr::addr_of!(last_user_r8));
+        t.r9 = core::ptr::read_volatile(core::ptr::addr_of!(last_user_r9));
+        t.r10 = core::ptr::read_volatile(core::ptr::addr_of!(last_user_r10));
+        t.rbx = core::ptr::read_volatile(core::ptr::addr_of!(last_user_rbx));
+        t.rbp = core::ptr::read_volatile(core::ptr::addr_of!(last_user_rbp));
+        t.r12 = core::ptr::read_volatile(core::ptr::addr_of!(last_user_r12));
+        t.r13 = core::ptr::read_volatile(core::ptr::addr_of!(last_user_r13));
+        t.r14 = core::ptr::read_volatile(core::ptr::addr_of!(last_user_r14));
+        t.r15 = core::ptr::read_volatile(core::ptr::addr_of!(last_user_r15));
+        t.rcx = rip; // sysret-compatible
+        t.r11 = rflags;
+    }
+    t
 }
 
 fn nest_stack_top(index: usize) -> u64 {
@@ -299,13 +336,19 @@ fn enter_user_nested(entry: u64, user_rsp: u64, user_rax: u64) {
         .unwrap_or((entry, user_rsp, user_rax, 0, 0x202));
 
     // This task owns an enter_user_mode nest frame until exit.
+    // Keep existing GPRs (clone child needs parent rdx/r8 for glibc clone3).
     let _ = crate::process::with_current(|p| {
         p.entered_via_nest = true;
         p.user_rip = entry;
         p.user_rsp = user_rsp;
         p.user_rax = user_rax;
         p.user_rflags = rflags;
-        if !(p.trap_valid && p.trap.rip == entry) {
+        if p.trap_valid {
+            p.trap.rip = entry;
+            p.trap.rsp = user_rsp;
+            p.trap.rax = user_rax;
+            p.trap.rflags = rflags;
+        } else {
             p.trap = crate::process::TrapFrame::from_user_entry(entry, user_rsp, rflags, user_rax);
             p.trap.rdi = user_rdi;
             p.trap_valid = true;
@@ -317,6 +360,13 @@ fn enter_user_nested(entry: u64, user_rsp: u64, user_rax: u64) {
     }
     crate::process::apply_tls();
     unsafe {
+        let tr = crate::process::with_current(|p| p.trap).unwrap_or(
+            crate::process::TrapFrame::from_user_entry(entry, user_rsp, rflags, user_rax),
+        );
+        enter_user_frame = tr;
+        enter_user_frame.rip = entry;
+        enter_user_frame.rsp = user_rsp;
+        enter_user_frame.rax = user_rax;
         enter_user_mode(entry, user_rsp, user_rax);
     }
     pop_syscall_stack();
@@ -526,6 +576,7 @@ pub extern "C" fn syscall_dispatch(
         num::UTIMES => sys_utimes(a1, a2),
         num::FORK => sys_fork(),
         num::CLONE => sys_clone(a1, a2, a3, a4, a5),
+        num::CLONE3 => sys_clone3(a1, a2),
         num::EXECVE => sys_execve(a1, a2, a3),
         num::EXECVEAT => sys_execveat(a1, a2, a3, a4, a5),
         num::WAIT4 => sys_wait4(a1, a2, a3),
@@ -2956,11 +3007,51 @@ fn sys_clone(flags: u64, stack: u64, parent_tid: u64, child_tid: u64, tls: u64) 
             core::ptr::read_volatile(core::ptr::addr_of!(last_user_rflags)),
         )
     };
-    match crate::process::clone_from_user(flags, stack, parent_tid, child_tid, tls, rip, rsp, rflags)
-    {
+    let frame = child_trap_from_syscall(rip, if stack != 0 { stack } else { rsp }, rflags, 0);
+    match crate::process::clone_from_user(
+        flags,
+        stack,
+        parent_tid,
+        child_tid,
+        tls,
+        rip,
+        rsp,
+        rflags,
+        frame,
+    ) {
         Ok(tid) => tid as u64,
         Err(_) => errno::neg(errno::EAGAIN),
     }
+}
+
+/// Linux clone3(struct clone_args *uargs, size_t size) — glibc pthread_create.
+///
+/// `stack` is the **low** address; user RSP = stack + stack_size.
+fn sys_clone3(uargs: u64, size: u64) -> u64 {
+    const VER0: u64 = 64; // flags..tls
+    if size < VER0 || size > 256 {
+        return errno::neg(errno::EINVAL);
+    }
+    if !user_ptr_ok(uargs, size) {
+        return errno::neg(errno::EFAULT);
+    }
+    let rd = |off: u64| unsafe { core::ptr::read_volatile((uargs + off) as *const u64) };
+    let flags = rd(0);
+    let child_tid = rd(16);
+    let parent_tid = rd(24);
+    // clone3 puts CSIGNAL in exit_signal, not flags[7:0].
+    let exit_signal = rd(32) & 0xff;
+    let stack = rd(40);
+    let stack_size = rd(48);
+    let tls = rd(56);
+    let child_rsp = if stack == 0 {
+        0
+    } else if stack_size == 0 {
+        stack
+    } else {
+        stack.saturating_add(stack_size)
+    };
+    sys_clone(flags | exit_signal, child_rsp, parent_tid, child_tid, tls)
 }
 
 const ARGV_MAX: usize = 6;
@@ -3142,12 +3233,21 @@ fn commit_exec(image: crate::elf::LoadedImage, argv0: &str) -> u64 {
         p.user_rip = image.entry;
         p.user_rsp = image.stack_top;
         p.user_rax = 0;
+        p.user_rflags = 0x202;
         // New image: musl will re-set TLS; do not inherit previous FS base.
         p.fs_base = 0;
         p.gs_base = 0;
         // Fresh heap from ELF image end (Linux start_brk).
         p.heap_base = image.brk_start;
         p.heap_size = 0;
+        // Clean GPRs so enter_user_mode does not leak the old image's regs.
+        p.trap = crate::process::TrapFrame::from_user_entry(
+            image.entry,
+            image.stack_top,
+            0x202,
+            0,
+        );
+        p.trap_valid = true;
         // dumpable / no_new_privs / pdeathsig kept across exec (Linux).
     });
     crate::x86::msr::set_fs_base(0);
@@ -3398,6 +3498,8 @@ fn enter_and_wait_opts(
         p.trap_valid = true;
     });
     unsafe {
+        enter_user_frame =
+            crate::process::TrapFrame::from_user_entry(entry, stack_top, 0x202, 0);
         enter_user_mode(entry, stack_top, 0);
     }
 
