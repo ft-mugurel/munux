@@ -88,6 +88,12 @@ pub struct Process {
     pub state: ProcessState,
     /// Parent PID (−1 if none)
     pub parent: Pid,
+    /// Process group id (job control). Fork inherits; `setsid`/`setpgid` change it.
+    pub pgid: Pid,
+    /// Session id. Fork inherits; `setsid` makes a new session (`sid == pid`).
+    pub sid: Pid,
+    /// Controlling tty: 0 = none, 1 = console (PTY ids later).
+    pub ctty: i32,
     pub children: [Pid; MAX_CHILDREN],
     pub nchildren: usize,
     pub uid: Uid,
@@ -178,6 +184,9 @@ impl Process {
             tgid: 0,
             state: ProcessState::Unused,
             parent: -1,
+            pgid: 0,
+            sid: 0,
+            ctty: 0,
             children: [-1; MAX_CHILDREN],
             nchildren: 0,
             uid: 0,

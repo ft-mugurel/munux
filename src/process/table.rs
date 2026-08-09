@@ -18,6 +18,9 @@ pub fn init_table() {
         p.used = true;
         p.pid = 1;
         p.tgid = 1;
+        p.pgid = 1;
+        p.sid = 1;
+        p.ctty = 0;
         p.parent = -1;
         p.state = ProcessState::Running;
         p.uid = 0;
@@ -229,6 +232,12 @@ pub fn init_child_slot(
         // Default: new process is its own thread group (fork). CLONE_THREAD overwrites.
         p.tgid = p.pid;
         p.parent = parent_pid;
+        // Inherit session / pgrp / ctty (Linux fork/clone).
+        let (pgid, sid, ctty) = with_pid(parent_pid, |par| (par.pgid, par.sid, par.ctty))
+            .unwrap_or((p.pid, p.pid, 0));
+        p.pgid = if pgid != 0 { pgid } else { p.pid };
+        p.sid = if sid != 0 { sid } else { p.pid };
+        p.ctty = ctty;
         p.uid = uid;
         // Always Ready so the scheduler can pick the task. `is_thread` only
         // marks intent for name/debug; CLONE_THREAD sets tgid separately.

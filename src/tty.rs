@@ -98,3 +98,157 @@ pub fn take_force_fatal() -> Option<u32> {
 pub fn set_foreground_tgid(tgid: Pid) {
     FG_TGID.store(tgid, Ordering::Relaxed);
 }
+
+// ---------------------------------------------------------------------------
+// P11a — console as a real tty (termios / winsize / session)
+// ---------------------------------------------------------------------------
+
+/// Linux kernel `struct termios` (TCGETS), NCCS=19 → 36 bytes.
+pub const TERMIOS_LEN: usize = 36;
+const NCCS: usize = 19;
+
+// c_iflag / c_oflag / c_lflag / c_cflag (kernel octal bits)
+const ICRNL: u32 = 0o0000400;
+const IXON: u32 = 0o0002000;
+const OPOST: u32 = 0o0000001;
+const ONLCR: u32 = 0o0000004;
+const ISIG: u32 = 0o0000001;
+const ICANON: u32 = 0o0000002;
+const ECHO: u32 = 0o0000010;
+const ECHOE: u32 = 0o0000020;
+const ECHOK: u32 = 0o0000040;
+const IEXTEN: u32 = 0o100000;
+const CS8: u32 = 0o0000060;
+const CREAD: u32 = 0o0000200;
+const HUPCL: u32 = 0o0002000;
+const B38400: u32 = 0o0000017;
+
+const VINTR: usize = 0;
+const VQUIT: usize = 1;
+const VERASE: usize = 2;
+const VKILL: usize = 3;
+const VEOF: usize = 4;
+const VTIME: usize = 5;
+const VMIN: usize = 6;
+const VSTART: usize = 8;
+const VSTOP: usize = 9;
+const VSUSP: usize = 10;
+
+static CONSOLE_SID: AtomicI32 = AtomicI32::new(0);
+static CONSOLE_FG_PGID: AtomicI32 = AtomicI32::new(1);
+static mut CONSOLE_TERMIOS: [u8; TERMIOS_LEN] = [0; TERMIOS_LEN];
+static TERMIOS_INIT: AtomicBool = AtomicBool::new(false);
+
+fn put_u32(buf: &mut [u8], off: usize, v: u32) {
+    buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
+}
+
+fn default_termios(out: &mut [u8; TERMIOS_LEN]) {
+    *out = [0; TERMIOS_LEN];
+    put_u32(out, 0, ICRNL | IXON); // c_iflag
+    put_u32(out, 4, OPOST | ONLCR); // c_oflag
+    put_u32(out, 8, B38400 | CS8 | CREAD | HUPCL); // c_cflag
+    put_u32(out, 12, ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN); // c_lflag
+    out[16] = 0; // c_line
+    let cc = 17;
+    out[cc + VINTR] = 0x03;
+    out[cc + VQUIT] = 0x1c;
+    out[cc + VERASE] = 0x7f;
+    out[cc + VKILL] = 0x15;
+    out[cc + VEOF] = 0x04;
+    out[cc + VTIME] = 0;
+    out[cc + VMIN] = 1;
+    out[cc + VSTART] = 0x11;
+    out[cc + VSTOP] = 0x13;
+    out[cc + VSUSP] = 0x1a;
+    let _ = NCCS;
+}
+
+fn ensure_termios() {
+    if TERMIOS_INIT.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    unsafe {
+        default_termios(&mut *core::ptr::addr_of_mut!(CONSOLE_TERMIOS));
+    }
+}
+
+pub fn console_get_termios(out: &mut [u8]) {
+    ensure_termios();
+    let n = out.len().min(TERMIOS_LEN);
+    unsafe {
+        out[..n].copy_from_slice(&CONSOLE_TERMIOS[..n]);
+    }
+}
+
+pub fn console_set_termios(src: &[u8]) {
+    ensure_termios();
+    let n = src.len().min(TERMIOS_LEN);
+    unsafe {
+        CONSOLE_TERMIOS[..n].copy_from_slice(&src[..n]);
+    }
+}
+
+pub fn console_winsize() -> (u16, u16) {
+    (25, 80) // rows, cols (VGA text)
+}
+
+pub fn console_fg_pgid() -> i32 {
+    CONSOLE_FG_PGID.load(Ordering::Relaxed)
+}
+
+pub fn set_console_fg_pgid(pgid: i32) {
+    if pgid > 0 {
+        CONSOLE_FG_PGID.store(pgid, Ordering::Relaxed);
+    }
+}
+
+pub fn console_sid() -> i32 {
+    CONSOLE_SID.load(Ordering::Relaxed)
+}
+
+/// Attach console as controlling tty of this session. Returns 0 or -errno.
+pub fn tiocsctty(steal: bool) -> i32 {
+    let (pid, sid, pgid, ctty) = crate::process::with_current(|p| (p.pid, p.sid, p.pgid, p.ctty))
+        .unwrap_or((0, 0, 0, 0));
+    if pid <= 0 || pid != sid {
+        return -1; // EPERM: not session leader
+    }
+    if ctty != 0 {
+        return 0; // already ours
+    }
+    let owner = CONSOLE_SID.load(Ordering::Relaxed);
+    if owner != 0 && owner != sid && !steal {
+        return -1; // EPERM
+    }
+    CONSOLE_SID.store(sid, Ordering::Relaxed);
+    CONSOLE_FG_PGID.store(if pgid != 0 { pgid } else { sid }, Ordering::Relaxed);
+    let tgid = crate::process::getpid();
+    for i in 0..crate::process::pcb::MAX_PROCESSES {
+        let _ = crate::process::table::with_index(i, |p| {
+            if p.used && p.tgid == tgid {
+                p.ctty = 1;
+            }
+        });
+    }
+    0
+}
+
+pub fn tiocnotty() -> i32 {
+    let (sid, ctty) = crate::process::with_current(|p| (p.sid, p.ctty)).unwrap_or((0, 0));
+    if ctty == 0 {
+        return -25; // ENOTTY
+    }
+    let tgid = crate::process::getpid();
+    for i in 0..crate::process::pcb::MAX_PROCESSES {
+        let _ = crate::process::table::with_index(i, |p| {
+            if p.used && p.tgid == tgid {
+                p.ctty = 0;
+            }
+        });
+    }
+    if CONSOLE_SID.load(Ordering::Relaxed) == sid {
+        CONSOLE_SID.store(0, Ordering::Relaxed);
+    }
+    0
+}

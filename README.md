@@ -27,9 +27,9 @@ BusyBox / static musl binaries are **probes and regression tests**, not the prod
 1. ~~**Per-process address spaces** and a real process model~~ ✅  
 2. ~~**Threads** (`clone`, TID, futex, TLS) + signals~~ ✅ (practical slices)  
 3. ~~**Loadable kernel modules** (export table, init/exit, chardev)~~ ✅ practical (MNX1 + ELF ET_REL `.ko`)  
-4. **Phase 9–10** — Linux surface; **P10a–d** dynlink + glibc `hello_dyn` + `clone3`/TLS  
+4. **Phase 9–11** — Linux surface; **P10a–d** dynlink + **P11a** session/pgrp + console tty  
 5. **linuxkpi** — compile Linux driver `.c` ([docs/LINUXKPI.md](docs/LINUXKPI.md)); not distro `.ko` blobs  
-6. **Later** — more libc (pthread soak), PTYs/job control, sockets, graphics+input, **installable desktop**
+6. **Later** — PTY pair, sockets, graphics+input, **installable desktop**
 
 ---
 
@@ -40,7 +40,7 @@ VFS (incl. pipes/vops), and **loadable modules** (MNX1 **and** ELF64 ET_REL `.ko
 + Linux `init_module` / `delete_module` / `finit_module`, `/bin/insmod|rmmod|lsmod`,
 `hello.{mnx,ko}`, `echo.{mnx,ko}` → `/dev/echo` with unload refcount).
 
-**Phase 9a–9e** in; **P10a–d** dynlink: `dynlinktest` / `dynlinkpie` / **glibc `hello_dyn`** / `tlsclone` / glibc `clonec`. Next: pthread soak, then P11 PTYs.  
+**Phase 9a–9e** in; **P10a–d** dynlink; **P11a** `jobtest` (setsid + `isatty`). Next: PTY pair, then more job control.  
 Destination remains a **Linux desktop** (P10–P14). IDE stays built-in.
 
 ### Boot & build

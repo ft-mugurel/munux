@@ -7,7 +7,8 @@ Prompt: userspace **`$`** after boot. Kernel debug shell appears only after `exi
 **Focused feature smokes (details):**  
 [SMOKE_PREEMPT](docs/SMOKE_PREEMPT.md) · [SMOKE_CLONE](docs/SMOKE_CLONE.md) ·  
 [SMOKE_SIGNAL](docs/SMOKE_SIGNAL.md) · [SMOKE_FUTEX](docs/SMOKE_FUTEX.md) ·  
-[SMOKE_VFS](docs/SMOKE_VFS.md) · [SMOKE_MODULE](docs/SMOKE_MODULE.md)
+[SMOKE_VFS](docs/SMOKE_VFS.md) · [SMOKE_MODULE](docs/SMOKE_MODULE.md) ·  
+[SMOKE_TTY](docs/SMOKE_TTY.md)
 
 ---
 
@@ -36,6 +37,7 @@ From freestanding **`$`**:
 - [ ] `dynlinktest` — ET_EXEC + ET_DYN interp; `dynlinktest: ALL PASS`
 - [ ] `dynlinkpie` — ET_DYN PIE main + ET_DYN interp; `dynlinkpie: ALL PASS`
 - [ ] `hello_dyn` — real glibc `ld.so` + `libc.so.6`; `hello_dyn: ALL PASS`
+- [ ] `jobtest` — session/pgrp + console termios; `jobtest: ALL PASS`
 - [ ] `busybox true` — returns to `$`
 - [ ] Optional Ctrl-C: `busybox sleep 30` then **Ctrl+C** → back to `$` (shell stays alive)
 

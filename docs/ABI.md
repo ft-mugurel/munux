@@ -5,7 +5,7 @@ This document freezes conventions for userspace and the kernel.
 
 | Field | Value |
 |-------|--------|
-| **Status** | **v0.3.9** — P10d clone3 + CLONE_SETTLS |
+| **Status** | **v0.3.10** — P11a session/pgrp + console termios |
 | **Arch** | **x86_64** only on `main` |
 | **Goal** | Linux userspace (static musl today, glibc + a **desktop** later) uses the **same numbers, structs, and register ABI** as Linux; missing calls return **`-ENOSYS`**. Internals may differ; **results must match**. |
 
@@ -35,7 +35,7 @@ Same as Linux x86_64:
 
 Reference: Linux `arch/x86/entry/syscalls/syscall_64.tbl`.  
 Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` constants).  
-**96** numbers are dispatched (quality varies: full / partial / stub). Guest `uname` strings are still `sysname=munux`, `release=0.2.0`, `version=munux 0.2 x86_64` (independent of this ABI doc version).
+**101** numbers are dispatched (quality varies: full / partial / stub). Guest `uname` strings are still `sysname=munux`, `release=0.2.0`, `version=munux 0.2 x86_64` (independent of this ABI doc version).
 
 | # | Linux name | munux status |
 |--:|------------|--------------|
@@ -55,7 +55,7 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` consta
 | 13 | `rt_sigaction` | done (handler / `SIG_IGN` / `SIG_DFL`; no full `siginfo`) |
 | 14 | `rt_sigprocmask` | done (64-bit mask) |
 | 15 | `rt_sigreturn` | done (restorer trampoline) |
-| 16 | `ioctl` | **partial** (TTY probes) |
+| 16 | `ioctl` | done (P11a; console `TCGETS`/`TCGETS2`/winsize/pgrp/`TIOCSCTTY`) |
 | 17 | `pread64` | done (ld.so) |
 | 19 | `readv` | done |
 | 20 | `writev` | done |
@@ -72,7 +72,7 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` consta
 | 59 | `execve` | done (ELF64; argv; envp ignored; nested enter) |
 | 60 | `exit` | done (one task → zombie; clear_child_tid wake) |
 | 61 | `wait4` | done |
-| 62 | `kill` | done (process-directed; default terminate + handlers) |
+| 62 | `kill` | done (process / `pid==0` / `-pgid` group; default terminate + handlers) |
 | 63 | `uname` | done (`sysname=munux`; see strings above) |
 | 72 | `fcntl` | partial (GET/SET FD/FL, DUPFD) |
 | 79 | `getcwd` | done |
@@ -94,8 +94,13 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` consta
 | 106 | `setgid` | **stub** (no-op) |
 | 107 | `geteuid` | done |
 | 108 | `getegid` | done (0) |
+| 109 | `setpgid` | done (P11a; self/child, same session) |
 | 110 | `getppid` | done |
+| 111 | `getpgrp` | done (P11a) |
+| 112 | `setsid` | done (P11a; new sid=pgid=pid, drop ctty) |
 | 115 | `getgroups` | done |
+| 121 | `getpgid` | done (P11a) |
+| 124 | `getsid` | done (P11a) |
 | 157 | `prctl` | done (P9d; name/dumpable/nnp/pdeathsig/seccomp-get/ptracer) |
 | 158 | `arch_prctl` | done (`ARCH_SET/GET_FS/GS`; TLS) |
 | 162 | `sync` | **stub** (no-op; write-through FS) |
@@ -137,8 +142,8 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` consta
 | 435 | `clone3` | done (P10d; `clone_args` flags…tls; stack+size; child inherits GPRs) |
 
 **Notable still ENOSYS** (among others): `pselect6`, `epoll_pwait`,
-`vfork`, `dup3`, `statfs`, `getpriority`/`setpriority`,
-`setpgid`/`getpgrp`/`setsid`, sockets. Full matrix: **[SYSCALL_COMPARE.md](SYSCALL_COMPARE.md)**.
+`vfork`, `dup3`, `statfs`, `getpriority`/`setpriority`, sockets.
+Full matrix: **[SYSCALL_COMPARE.md](SYSCALL_COMPARE.md)**.
 
 Unimplemented numbers return **`-ENOSYS` (`-38`)** and log `syscall: ENOSYS n=…`.
 
@@ -213,7 +218,9 @@ Common errno values:
 | `exit` | One task → zombie; parent woken |
 | `exit_group` | Tear down thread group; one zombie for wait |
 | `wait4` | Reap zombie; schedules Ready children cooperatively |
-| Signals | `kill`/`tkill`/`tgkill`, `rt_sigaction`/`rt_sigprocmask`/`rt_sigreturn`; default terminate + user handlers |
+| Signals | `kill`/`tkill`/`tgkill`, `rt_sigaction`/`rt_sigprocmask`/`rt_sigreturn`; default terminate + user handlers; `kill(-pgid)` |
+| Session | `sid`/`pgid` on PCB; `setsid`/`setpgid`/`getpgrp`/`getpgid`/`getsid`; fork inherits |
+| TTY | Console stdio is a tty: `isatty`, termios, winsize 80×25, `TIOCSCTTY`/`TIOCGPGRP`; no PTY pair yet |
 | Futex | `FUTEX_WAIT`/`WAKE`/`REQUEUE`/`CMP_REQUEUE` (+PRIVATE, relative timeout); `clear_child_tid` wake on exit |
 | cwd | Per-process (not yet real `CLONE_FS` object share) |
 | TLS | Per-task `fs_base` / `gs_base`; `arch_prctl`; `CLONE_SETTLS`; do not reload FS/GS selectors on enter (would clear base MSRs) |
@@ -261,7 +268,8 @@ Foundation for threads is in; polish and next architecture:
 3. ~~Signals (`rt_sigreturn`, delivery, `tgkill`, Ctrl-C)~~ ✅ (practical slices)  
 4. Full signal frames (`siginfo`/`ucontext`), absolute/PI futex, musl pthread soak  
 5. ~~`pipe`/`dup`, `rename`/`link`, VFS + modules~~ ✅ P7–P8c  
-6. ~~`readlink`/`symlink`/`statx`~~ ✅ P9a; ~~file mmap~~ ✅ P9b; ~~poll/select/epoll~~ ✅ P9c; ~~`execveat`/`prctl`~~ ✅ P9d; ~~file-map ELF + `MAP_SHARED`~~ ✅ P9e
+6. ~~`readlink`/`symlink`/`statx`~~ ✅ P9a; ~~file mmap~~ ✅ P9b; ~~poll/select/epoll~~ ✅ P9c; ~~`execveat`/`prctl`~~ ✅ P9d; ~~file-map ELF + `MAP_SHARED`~~ ✅ P9e  
+7. ~~session/pgrp + console termios~~ ✅ P11a; PTY pair (`ptmx`/`pts`) still open
 
 Using **wrong syscall numbers** would make Linux binaries impossible — munux keeps Linux numbers from v0.2 forward.
 
@@ -287,3 +295,4 @@ Using **wrong syscall numbers** would make Linux binaries impossible — munux k
 | **0.3.7** | P10b: `ET_DYN` load bias; smoke `dynlinkpie` |
 | **0.3.8** | P10c: glibc `ld.so`+`libc` `hello_dyn`; pread64/getrandom/prlimit64/rseq/robust_list |
 | **0.3.9** | P10d: `clone3` + `CLONE_SETTLS` + GPR inherit; smokes `tlsclone` / glibc `clonec` |
+| **0.3.10** | P11a: `setsid`/`setpgid`/`getpgrp`/`getpgid`/`getsid`; console termios + `TIOCSCTTY`; smoke `jobtest` |

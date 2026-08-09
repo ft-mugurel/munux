@@ -1,16 +1,16 @@
 # Linux x86_64 syscalls vs munux
 
-**Last updated:** 2026-08-09 (P10d: 96 dispatched; `clone3` + SETTLS).  
+**Last updated:** 2026-08-09 (P11a: 101 dispatched; session/pgrp + console termios).  
 Source of Linux names/numbers: host `/usr/include/asm/unistd_64.h`.  
 Source of munux set: `src/syscalls/mod.rs` dispatch `match` (not merely `num` constants — `READLINK` is defined but ENOSYS).
 
-**Product goal:** install and use a **Linux desktop** on munux (clang vs gcc: same results, different kernel). Coverage **96 / 385** is a **progress metric** toward that — implement what userspace needs with Linux semantics; do not treat “architecture only” as done. See [ROADMAP.md](ROADMAP.md).
+**Product goal:** install and use a **Linux desktop** on munux (clang vs gcc: same results, different kernel). Coverage **101 / 385** is a **progress metric** toward that — implement what userspace needs with Linux semantics; do not treat “architecture only” as done. See [ROADMAP.md](ROADMAP.md).
 
 | Metric | Value |
 |--------|------:|
 | Linux (unistd_64.h) | **385** |
-| munux dispatched | **96** |
-| Coverage | **24.9%** |
+| munux dispatched | **101** |
+| Coverage | **26.2%** |
 | Notable ENOSYS | `vfork`/`pselect6`/sockets/… |
 
 Legend in the tables below: implemented rows list munux notes; “NOT in munux” means **`-ENOSYS`**.
@@ -35,7 +35,7 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 13 | `rt_sigaction` | RT_SIGACTION | done (handler / IGN / DFL) |
 | 14 | `rt_sigprocmask` | RT_SIGPROCMASK | done (64-bit mask) |
 | 15 | `rt_sigreturn` | RT_SIGRETURN | done (restorer) |
-| 16 | `ioctl` | IOCTL | partial (TTY probes) |
+| 16 | `ioctl` | IOCTL | done (P11a; console termios/winsize/pgrp/ctty) |
 | 17 | `pread64` | PREAD64 | done (P10c; ld.so) |
 | 19 | `readv` | READV | implemented |
 | 20 | `writev` | WRITEV | implemented |
@@ -52,7 +52,7 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 59 | `execve` | EXECVE | implemented |
 | 60 | `exit` | EXIT | implemented (+ clear_child_tid wake) |
 | 61 | `wait4` | WAIT4 | implemented |
-| 62 | `kill` | KILL | done (process-directed) |
+| 62 | `kill` | KILL | done (process + `pid<=0` pgrp) |
 | 63 | `uname` | UNAME | implemented |
 | 72 | `fcntl` | FCNTL | partial |
 | 79 | `getcwd` | GETCWD | implemented |
@@ -74,8 +74,13 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 106 | `setgid` | SETGID | stub |
 | 107 | `geteuid` | GETEUID | implemented |
 | 108 | `getegid` | GETEGID | implemented (0) |
+| 109 | `setpgid` | SETPGID | done (P11a; self/child, same session) |
 | 110 | `getppid` | GETPPID | implemented |
+| 111 | `getpgrp` | GETPGRP | done (P11a) |
+| 112 | `setsid` | SETSID | done (P11a) |
 | 115 | `getgroups` | GETGROUPS | implemented |
+| 121 | `getpgid` | GETPGID | done (P11a) |
+| 124 | `getsid` | GETSID | done (P11a) |
 | 157 | `prctl` | PRCTL | done (P9d; name/dumpable/nnp/pdeathsig) |
 | 158 | `arch_prctl` | ARCH_PRCTL | implemented |
 | 162 | `sync` | SYNC | stub (no-op) |
@@ -124,10 +129,6 @@ Among many others, these were previously over-claimed as implemented in older do
 |--:|------|------|
 | 58 | `vfork` | not dispatched (use `fork`) |
 | 99 | `sysinfo` | not dispatched |
-| 109 | `setpgid` | not dispatched |
-| 111 | `getpgrp` | not dispatched |
-| 112 | `setsid` | not dispatched |
-| 121 | `getpgid` | not dispatched |
 | 137 | `statfs` | not dispatched |
 | 138 | `fstatfs` | not dispatched |
 | 140 | `getpriority` | not dispatched |
@@ -200,7 +201,6 @@ Full remaining list (alphabetical by number):
 | 120 | `getresgid` |
 | 122 | `setfsuid` |
 | 123 | `setfsgid` |
-| 124 | `getsid` |
 | 125 | `capget` |
 | 126 | `capset` |
 | 127 | `rt_sigpending` |

@@ -57,7 +57,7 @@ fn is_blocked(p: &super::pcb::Process, sig: u32) -> bool {
 /// process-directed `kill`.
 pub fn proc_kill(pid: Pid, sig: u32) -> i32 {
     if pid <= 0 {
-        return -3; // ESRCH (we do not support process groups yet)
+        return -3; // ESRCH (pgrp form is proc_kill_pgrp)
     }
     if sig == 0 {
         return if find_task(pid).is_some() { 0 } else { -3 };
@@ -80,6 +80,46 @@ pub fn proc_kill(pid: Pid, sig: u32) -> i32 {
 
     // Queue on the specific task (or leader if only tgid matched).
     queue_or_ignore(target.0, sig)
+}
+
+/// `kill(-pgid, sig)` / `kill(0, sig)` — every process in that group.
+pub fn proc_kill_pgrp(pgid: Pid, sig: u32) -> i32 {
+    if pgid <= 0 {
+        return -22;
+    }
+    let mut tgids = [0i32; super::pcb::MAX_PROCESSES];
+    let mut n = 0usize;
+    table::for_each_process(|_, p| {
+        if !p.used || p.pgid != pgid || p.state == ProcessState::Zombie {
+            return;
+        }
+        let tg = if p.tgid != 0 { p.tgid } else { p.pid };
+        let mut seen = false;
+        for t in tgids.iter().take(n) {
+            if *t == tg {
+                seen = true;
+                break;
+            }
+        }
+        if !seen && n < tgids.len() {
+            tgids[n] = tg;
+            n += 1;
+        }
+    });
+    if n == 0 {
+        return -3;
+    }
+    if sig == 0 {
+        return 0;
+    }
+    if !valid_sig(sig) {
+        return -22;
+    }
+    let mut last = 0i32;
+    for t in tgids.iter().take(n) {
+        last = proc_kill(*t, sig);
+    }
+    last
 }
 
 /// Thread-directed: must match exact tid.

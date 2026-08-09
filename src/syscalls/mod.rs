@@ -49,6 +49,11 @@ pub mod num {
     pub const GETCWD: u64 = 79;
     pub const CHDIR: u64 = 80;
     pub const GETPPID: u64 = 110;
+    pub const SETPGID: u64 = 109;
+    pub const GETPGRP: u64 = 111;
+    pub const SETSID: u64 = 112;
+    pub const GETPGID: u64 = 121;
+    pub const GETSID: u64 = 124;
     pub const EXIT_GROUP: u64 = 231; // musl/glibc often use this
     pub const UNAME: u64 = 63;
     pub const GETDENTS64: u64 = 217;
@@ -120,6 +125,7 @@ pub mod num {
 mod errno {
     pub const EPERM: i64 = 1;
     pub const ENOENT: i64 = 2;
+    pub const ESRCH: i64 = 3;
     pub const ENOEXEC: i64 = 8;
     pub const EBADF: i64 = 9;
     pub const ECHILD: i64 = 10;
@@ -534,6 +540,11 @@ pub extern "C" fn syscall_dispatch(
                 pp as u64
             }
         }
+        num::GETPGRP => sys_getpgrp(),
+        num::GETPGID => sys_getpgid(a1),
+        num::SETPGID => sys_setpgid(a1, a2),
+        num::SETSID => sys_setsid(),
+        num::GETSID => sys_getsid(a1),
         num::STAT => sys_stat(a1, a2),
         num::LSTAT => sys_lstat(a1, a2),
         num::FSTAT => sys_fstat(a1, a2),
@@ -767,7 +778,16 @@ fn sig_ret(r: i32) -> u64 {
 }
 
 fn sys_kill(pid: u64, sig: u64) -> u64 {
-    sig_ret(crate::process::signal_queue::proc_kill(pid as i32, sig as u32))
+    let pid = pid as i32;
+    let sig = sig as u32;
+    if pid < 0 {
+        sig_ret(crate::process::signal_queue::proc_kill_pgrp(-pid, sig))
+    } else if pid == 0 {
+        let pg = crate::process::with_current(|p| p.pgid).unwrap_or(0);
+        sig_ret(crate::process::signal_queue::proc_kill_pgrp(pg, sig))
+    } else {
+        sig_ret(crate::process::signal_queue::proc_kill(pid, sig))
+    }
 }
 
 fn sys_tkill(tid: u64, sig: u64) -> u64 {
@@ -1570,9 +1590,292 @@ fn sys_readv(fd: u64, iov_ptr: u64, iovcnt: u64) -> u64 {
     total
 }
 
-/// Linux ioctl(2) — stub: console is not a TTY; musl accepts ENOTTY for TIOCGWINSZ.
-fn sys_ioctl(_fd: u64, _cmd: u64, _arg: u64) -> u64 {
-    errno::neg(errno::ENOTTY)
+/// Linux ioctl(2) — console is a tty (P11a). Other fds → ENOTTY.
+fn sys_ioctl(fd: u64, cmd: u64, arg: u64) -> u64 {
+    const TCGETS: u64 = 0x5401;
+    const TCSETS: u64 = 0x5402;
+    const TCSETSW: u64 = 0x5403;
+    const TCSETSF: u64 = 0x5404;
+    // glibc isatty/tcgetattr: _IOR('T', 0x2A, struct termios2)
+    const TCGETS2: u64 = 0x802c_542a;
+    const TCSETS2: u64 = 0x402c_542b;
+    const TCSETSW2: u64 = 0x402c_542c;
+    const TCSETSF2: u64 = 0x402c_542d;
+    const TERMIOS2_LEN: usize = 44;
+    const TIOCSCTTY: u64 = 0x540E;
+    const TIOCGPGRP: u64 = 0x540F;
+    const TIOCSPGRP: u64 = 0x5410;
+    const TIOCGWINSZ: u64 = 0x5413;
+    const TIOCSWINSZ: u64 = 0x5414;
+    const TIOCNOTTY: u64 = 0x5422;
+    const TIOCGSID: u64 = 0x5429;
+
+    if crate::fd::sys_fd_stat(fd).is_err() {
+        return errno::neg(errno::EBADF);
+    }
+    if !crate::fd::sys_fd_is_console(fd) {
+        return errno::neg(errno::ENOTTY);
+    }
+
+    match cmd {
+        TCGETS => {
+            if !user_ptr_ok(arg, crate::tty::TERMIOS_LEN as u64) {
+                return errno::neg(errno::EFAULT);
+            }
+            let mut buf = [0u8; crate::tty::TERMIOS_LEN];
+            crate::tty::console_get_termios(&mut buf);
+            unsafe {
+                core::ptr::copy_nonoverlapping(buf.as_ptr(), arg as *mut u8, buf.len());
+            }
+            0
+        }
+        TCGETS2 => {
+            if !user_ptr_ok(arg, TERMIOS2_LEN as u64) {
+                return errno::neg(errno::EFAULT);
+            }
+            let mut buf = [0u8; TERMIOS2_LEN];
+            crate::tty::console_get_termios(&mut buf[..crate::tty::TERMIOS_LEN]);
+            buf[36..40].copy_from_slice(&38400u32.to_le_bytes());
+            buf[40..44].copy_from_slice(&38400u32.to_le_bytes());
+            unsafe {
+                core::ptr::copy_nonoverlapping(buf.as_ptr(), arg as *mut u8, buf.len());
+            }
+            0
+        }
+        TCSETS | TCSETSW | TCSETSF => {
+            if !user_ptr_ok(arg, crate::tty::TERMIOS_LEN as u64) {
+                return errno::neg(errno::EFAULT);
+            }
+            let mut buf = [0u8; crate::tty::TERMIOS_LEN];
+            unsafe {
+                core::ptr::copy_nonoverlapping(arg as *const u8, buf.as_mut_ptr(), buf.len());
+            }
+            crate::tty::console_set_termios(&buf);
+            0
+        }
+        TCSETS2 | TCSETSW2 | TCSETSF2 => {
+            if !user_ptr_ok(arg, TERMIOS2_LEN as u64) {
+                return errno::neg(errno::EFAULT);
+            }
+            let mut buf = [0u8; crate::tty::TERMIOS_LEN];
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    arg as *const u8,
+                    buf.as_mut_ptr(),
+                    crate::tty::TERMIOS_LEN,
+                );
+            }
+            crate::tty::console_set_termios(&buf);
+            0
+        }
+        TIOCGWINSZ => {
+            if !user_ptr_ok(arg, 8) {
+                return errno::neg(errno::EFAULT);
+            }
+            let (rows, cols) = crate::tty::console_winsize();
+            unsafe {
+                core::ptr::write_volatile(arg as *mut u16, rows);
+                core::ptr::write_volatile((arg + 2) as *mut u16, cols);
+                core::ptr::write_volatile((arg + 4) as *mut u16, 0);
+                core::ptr::write_volatile((arg + 6) as *mut u16, 0);
+            }
+            0
+        }
+        TIOCSWINSZ => {
+            if !user_ptr_ok(arg, 8) {
+                return errno::neg(errno::EFAULT);
+            }
+            0 // accept; VGA size is fixed
+        }
+        TIOCGPGRP => {
+            if !user_ptr_ok(arg, 4) {
+                return errno::neg(errno::EFAULT);
+            }
+            let fg = crate::tty::console_fg_pgid();
+            unsafe {
+                core::ptr::write_volatile(arg as *mut i32, fg);
+            }
+            0
+        }
+        TIOCSPGRP => {
+            if !user_ptr_ok(arg, 4) {
+                return errno::neg(errno::EFAULT);
+            }
+            let pg = unsafe { core::ptr::read_volatile(arg as *const i32) };
+            if pg <= 0 {
+                return errno::neg(errno::EINVAL);
+            }
+            let sid = crate::process::with_current(|p| p.sid).unwrap_or(0);
+            let ok = pgrp_in_session(pg, sid);
+            if !ok {
+                return errno::neg(errno::EPERM);
+            }
+            crate::tty::set_console_fg_pgid(pg);
+            0
+        }
+        TIOCSCTTY => {
+            let steal = arg != 0;
+            match crate::tty::tiocsctty(steal) {
+                0 => 0,
+                e if e < 0 => e as u64,
+                _ => errno::neg(errno::EPERM),
+            }
+        }
+        TIOCNOTTY => match crate::tty::tiocnotty() {
+            0 => 0,
+            e if e < 0 => e as u64,
+            _ => errno::neg(errno::ENOTTY),
+        },
+        TIOCGSID => {
+            if !user_ptr_ok(arg, 4) {
+                return errno::neg(errno::EFAULT);
+            }
+            let sid = crate::tty::console_sid();
+            if sid <= 0 {
+                return errno::neg(errno::ENOTTY);
+            }
+            unsafe {
+                core::ptr::write_volatile(arg as *mut i32, sid);
+            }
+            0
+        }
+        _ => errno::neg(errno::ENOTTY),
+    }
+}
+
+fn pgrp_in_session(pgid: i32, sid: i32) -> bool {
+    let mut found = false;
+    crate::process::table::for_each_process(|_, p| {
+        if p.used && p.pgid == pgid && p.sid == sid {
+            found = true;
+        }
+    });
+    found
+}
+
+fn sys_getpgrp() -> u64 {
+    crate::process::with_current(|p| p.pgid).unwrap_or(0) as u64
+}
+
+fn lookup_task_sid_pgid(pid: i32) -> Option<(i32, i32, i32)> {
+    crate::process::table::with_pid(pid, |p| (p.pid, p.sid, p.pgid)).or_else(|| {
+        // Also match tgid (process-directed id).
+        let mut hit = None;
+        crate::process::table::for_each_process(|_, p| {
+            if hit.is_none() && p.used && p.tgid == pid {
+                hit = Some((p.pid, p.sid, p.pgid));
+            }
+        });
+        hit
+    })
+}
+
+fn sys_getpgid(pid: u64) -> u64 {
+    let pid = pid as i32;
+    if pid < 0 {
+        return errno::neg(errno::EINVAL);
+    }
+    let target = if pid == 0 {
+        crate::process::gettid()
+    } else {
+        pid
+    };
+    match lookup_task_sid_pgid(target) {
+        Some((_, _, pgid)) => pgid as u64,
+        None => errno::neg(errno::ESRCH),
+    }
+}
+
+fn sys_getsid(pid: u64) -> u64 {
+    let pid = pid as i32;
+    if pid < 0 {
+        return errno::neg(errno::EINVAL);
+    }
+    let target = if pid == 0 {
+        crate::process::gettid()
+    } else {
+        pid
+    };
+    match lookup_task_sid_pgid(target) {
+        Some((_, sid, _)) => sid as u64,
+        None => errno::neg(errno::ESRCH),
+    }
+}
+
+fn sys_setpgid(pid: u64, pgid: u64) -> u64 {
+    let pid_in = pid as i32;
+    let pgid_in = pgid as i32;
+    if pid_in < 0 || pgid_in < 0 {
+        return errno::neg(errno::EINVAL);
+    }
+    let me = crate::process::gettid();
+    let me_tgid = crate::process::getpid();
+    let me_sid = crate::process::with_current(|p| p.sid).unwrap_or(0);
+    let target_pid = if pid_in == 0 { me } else { pid_in };
+    let Some((t_pid, t_sid, t_pgid)) = lookup_task_sid_pgid(target_pid) else {
+        return errno::neg(errno::ESRCH);
+    };
+    let new_pgid = if pgid_in == 0 { t_pid } else { pgid_in };
+    if t_sid != me_sid {
+        return errno::neg(errno::EPERM);
+    }
+    let t_parent = crate::process::table::with_pid(t_pid, |p| p.parent).unwrap_or(-1);
+    let t_tgid = crate::process::table::with_pid(t_pid, |p| p.tgid).unwrap_or(t_pid);
+    let is_self = t_pid == me || t_tgid == me_tgid;
+    let is_child = t_parent == me || t_parent == me_tgid;
+    if !is_self && !is_child {
+        return errno::neg(errno::EPERM);
+    }
+    let t_sid2 = t_sid;
+    let is_session_leader =
+        crate::process::table::with_pid(t_pid, |p| p.pid == p.sid).unwrap_or(false);
+    if is_session_leader && new_pgid != t_pgid {
+        return errno::neg(errno::EPERM);
+    }
+    if new_pgid != t_pid && !pgrp_in_session(new_pgid, t_sid2) {
+        return errno::neg(errno::EPERM);
+    }
+    // Apply to the whole thread group of the target.
+    let tgid = crate::process::table::with_pid(t_pid, |p| p.tgid).unwrap_or(t_pid);
+    for i in 0..crate::process::pcb::MAX_PROCESSES {
+        let _ = crate::process::table::with_index(i, |p| {
+            if p.used && p.tgid == tgid {
+                p.pgid = new_pgid;
+            }
+        });
+    }
+    0
+}
+
+fn sys_setsid() -> u64 {
+    let (pid, pgid, tgid) =
+        crate::process::with_current(|p| (p.pid, p.pgid, p.tgid)).unwrap_or((0, 0, 0));
+    if pid <= 0 {
+        return errno::neg(errno::EPERM);
+    }
+    if pgid == pid {
+        return errno::neg(errno::EPERM);
+    }
+    // Fail if any other process already uses our pid as its pgid.
+    let mut clash = false;
+    crate::process::table::for_each_process(|_, p| {
+        if p.used && p.pid != pid && p.pgid == pid {
+            clash = true;
+        }
+    });
+    if clash {
+        return errno::neg(errno::EPERM);
+    }
+    for i in 0..crate::process::pcb::MAX_PROCESSES {
+        let _ = crate::process::table::with_index(i, |p| {
+            if p.used && p.tgid == tgid {
+                p.sid = pid;
+                p.pgid = pid;
+                p.ctty = 0;
+            }
+        });
+    }
+    pid as u64
 }
 
 fn sys_read(fd: u64, buf: u64, len: u64) -> u64 {
