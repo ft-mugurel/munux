@@ -1,6 +1,6 @@
 # Linux driver sources on munux (linuxkpi)
 
-**Status:** L0–L3 **done** (2026-08-09). Next: L4 `ioremap` + virtio/PCI probe, then try virtio-blk.  
+**Status:** L0–L4 **done** (2026-08-09). Next: L5 virtio-blk (first hardware Linux driver).  
 **Success bar (chosen):** **compile Linux driver `.c` sources** against munux headers, `insmod` the resulting ELF `.ko`, and have the device work.  
 **Not the bar:** drop a prebuilt Ubuntu/Fedora `.ko` into `/lib/modules` and have it load. That needs one exact Linux kernel ABI (vermagic + thousands of `EXPORT_SYMBOL`s + identical struct layouts).
 
@@ -152,14 +152,15 @@ After L2, **new modules are C + linuxkpi only.** Do not load NASM `echo.ko` and 
 
 **Exit:** `insmod /lib/modules/irqtest.ko` → `irqtest: got IRQ0 (timer) PASS`. ✅ qemu-connect 2026-08-09.
 
-### L4 — MMIO + bus probe
+### L4 — MMIO + bus probe ✅
 
 - `ioremap` / `iounmap`, `readl` / `writel` / `ioread32` / `iowrite32`
 - Identity-map or dedicated MMIO PTEs (today’s kernel window is low identity — PCI BARs may need explicit maps)
 - **Virtio-mmio** first (QEMU `-device virtio-blk-device,disable-legacy=on`) **or** a minimal PCI enum (`pci_read_config_*`, `pci_enable_device`, `pci_iomap`)
 - `dma_alloc_coherent`: start with **identity-capable** pages (no IOMMU)
 
-**Exit:** munux sees the virtio/PCI device and linuxkpi probe function runs (can still be a stub driver we wrote in Linux style).
+**Exit:** munux sees PCI devices and a linuxkpi probe runs. ✅  
+`insmod /lib/modules/vprobe.ko` → Intel/VGA (and **virtio** when QEMU has `-device virtio-blk-pci`, as in `make run`). qemu-connect (IDE-only) still PASSes on i440FX.
 
 ### L5 — First real Linux driver
 
@@ -231,8 +232,9 @@ Do **not** pause Phase 9 forever. Interleave:
 1. ~~**L0 + L1** loader + printk/kmalloc `hello.c`~~ ✅  
 2. ~~**L2** echo as Linux C miscdevice~~ ✅  
 3. ~~**L3** spinlock / wait / `request_irq`~~ ✅ `irqtest.ko`  
-4. **L4–L5** virtio probe → **try virtio-blk** (tell user — first hardware driver)  
-5. **P9** `execveat` / `prctl` — can interleave  
+4. ~~**L4** ioremap + PCI `pci_register_driver`~~ ✅ `vprobe.ko`  
+5. **L5 virtio-blk** — first hardware Linux driver (tell user when ready)  
+6. **P9** `execveat` / `prctl` — can interleave  
 
 ---
 

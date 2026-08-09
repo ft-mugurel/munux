@@ -110,6 +110,18 @@ const EXPORT_NAMES: &[&str] = &[
     "__spin_unlock_irqrestore",
     "mutex_lock",
     "mutex_unlock",
+    "ioremap",
+    "iounmap",
+    "dma_alloc_coherent",
+    "dma_free_coherent",
+    "pci_register_driver",
+    "pci_unregister_driver",
+    "pci_enable_device",
+    "pci_disable_device",
+    "pci_read_config_dword",
+    "pci_write_config_dword",
+    "pci_iomap",
+    "pci_iounmap",
 ];
 
 /// Look up an exported symbol by name. Returns absolute address or None.
@@ -155,6 +167,18 @@ pub fn lookup(name: &str) -> Option<u64> {
         }
         "mutex_lock" => Some(linuxkpi::sync::mutex_lock as usize as u64),
         "mutex_unlock" => Some(linuxkpi::sync::mutex_unlock as usize as u64),
+        "ioremap" => Some(linuxkpi::mmio::ioremap as usize as u64),
+        "iounmap" => Some(linuxkpi::mmio::iounmap as usize as u64),
+        "dma_alloc_coherent" => Some(linuxkpi::mmio::dma_alloc_coherent as usize as u64),
+        "dma_free_coherent" => Some(linuxkpi::mmio::dma_free_coherent as usize as u64),
+        "pci_register_driver" => Some(linuxkpi::pci::pci_register_driver as usize as u64),
+        "pci_unregister_driver" => Some(linuxkpi::pci::pci_unregister_driver as usize as u64),
+        "pci_enable_device" => Some(linuxkpi::pci::pci_enable_device as usize as u64),
+        "pci_disable_device" => Some(linuxkpi::pci::pci_disable_device as usize as u64),
+        "pci_read_config_dword" => Some(linuxkpi::pci::pci_read_config_dword as usize as u64),
+        "pci_write_config_dword" => Some(linuxkpi::pci::pci_write_config_dword as usize as u64),
+        "pci_iomap" => Some(linuxkpi::pci::pci_iomap as usize as u64),
+        "pci_iounmap" => Some(linuxkpi::pci::pci_iounmap as usize as u64),
         _ => None,
     }
 }

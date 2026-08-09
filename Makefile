@@ -315,12 +315,14 @@ MODULE_ECHO_C		=	modules/linux/echo.c
 MODULE_ECHO_C_KO	=	build/rootfs/lib/modules/echo_c.ko
 MODULE_IRQTEST_C	=	modules/linux/irqtest.c
 MODULE_IRQTEST_KO	=	build/rootfs/lib/modules/irqtest.ko
+MODULE_VPROBE_C		=	modules/linux/vprobe.c
+MODULE_VPROBE_KO	=	build/rootfs/lib/modules/vprobe.ko
 LINUXKPI_CFLAGS		=	-ffreestanding -fno-stack-protector -fno-pic -fno-plt \
 				-mcmodel=large -mno-red-zone -fno-asynchronous-unwind-tables \
 				-fno-exceptions -fno-common -mno-mmx -mno-sse -mno-sse2 \
 				-O2 -Wall -Iinclude
 
-modules: ${MODULE_HELLO_MNX} ${MODULE_ECHO_MNX} ${MODULE_HELLO_KO} ${MODULE_ECHO_KO} ${MODULE_HELLO_C_KO} ${MODULE_ECHO_C_KO} ${MODULE_IRQTEST_KO}
+modules: ${MODULE_HELLO_MNX} ${MODULE_ECHO_MNX} ${MODULE_HELLO_KO} ${MODULE_ECHO_KO} ${MODULE_HELLO_C_KO} ${MODULE_ECHO_C_KO} ${MODULE_IRQTEST_KO} ${MODULE_VPROBE_KO}
 
 ${MODULE_HELLO_MNX}: ${MODULE_HELLO_ASM}
 	$(call require_tool,$(NASM),nasm)
@@ -363,6 +365,12 @@ ${MODULE_IRQTEST_KO}: ${MODULE_IRQTEST_C} include/linux/interrupt.h include/linu
 	@mkdir -p build/rootfs/lib/modules
 	@${CC} ${LINUXKPI_CFLAGS} -c -o ${MODULE_IRQTEST_KO} ${MODULE_IRQTEST_C}
 	@echo -e "$(BOLD)$(GREEN)[✓] MODULE irqtest.ko (linuxkpi IRQ0)$(RESET)"
+
+${MODULE_VPROBE_KO}: ${MODULE_VPROBE_C} include/linux/pci.h include/linux/mod_devicetable.h include/linux/io.h
+	$(call require_tool,$(CC),gcc)
+	@mkdir -p build/rootfs/lib/modules
+	@${CC} ${LINUXKPI_CFLAGS} -c -o ${MODULE_VPROBE_KO} ${MODULE_VPROBE_C}
+	@echo -e "$(BOLD)$(GREEN)[✓] MODULE vprobe.ko (linuxkpi PCI)$(RESET)"
 
 disk: userland modules
 	@mkdir -p build/rootfs/docs build/rootfs/bin build/rootfs/lib/modules
@@ -420,11 +428,19 @@ iso-full: build
 #   index 1 = GRUB ISO (cdrom)
 # Do not put two drives on index 0 — QEMU errors: "drive with bus=0, unit=0 exists"
 # Primary master = ext2 disk; IDE index 1 = GRUB ISO (cdrom)
-run-iso: iso disk
+VDA_IMG		=	build/vda.img
+
+$(VDA_IMG):
+	@mkdir -p build
+	@dd if=/dev/zero of=${VDA_IMG} bs=1M count=8 status=none
+
+run-iso: iso disk $(VDA_IMG)
 	$(call require_tool,$(QEMU_SYSTEM),qemu-system-x86_64)
 	@${QEMU_SYSTEM} -m 512M \
 		-drive format=raw,file=${DISK_IMG},if=ide,index=0,media=disk \
 		-drive format=raw,file=${ISO_OUT},if=ide,index=1,media=cdrom \
+		-drive format=raw,file=${VDA_IMG},if=none,id=vd0 \
+		-device virtio-blk-pci,drive=vd0 \
 		-boot order=d \
 		-monitor stdio
 	@echo -e "\n$(BOLD)$(CYAN)[✓] KERNEL EXIT DONE$(RESET)"

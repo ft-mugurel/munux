@@ -1,4 +1,4 @@
-//! Linux kernel C API shims (linuxkpi L1–L2).
+//! Linux kernel C API shims (linuxkpi L1–L4).
 //!
 //! Modules resolve these by **name** via `module::export` (not the Rust crate ABI).
 //! Keep signatures C-compatible. Do not `#[no_mangle]` names that collide with
@@ -6,6 +6,8 @@
 
 pub mod fs;
 pub mod irq;
+pub mod mmio;
+pub mod pci;
 pub mod sync;
 pub mod uaccess;
 

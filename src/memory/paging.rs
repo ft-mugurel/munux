@@ -12,8 +12,11 @@ use crate::memory::pmm::{self, PhysAddr, FRAME_SIZE, KERNEL_LOAD_BASE};
 pub const PAGE_PRESENT: u64 = 1 << 0;
 pub const PAGE_WRITABLE: u64 = 1 << 1;
 pub const PAGE_USER: u64 = 1 << 2;
+pub const PAGE_PWT: u64 = 1 << 3;
+pub const PAGE_PCD: u64 = 1 << 4;
 pub const PAGE_SIZE_2M: u64 = 1 << 7; // PS bit in PD entry
 pub const PAGE_KERNEL_RW: u64 = PAGE_PRESENT | PAGE_WRITABLE;
+pub const PAGE_KERNEL_MMIO: u64 = PAGE_PRESENT | PAGE_WRITABLE | PAGE_PWT | PAGE_PCD;
 
 const ENTRY_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 const ENTRIES: usize = 512;

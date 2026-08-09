@@ -133,6 +133,7 @@ pub extern "C" fn kmain() -> ! {
     console::print("IRQs ON  IDT gates=");
     console::write_u64(present_gate_count() as u64);
     console::println("");
+    linuxkpi::pci::init();
 
     fd::init();
     console::print("fd: stdio installed open=");

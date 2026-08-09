@@ -27,6 +27,8 @@ $ echotest                         # PASS + EBUSY while open
 $ rmmod echo
 $ insmod /lib/modules/irqtest.ko   # linuxkpi: "irqtest: got IRQ0 (timer) PASS"
 $ rmmod irqtest
+$ insmod /lib/modules/vprobe.ko    # PCI: Intel/VGA (+ virtio if QEMU has virtio-blk-pci)
+$ rmmod vprobe
 $ insmod /lib/modules/hello.ko
 $ lsmod
 $ rmmod hello
@@ -71,6 +73,7 @@ Produces `/bin/insmod`, `/bin/rmmod`, `/bin/lsmod` and
 | `hello_c.ko` | gcc linuxkpi (`include/linux/*.h`) | `modules/linux/hello.c` |
 | `echo_c.ko` | gcc linuxkpi `misc_register` + `file_operations` | `modules/linux/echo.c` |
 | `irqtest.ko` | gcc linuxkpi `request_irq(0, SHARED)` + completion | `modules/linux/irqtest.c` |
+| `vprobe.ko` | gcc linuxkpi `pci_register_driver` | `modules/linux/vprobe.c` |
 
 Bare `insmod hello` tries `.ko` then `.mnx` then builtin `hello`.
 Userspace `insmod` uses `finit_module`; ELF name comes from `.modinfo name=`.
