@@ -170,25 +170,7 @@ const DEMO_STACK_TOP: u64 = DEMO_STACK_PAGE + 0x1000;
 const NEST_KSTACK_BYTES: usize = 64 * 1024;
 const NEST_KSTACK_MAX: usize = 6;
 
-/// Scratch for loading static ELFs from ext2 — high VA, not .bss.
-const ELF_LOAD_CAP: usize = 2 * 1024 * 1024;
-const ELF_LOAD_VA: u64 = 0x0000_0001_3000_0000;
-static mut ELF_LOAD_PTR: *mut u8 = core::ptr::null_mut();
 
-fn elf_load_buf() -> &'static mut [u8; ELF_LOAD_CAP] {
-    unsafe {
-        if ELF_LOAD_PTR.is_null() {
-            let pages = (ELF_LOAD_CAP + 4095) / 4096;
-            for i in 0..pages {
-                let v = ELF_LOAD_VA + (i as u64) * 4096;
-                crate::memory::paging::create_page(v, crate::memory::paging::PAGE_KERNEL_RW);
-            }
-            ELF_LOAD_PTR = ELF_LOAD_VA as *mut u8;
-            core::ptr::write_bytes(ELF_LOAD_PTR, 0, ELF_LOAD_CAP);
-        }
-        &mut *(ELF_LOAD_PTR as *mut [u8; ELF_LOAD_CAP])
-    }
-}
 
 #[repr(align(16))]
 struct NestKStack {
@@ -680,7 +662,7 @@ fn sys_brk(new_brk: u64) -> u64 {
     crate::process::proc_brk(new_brk)
 }
 
-/// Linux mmap(2) — anonymous or file-backed `MAP_PRIVATE` (offset page-aligned).
+/// Linux mmap(2) — anon / file `MAP_PRIVATE` snapshot / file `MAP_SHARED` writeback.
 fn sys_mmap(addr: u64, length: u64, prot: u64, flags: u64, fd: u64, offset: u64) -> u64 {
     match crate::process::proc_mmap(addr, length, prot, flags, fd, offset) {
         Ok(va) => va,
@@ -3233,22 +3215,7 @@ fn load_elf_from_fs(path: &str, argv: &[&str]) -> Result<crate::elf::LoadedImage
 }
 
 fn load_elf_from_ino(ino: u32, argv: &[&str]) -> Result<crate::elf::LoadedImage, &'static str> {
-    if !crate::fs::is_ready() {
-        return Err("no filesystem");
-    }
-    if crate::fs::ext2::inode_is_dir(ino) {
-        return Err("is a directory");
-    }
-    let size = crate::fs::ext2::inode_file_size(ino) as usize;
-    if size == 0 || size > ELF_LOAD_CAP {
-        return Err("bad file size");
-    }
-    let buf = elf_load_buf();
-    let n = crate::fs::ext2::read_file(ino, 0, &mut buf[..size])?;
-    if n < 64 {
-        return Err("elf: short read");
-    }
-    crate::elf::load_bytes_argv(&buf[..n], argv)
+    crate::elf::load_from_ino(ino, argv)
 }
 
 /// Linux wait4(pid, status, options, rusage) — rusage ignored.
@@ -3491,16 +3458,7 @@ fn load_elf_image_from_fs(
     }
     let cwd = crate::fs::path::cwd_inode();
     let ino = crate::fs::ext2::resolve_path(cwd, path)?;
-    if crate::fs::ext2::inode_is_dir(ino) {
-        return Err("is a directory");
-    }
-    let size = crate::fs::ext2::inode_file_size(ino) as usize;
-    if size == 0 || size > ELF_LOAD_CAP {
-        return Err("bad file size");
-    }
-    let buf = elf_load_buf();
-    let n = crate::fs::ext2::read_file(ino, 0, &mut buf[..size])?;
-    crate::elf::load_bytes(&buf[..n], argv0)
+    crate::elf::load_from_ino(ino, &[argv0])
 }
 
 /// Load ELF64 from ext2 path (or embedded `hello` if path empty / "hello").
@@ -3527,16 +3485,14 @@ fn run_elf_from_fs(path: &str) -> Result<(), &'static str> {
     }
     let cwd = crate::fs::path::cwd_inode();
     let ino = crate::fs::ext2::resolve_path(cwd, path)?;
-    if crate::fs::ext2::inode_is_dir(ino) {
-        return Err("is a directory");
-    }
-    let size = crate::fs::ext2::inode_file_size(ino) as usize;
-    if size == 0 || size > ELF_LOAD_CAP {
-        return Err("bad file size");
-    }
-    let buf = elf_load_buf();
-    let n = crate::fs::ext2::read_file(ino, 0, &mut buf[..size])?;
-    exec_elf_bytes(&buf[..n], path)
+    let argv0 = path.rsplit('/').next().unwrap_or(path);
+    let image = crate::elf::load_from_ino(ino, &[argv0])?;
+    enter_and_wait(
+        image.entry,
+        image.stack_top,
+        image.brk_start,
+        "exec: ELF64",
+    )
 }
 
 /// Rust-callable from C asm (TSS rsp0).

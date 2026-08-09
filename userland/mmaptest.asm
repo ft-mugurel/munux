@@ -13,9 +13,11 @@ global _start
 
 %define PROT_READ	1
 %define PROT_WRITE	2
+%define MAP_SHARED	1
 %define MAP_PRIVATE	2
 %define MAP_ANONYMOUS	0x20
 %define O_RDONLY	0
+%define O_RDWR		2
 
 %macro puts 2
 	mov rax, SYS_WRITE
@@ -205,10 +207,87 @@ _start:
 	syscall
 	puts msg_e, msg_e_len
 
+	; ---- F: MAP_SHARED writeback on munmap ----
+	mov rax, SYS_OPEN
+	lea rdi, [rel path_hello]
+	mov rsi, O_RDWR
+	xor rdx, rdx
+	syscall
+	cmp rax, -4095
+	jae fail_f
+	mov r13, rax
+	mov rax, SYS_MMAP
+	xor rdi, rdi
+	mov rsi, 4096
+	mov rdx, PROT_READ | PROT_WRITE
+	mov r10, MAP_SHARED
+	mov r8, r13
+	xor r9, r9
+	syscall
+	cmp rax, -4095
+	jae fail_f_close
+	mov r12, rax
+	cmp byte [r12], 'H'
+	jne fail_f_unmap
+	mov byte [r12], 'S'
+	mov rax, SYS_MUNMAP
+	mov rdi, r12
+	mov rsi, 4096
+	syscall
+	cmp rax, -4095
+	jae fail_f_close
+	; fd offset unchanged; read first byte from file
+	sub rsp, 16
+	mov rax, SYS_READ
+	mov rdi, r13
+	mov rsi, rsp
+	mov rdx, 1
+	syscall
+	cmp rax, 1
+	jne fail_f_stack
+	cmp byte [rsp], 'S'
+	jne fail_f_stack
+	add rsp, 16
+	; restore 'H' so other tests still see the original file
+	mov rax, SYS_MMAP
+	xor rdi, rdi
+	mov rsi, 4096
+	mov rdx, PROT_READ | PROT_WRITE
+	mov r10, MAP_SHARED
+	mov r8, r13
+	xor r9, r9
+	syscall
+	cmp rax, -4095
+	jae fail_f_close
+	mov r12, rax
+	mov byte [r12], 'H'
+	mov rax, SYS_MUNMAP
+	mov rdi, r12
+	mov rsi, 4096
+	syscall
+	mov rax, SYS_CLOSE
+	mov rdi, r13
+	syscall
+	puts msg_f, msg_f_len
+
 	puts msg_ok, msg_ok_len
 	mov rax, SYS_EXIT
 	xor rdi, rdi
 	syscall
+
+fail_f_stack:
+	add rsp, 16
+	jmp fail_f
+fail_f_unmap:
+	mov rax, SYS_MUNMAP
+	mov rdi, r12
+	mov rsi, 4096
+	syscall
+fail_f_close:
+	mov rax, SYS_CLOSE
+	mov rdi, r13
+	syscall
+	jmp fail_f
 
 fail_b_stack:
 	add rsp, 16
@@ -253,6 +332,9 @@ fail_d:
 	jmp die
 fail_e:
 	puts err_e, err_e_len
+	jmp die
+fail_f:
+	puts err_f, err_f_len
 die:
 	mov rax, SYS_EXIT
 	mov rdi, 1
@@ -271,6 +353,8 @@ msg_d:		db "mmap D: offset 4096 past EOF zeros OK", 10
 msg_d_len equ $ - msg_d
 msg_e:		db "mmap E: file /docs/readme.txt OK", 10
 msg_e_len equ $ - msg_e
+msg_f:		db "mmap F: MAP_SHARED writeback OK", 10
+msg_f_len equ $ - msg_f
 msg_ok:		db "mmaptest: ALL PASS", 10
 msg_ok_len equ $ - msg_ok
 err_a:		db "mmaptest FAIL A anon", 10
@@ -283,3 +367,5 @@ err_d:		db "mmaptest FAIL D eof", 10
 err_d_len equ $ - err_d
 err_e:		db "mmaptest FAIL E readme", 10
 err_e_len equ $ - err_e
+err_f:		db "mmaptest FAIL F shared", 10
+err_f_len equ $ - err_f

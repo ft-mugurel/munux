@@ -12,12 +12,21 @@ pub const MAX_SIGNALS: usize = 32;
 /// Max anonymous `mmap` regions tracked per process.
 pub const MAX_MMAPS: usize = 16;
 
-/// One anonymous mmap region (page-aligned addr/len).
+/// One mmap region (page-aligned addr/len). File `MAP_SHARED` stores inode +
+/// file offset so `munmap` / exec can write pages back.
 #[derive(Clone, Copy)]
 pub struct MmapRegion {
     pub used: bool,
     pub addr: u64,
     pub len: u64,
+    /// `true` = `MAP_SHARED` file map (writeback on unmap).
+    pub shared: bool,
+    /// Ext2 inode for file-backed maps (`0` = anonymous / private snapshot).
+    pub file_ino: u32,
+    /// Page-aligned file offset passed to `mmap`.
+    pub file_off: u64,
+    /// Userspace length (not page-ceiled) — bytes to write back.
+    pub file_len: u64,
 }
 
 impl MmapRegion {
@@ -26,6 +35,10 @@ impl MmapRegion {
             used: false,
             addr: 0,
             len: 0,
+            shared: false,
+            file_ino: 0,
+            file_off: 0,
+            file_len: 0,
         }
     }
 }

@@ -96,7 +96,7 @@ pub fn set_brk_start(brk_start: u64) {
     });
 }
 
-/// Drop all anonymous mmaps for the current process (unmap pages + clear slots).
+/// Drop all mmaps for the current process (write back `MAP_SHARED`, unmap, clear).
 /// Called on exec so the new image does not inherit old maps.
 pub fn clear_mmaps() {
     let _ = table::with_current(|p| {
@@ -104,14 +104,53 @@ pub fn clear_mmaps() {
             if p.mmaps[i].used {
                 let a = p.mmaps[i].addr;
                 let l = p.mmaps[i].len;
+                if p.mmaps[i].shared && p.mmaps[i].file_ino != 0 {
+                    writeback_shared(
+                        p.mmaps[i].file_ino,
+                        p.mmaps[i].file_off,
+                        a,
+                        p.mmaps[i].file_len,
+                    );
+                }
                 unmap_pages(a, l);
-                p.mmaps[i].used = false;
-                p.mmaps[i].addr = 0;
-                p.mmaps[i].len = 0;
+                p.mmaps[i] = super::pcb::MmapRegion::empty();
             }
         }
         p.mmap_bump = 0;
     });
+}
+
+fn writeback_shared(ino: u32, file_off: u64, addr: u64, user_len: u64) {
+    if ino == 0 || user_len == 0 {
+        return;
+    }
+    if file_off > u32::MAX as u64 {
+        return;
+    }
+    // Do not grow the file (no MAP_SHARED EOF-extend yet). Write the overlap
+    // with the current inode size so a 4 KiB map of a tiny file is safe.
+    let fsz = crate::fs::ext2::inode_file_size(ino) as u64;
+    if file_off >= fsz {
+        return;
+    }
+    let wb = user_len.min(fsz - file_off);
+    let mut off = file_off;
+    let mut src = addr;
+    let mut left = wb as usize;
+    let mut tmp = [0u8; 512];
+    while left > 0 {
+        let chunk = left.min(tmp.len());
+        unsafe {
+            core::ptr::copy_nonoverlapping(src as *const u8, tmp.as_mut_ptr(), chunk);
+        }
+        if off > u32::MAX as u64 {
+            break;
+        }
+        let _ = crate::fs::ext2_write::write_file_at(ino, off as u32, &tmp[..chunk]);
+        src = src.saturating_add(chunk as u64);
+        off = off.saturating_add(chunk as u64);
+        left -= chunk;
+    }
 }
 
 fn fill_pages_from_fd(fd: u64, file_off: u64, dest: u64, copy_len: u64) -> Result<(), i64> {
@@ -145,8 +184,9 @@ fn fill_pages_from_fd(fd: u64, file_off: u64, dest: u64, copy_len: u64) -> Resul
 ///
 /// - `MAP_PRIVATE|MAP_ANONYMOUS` (optional `MAP_FIXED`)
 /// - `MAP_PRIVATE` file-backed: page-aligned `offset`, snapshot copy into new pages
+/// - `MAP_SHARED` file-backed: same copy-in; write back on `munmap` / exec
 ///
-/// `MAP_SHARED` is still EINVAL (no writeback). Returns mapped VA or `Err(errno)`.
+/// Anonymous `MAP_SHARED` is still EINVAL. Returns mapped VA or `Err(errno)`.
 pub fn proc_mmap(
     addr: u64,
     length: u64,
@@ -165,22 +205,30 @@ pub fn proc_mmap(
         return Err(22);
     }
     let anon = flags & MAP_ANONYMOUS != 0;
+    let shared = flags & MAP_SHARED != 0;
     if anon {
         if offset != 0 {
             return Err(22);
         }
-        if flags & MAP_SHARED != 0 {
+        if shared {
             return Err(22);
         }
     } else {
-        if flags & MAP_PRIVATE == 0 {
-            return Err(22); // shared file maps: no writeback yet
-        }
         if offset & (FRAME_SIZE as u64 - 1) != 0 {
             return Err(22);
         }
         crate::fd::mmap_source_ok(fd)?;
     }
+    let file_ino = if !anon && shared {
+        match crate::fd::sys_fd_inode(fd) {
+            Ok(i) => i,
+            Err(crate::fd::FdError::BadFd) => return Err(9),
+            Err(crate::fd::FdError::IsDir) => return Err(21),
+            Err(_) => return Err(13),
+        }
+    } else {
+        0
+    };
 
     let len = page_ceil(length);
     let page_flags = prot_to_flags(prot); // None => PROT_NONE
@@ -214,9 +262,15 @@ pub fn proc_mmap(
                 if p.mmaps[i].used
                     && ranges_overlap(addr, len, p.mmaps[i].addr, p.mmaps[i].len)
                 {
-                    p.mmaps[i].used = false;
-                    p.mmaps[i].addr = 0;
-                    p.mmaps[i].len = 0;
+                    if p.mmaps[i].shared && p.mmaps[i].file_ino != 0 {
+                        writeback_shared(
+                            p.mmaps[i].file_ino,
+                            p.mmaps[i].file_off,
+                            p.mmaps[i].addr,
+                            p.mmaps[i].file_len,
+                        );
+                    }
+                    p.mmaps[i] = super::pcb::MmapRegion::empty();
                 }
             }
             addr
@@ -293,6 +347,10 @@ pub fn proc_mmap(
         p.mmaps[slot].used = true;
         p.mmaps[slot].addr = base;
         p.mmaps[slot].len = len;
+        p.mmaps[slot].shared = shared;
+        p.mmaps[slot].file_ino = file_ino;
+        p.mmaps[slot].file_off = offset;
+        p.mmaps[slot].file_len = length;
         if !want_fixed {
             let next = base.saturating_add(len);
             if next > p.mmap_bump {
@@ -368,10 +426,16 @@ pub fn proc_munmap(addr: u64, length: u64) -> Result<(), i64> {
     table::with_current(|p| {
         for i in 0..MAX_MMAPS {
             if p.mmaps[i].used && p.mmaps[i].addr == addr && p.mmaps[i].len == len {
+                if p.mmaps[i].shared && p.mmaps[i].file_ino != 0 {
+                    writeback_shared(
+                        p.mmaps[i].file_ino,
+                        p.mmaps[i].file_off,
+                        addr,
+                        p.mmaps[i].file_len,
+                    );
+                }
                 unmap_pages(addr, len);
-                p.mmaps[i].used = false;
-                p.mmaps[i].addr = 0;
-                p.mmaps[i].len = 0;
+                p.mmaps[i] = super::pcb::MmapRegion::empty();
                 return Ok(());
             }
         }

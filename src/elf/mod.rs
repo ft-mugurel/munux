@@ -11,7 +11,9 @@ const ET_EXEC: u16 = 2;
 const EM_X86_64: u16 = 62;
 const PT_LOAD: u32 = 1;
 
-const MAX_LOAD_BYTES: u64 = 4 * 1024 * 1024;
+/// Cap on sum of PT_LOAD memsz (inode-backed loads; no 2 MiB kernel scratch).
+const MAX_LOAD_BYTES: u64 = 16 * 1024 * 1024;
+/// In-memory / embedded images still fit in a small buffer.
 const MAX_FILE_SIZE: usize = 2 * 1024 * 1024;
 
 /// User stack grows down toward lower addresses.
@@ -470,6 +472,162 @@ pub fn load_bytes_argv(file: &[u8], argv: &[&str]) -> Result<LoadedImage, &'stat
     }
 
     // Sanity: entry page must be present (catches failed private-frame installs).
+    {
+        let entry = ehdr.e_entry;
+        let page = entry & !0xFFF;
+        match paging::virt_to_phys(page) {
+            None => return Err("elf: entry page unmapped"),
+            Some(_) => {
+                let b0 = unsafe { core::ptr::read_volatile(entry as *const u8) };
+                let b1 = unsafe { core::ptr::read_volatile((entry + 1) as *const u8) };
+                let b2 = unsafe { core::ptr::read_volatile((entry + 2) as *const u8) };
+                if b0 == 0 && b1 == 0 && b2 == 0 {
+                    return Err("elf: entry page zero");
+                }
+            }
+        }
+    }
+
+    let aux = AuxInfo {
+        entry: ehdr.e_entry,
+        phdr: phdr_va,
+        phent: ehdr.e_phentsize as u64,
+        phnum: ehdr.e_phnum as u64,
+    };
+    let stack_top = setup_stack(argv, &aux)?;
+    Ok(LoadedImage {
+        entry: ehdr.e_entry,
+        stack_top,
+        brk_start,
+    })
+}
+
+fn read_ino(ino: u32, off: u64, buf: &mut [u8]) -> Result<usize, &'static str> {
+    if off > u32::MAX as u64 {
+        return Err("elf: offset too large");
+    }
+    crate::fs::ext2::read_file(ino, off as u32, buf)
+}
+
+fn load_segment_ino(ino: u32, file_size: u64, ph: &Phdr) -> Result<u64, &'static str> {
+    if ph.p_memsz == 0 {
+        return Ok(0);
+    }
+    if ph.p_filesz > ph.p_memsz {
+        return Err("elf: filesz > memsz");
+    }
+    if ph.p_vaddr < 0x1000 || ph.p_vaddr >= 0x0000_8000_0000_0000 {
+        return Err("elf: bad p_vaddr");
+    }
+    let vend = ph.p_vaddr.saturating_add(ph.p_memsz);
+    if vend > 0x0000_8000_0000_0000 {
+        return Err("elf: segment past user space");
+    }
+    if ph.p_filesz > 0 {
+        let fend = ph.p_offset.saturating_add(ph.p_filesz);
+        if fend > file_size {
+            return Err("elf: segment past EOF");
+        }
+    }
+    if ph.p_memsz > MAX_LOAD_BYTES {
+        return Err("elf: segment too large");
+    }
+
+    map_user_range(ph.p_vaddr, ph.p_vaddr.saturating_add(ph.p_memsz))?;
+
+    if ph.p_filesz > 0 {
+        let mut done = 0u64;
+        let mut tmp = [0u8; 512];
+        while done < ph.p_filesz {
+            let chunk = core::cmp::min((ph.p_filesz - done) as usize, tmp.len());
+            let n = read_ino(ino, ph.p_offset + done, &mut tmp[..chunk])?;
+            if n == 0 {
+                return Err("elf: short segment read");
+            }
+            write_user(ph.p_vaddr + done, &tmp[..n])?;
+            done += n as u64;
+        }
+    }
+    if ph.p_memsz > ph.p_filesz {
+        zero_user(ph.p_vaddr + ph.p_filesz, ph.p_memsz - ph.p_filesz)?;
+    }
+    Ok(ph.p_memsz)
+}
+
+/// Load ET_EXEC from an ext2 inode: only headers + each `PT_LOAD` are read.
+/// Used by `execve` / `execveat` so the whole file is not staged in a kernel buffer.
+pub fn load_from_ino(ino: u32, argv: &[&str]) -> Result<LoadedImage, &'static str> {
+    if !crate::fs::is_ready() {
+        return Err("no filesystem");
+    }
+    if crate::fs::ext2::inode_is_dir(ino) {
+        return Err("is a directory");
+    }
+    let file_size = crate::fs::ext2::inode_file_size(ino) as u64;
+    if file_size < 64 {
+        return Err("elf: short read");
+    }
+
+    let mut ehbuf = [0u8; 64];
+    let n = read_ino(ino, 0, &mut ehbuf)?;
+    if n < 64 {
+        return Err("elf: truncated header");
+    }
+    let ehdr = read_ehdr(&ehbuf)?;
+    validate_ehdr(&ehdr)?;
+
+    let phoff = ehdr.e_phoff;
+    let phnum = ehdr.e_phnum as usize;
+    let phentsz = ehdr.e_phentsize as usize;
+    if phentsz != core::mem::size_of::<Phdr>() {
+        return Err("elf: bad phentsize");
+    }
+    let ph_bytes = phnum.saturating_mul(phentsz);
+    if ph_bytes == 0 || ph_bytes > 4096 {
+        return Err("elf: bad phnum");
+    }
+    let mut phbuf = [0u8; 4096];
+    let got = read_ino(ino, phoff, &mut phbuf[..ph_bytes])?;
+    if got < ph_bytes {
+        return Err("elf: truncated phdr");
+    }
+
+    let mut total = 0u64;
+    let mut image_end = 0u64;
+    let mut phdr_va = 0u64;
+    for i in 0..ehdr.e_phnum {
+        let off = i as usize * phentsz;
+        let ph = unsafe { core::ptr::read_unaligned(phbuf.as_ptr().add(off) as *const Phdr) };
+        if ph.p_type != PT_LOAD {
+            continue;
+        }
+        total = total.saturating_add(load_segment_ino(ino, file_size, &ph)?);
+        if total > MAX_LOAD_BYTES {
+            return Err("elf: image too large");
+        }
+        let vend = ph.p_vaddr.saturating_add(ph.p_memsz);
+        if vend > image_end {
+            image_end = vend;
+        }
+        let ph_end = ehdr.e_phoff.saturating_add(
+            (ehdr.e_phnum as u64).saturating_mul(ehdr.e_phentsize as u64),
+        );
+        if phdr_va == 0
+            && ehdr.e_phoff >= ph.p_offset
+            && ph_end <= ph.p_offset.saturating_add(ph.p_filesz)
+        {
+            phdr_va = ph.p_vaddr.saturating_add(ehdr.e_phoff - ph.p_offset);
+        }
+    }
+    if total == 0 {
+        return Err("elf: no PT_LOAD segments");
+    }
+
+    let brk_start = page_up(image_end);
+    if brk_start < 0x1000 || brk_start >= 0x0000_8000_0000_0000 {
+        return Err("elf: bad brk start");
+    }
+
     {
         let entry = ehdr.e_entry;
         let page = entry & !0xFFF;

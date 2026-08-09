@@ -5,7 +5,7 @@ This document freezes conventions for userspace and the kernel.
 
 | Field | Value |
 |-------|--------|
-| **Status** | **v0.3.4** — P9d execveat/prctl |
+| **Status** | **v0.3.5** — P9e file-map ELF + MAP_SHARED |
 | **Arch** | **x86_64** only on `main` |
 | **Goal** | Linux userspace (static musl today, glibc + a **desktop** later) uses the **same numbers, structs, and register ABI** as Linux; missing calls return **`-ENOSYS`**. Internals may differ; **results must match**. |
 
@@ -48,7 +48,7 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` consta
 | 6 | `lstat` | done (does **not** follow last symlink) |
 | 7 | `poll` | done (P9c; ms timeout; pipes/TTY/files) |
 | 8 | `lseek` | done |
-| 9 | `mmap` | **partial** (`MAP_PRIVATE` anon + file snapshot; offset via r9, page-aligned; no `MAP_SHARED` writeback) |
+| 9 | `mmap` | **partial** (`MAP_PRIVATE` anon + file snapshot; file `MAP_SHARED` writeback on `munmap`/exec; no shared-anon / EOF-extend) |
 | 10 | `mprotect` | done |
 | 11 | `munmap` | done |
 | 12 | `brk` | done (per-process break) |
@@ -200,7 +200,7 @@ Common errno values:
 | `gettid` | Unique task id |
 | `fork` | Private CR3 (`clone_mm`) + stack copy; FDs cloned; child Ready; parent continues |
 | `clone` | Flags include `CLONE_VM` / `CLONE_FILES` / `CLONE_THREAD` / settid / TLS / stack |
-| `execve` | Load ELF64 into current task; argv copied; envp ignored |
+| `execve` | Load ELF64 into current task; argv copied; envp ignored; FS images stream `PT_LOAD` from inode |
 | `execveat` | Same image path; `AT_FDCWD` / dirfd relative / `AT_EMPTY_PATH` (`fexecve`) |
 | `prctl` | `PR_SET/GET_NAME`, dumpable, `NO_NEW_PRIVS`, `PDEATHSIG`; unknown → `EINVAL` |
 | `exit` | One task → zombie; parent woken |
@@ -241,7 +241,7 @@ See **[MM.md](MM.md)** for kernel windows and isolation rules.
 - Live `/proc/mounts` (qemu-connect 2026-08-07): `/dev/hda / ext2`, `ramfs /ram`, `proc /proc`, `devtmpfs /dev`.
 - Writes: create/unlink/mkdir/rmdir/chmod/rename/link as wired in syscalls → vops → ext2.
 - Symlinks: `symlink`/`readlink`/`lstat` vs `stat` follow; max 8 hops (`ELOOP`).
-- **Not yet:** `mount`/`umount` syscalls; full dentry cache; file-backed `mmap`.
+- **Not yet:** `mount`/`umount` syscalls; full dentry cache; `msync`; shared-anon mmap.
 
 ---
 
@@ -254,7 +254,7 @@ Foundation for threads is in; polish and next architecture:
 3. ~~Signals (`rt_sigreturn`, delivery, `tgkill`, Ctrl-C)~~ ✅ (practical slices)  
 4. Full signal frames (`siginfo`/`ucontext`), absolute/PI futex, musl pthread soak  
 5. ~~`pipe`/`dup`, `rename`/`link`, VFS + modules~~ ✅ P7–P8c  
-6. ~~`readlink`/`symlink`/`statx`~~ ✅ P9a; ~~file mmap~~ ✅ P9b; ~~poll/select/epoll~~ ✅ P9c; ~~`execveat`/`prctl`~~ ✅ P9d
+6. ~~`readlink`/`symlink`/`statx`~~ ✅ P9a; ~~file mmap~~ ✅ P9b; ~~poll/select/epoll~~ ✅ P9c; ~~`execveat`/`prctl`~~ ✅ P9d; ~~file-map ELF + `MAP_SHARED`~~ ✅ P9e
 
 Using **wrong syscall numbers** would make Linux binaries impossible — munux keeps Linux numbers from v0.2 forward.
 
@@ -275,3 +275,4 @@ Using **wrong syscall numbers** would make Linux binaries impossible — munux k
 | **0.3.2** | P9a: `symlink`/`readlink`/`statx`; **81** dispatched (2026-08-07) |
 | **0.3.3** | P9c: poll/select/epoll; **88** dispatched |
 | **0.3.4** | P9d: `execveat`/`prctl`; **90** dispatched (2026-08-09) |
+| **0.3.5** | P9e: inode `PT_LOAD` stream + file `MAP_SHARED` writeback |

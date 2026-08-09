@@ -1,6 +1,6 @@
 # munux roadmap — Linux-compatible kernel in Rust
 
-**Last updated:** 2026-08-09 (P9d `execveat`/`prctl`).
+**Last updated:** 2026-08-09 (P9e file-map ELF + `MAP_SHARED`).
 
 **Goal:** munux is a **Linux x86_64 kernel written in Rust**. The destination is to **install a Linux desktop environment and use the machine like a Linux system**.
 
@@ -370,12 +370,12 @@ Prioritize by **what Linux userspace (and later a DE) actually needs**, not by �
 |----------|------|-----|
 | High | ~~`readlink`/`symlink`/`statx`~~ ✅ P9a | Real userspace tooling |
 | High | ~~File-backed `mmap`~~ ✅ P9b snapshot `MAP_PRIVATE` | True COW / `MAP_SHARED` writeback later |
-| High | ELF loader using file maps | Dynamic linkers (P10) |
+| High | ~~ELF loader using file maps~~ ✅ P9e | Stream `PT_LOAD` from inode; no 2 MiB kernel copy |
 | High | ~~`execveat`, `prctl`~~ ✅ P9d | Tooling / process control |
 | Medium | ~~`epoll`/`select`~~ ✅ P9c level-triggered | `ppoll` sigmask / ET epoll later |
 | Medium | `mount`/`umount`, ramfs, better `/proc`/`sys` | Module-loaded FS + install story |
 | Medium | `vfork`, richer `clone3`, waitid | glibc/musl spawn paths |
-| Later in P9 | MAP_SHARED / COW fork, demand paging | Correct mmap + fork for real binaries |
+| Later in P9 | COW fork, demand paging, shared-anon mmap | `MAP_SHARED` file writeback ✅ P9e (no EOF-extend / COW) |
 
 Syscall coverage % (**90 / 385 ≈ 23.4%** today) is a **progress metric** toward the desktop, not a vanity KPI and not a reason to stop. Implement what userspace needs with **Linux semantics**; skip Linux-internal-only or obsolete calls until something actually requires them.
 
@@ -501,9 +501,9 @@ Milestones on that path:
 
 **Phase 8 is complete.** Do not reopen it for “make IDE a `.ko` on ext2.”
 
-**P9d (`execveat` / `prctl`) landed.** Two tracks from here:
+**P9e (file-map ELF + file `MAP_SHARED`) landed.** Two tracks from here:
 
-**P9 (userspace):** file-map ELF / `MAP_SHARED` → dynlink (P10).
+**P9 (userspace):** dynlink (P10) — `PT_INTERP`, richer auxv, COW/`MAP_SHARED` polish.
 
 **LK (drivers):** [LINUXKPI.md](LINUXKPI.md) — L0–L5 + virtio-net (ICMP ping). Next: BSD sockets (P12) so userspace can use the NIC.
 

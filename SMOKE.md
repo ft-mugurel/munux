@@ -28,7 +28,7 @@ From freestanding **`$`**:
 - [ ] `clonetest` — child + parent ok
 - [ ] `futextest` — child + parent ok (join via futex / clear_child_tid)
 - [ ] `forktest` — still green
-- [ ] `mmaptest` — A–E + `ALL PASS` (run twice; also `/bin/mmaptest`)
+- [ ] `mmaptest` — A–F + `ALL PASS` (incl. `MAP_SHARED` writeback; run twice)
 - [ ] `polltest` — A–F + `ALL PASS` (run twice; also `/bin/polltest`)
 - [ ] `p9test` — A–H + `p9test: ALL PASS` (`prctl` + `execveat`)
 - [ ] `busybox true` — returns to `$`

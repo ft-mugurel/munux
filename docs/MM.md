@@ -24,10 +24,10 @@ Higher-half is **not** required yet. The kernel stays in the **identity window**
 | Identity / low RAM | `0 … ~1 GiB` | Kernel text/data, early page tables, VGA, phys access via identity |
 | Kernel load | `0x0010_0000` (1 MiB) | Matches Multiboot / `linker.ld` |
 | Kernel heap | `0x0000_0001_0000_0000` | Demand-mapped; not identity |
-| ELF load scratch | `0x0000_0001_3000_0000` | Kernel buffer for reading ELF from disk |
+| ELF load scratch | *(removed P9e)* | Exec streams `PT_LOAD` from the inode; embedded images stay in `.rodata` |
 | User ET_EXEC (typical) | `0x0040_0000` … | Static BusyBox/musl; private frames per mm |
 | User stack (classic) | top ~`0x0000_0000_7FFF_F000` | 1 MiB window today |
-| User mmap arena | process `mmap_bump` | Anon + file-backed `MAP_PRIVATE` snapshot |
+| User mmap arena | process `mmap_bump` | Anon + file `MAP_PRIVATE` snapshot + file `MAP_SHARED` writeback |
 | Signal restorer | `0x7ffd0000` | Kernel trampoline page (`rt_sigreturn`) |
 
 Canonical user half ends at `0x0000_8000_0000_0000` (non-canonical gap).
@@ -64,7 +64,7 @@ Canonical user half ends at `0x0000_8000_0000_0000` (non-canonical gap).
 
 Kernel shell: `preempt` / `preempttest` (A–G). Userspace: `clonetest`, `signaltest`, `futextest`.
 
-**Next (not mm):** Phase 9 file-map ELF / `MAP_SHARED` toward dynlink (P10). Optional mm polish: COW fork, higher-half, demand paging. P8 is closed; IDE remains built-in. Destination: [ROADMAP.md](ROADMAP.md) (install a Linux DE).
+**Next (not mm):** P10 dynlink (`PT_INTERP`, file-map `.so`). Optional mm polish: COW fork, higher-half, demand paging. P8 is closed; IDE remains built-in. Destination: [ROADMAP.md](ROADMAP.md) (install a Linux DE).
 
 ---
 
@@ -73,6 +73,6 @@ Kernel shell: `preempt` / `preempttest` (A–G). Userspace: `clonetest`, `signal
 - Higher-half kernel (e.g. `-2 GiB` / `0xFFFF_FFFF_8000_0000`)
 - COW fork
 - Demand paging / stack growth on #PF
-- `MAP_SHARED` / COW file mmap (P9b is private snapshot only)
+- COW fork / demand paging; shared-anon mmap; `MAP_SHARED` file EOF-extend
 
 See also: [ROADMAP.md](ROADMAP.md), [ABI.md](ABI.md).
