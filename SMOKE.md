@@ -20,7 +20,7 @@ Prompt: userspace **`$`** after boot. Kernel debug shell appears only after `exi
 
 ---
 
-## Foundation (process / threads / signals) — run after architecture work
+## Foundation (process / threads / signals) — spine smokes; desktop is later
 
 From freestanding **`$`**:
 

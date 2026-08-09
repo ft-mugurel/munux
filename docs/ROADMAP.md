@@ -1,17 +1,20 @@
 # munux roadmap — Linux-compatible kernel in Rust
 
-**Last updated:** 2026-08-07 (P9a–P9c: symlink, file mmap, poll/select/epoll).
+**Last updated:** 2026-08-09 (goal: Linux desktop results; P9a–P9c already landed).
 
-**Goal:** a **Linux x86_64 ABI–compatible** kernel written in Rust, not “run every BusyBox applet.”
+**Goal:** munux is a **Linux x86_64 kernel written in Rust**. The destination is to **install a Linux desktop environment and use the machine like a Linux system**.
 
-BusyBox / musl binaries are **compatibility probes** (does `fork`/`clone`/`mmap`/ELF load match Linux?). They are not the product definition.
+Think **clang vs gcc**: same job, different implementation. Internals may differ (language, VFS, scheduler, module container) as long as **userspace gets the same results** — same syscall numbers and structs, same process/thread/file/mmap/ELF semantics, same programs, same desktop.
+
+BusyBox / static musl binaries are **probes and regression tests**, not the product. Syscall coverage is a **progress metric** toward real Linux userspace (glibc, dynlink, a DE), not a vanity checklist and not something to stop at “architecture only.”
 
 **Related docs:** [README](../README.md) · [ABI](ABI.md) · [MM](MM.md) · [SYSCALL_COMPARE](SYSCALL_COMPARE.md) · [SMOKE_PREEMPT](SMOKE_PREEMPT.md) · [SMOKE_CLONE](SMOKE_CLONE.md) · [SMOKE_SIGNAL](SMOKE_SIGNAL.md) · [SMOKE_FUTEX](SMOKE_FUTEX.md) · [SMOKE_VFS](SMOKE_VFS.md) · [SMOKE_MODULE](SMOKE_MODULE.md) · [BusyBox suite](BUSYBOX_SUITE_REPORT.md)
 
 **North stars:**
 
-1. **Thread support** (Linux `clone` / TID model / futex) — **foundation in place**
-2. **Kernel modules** (loadable objects, symbol export, init/exit) — **P8a–8c done** (MNX1 + ET_REL `.ko`)
+1. **Linux userspace results** — eventually a desktop (display + input + shell + apps) on munux, same as on Linux.
+2. **Architecture spine (done)** — isolated processes, joinable threads, loadable drivers. That was the *path*, not the finish line.
+3. **Grow the ABI on purpose** until a real distro userspace + DE works.
 
 ---
 
@@ -32,16 +35,17 @@ BusyBox / musl binaries are **compatibility probes** (does `fork`/`clone`/`mmap`
 | Modules | **P8a–8c done**: MNX1 + ELF ET_REL `.ko`, `/dev/echo` | Not blocked |
 
 **Implication:** P7 + **P8 complete** (hello/echo as `.mnx` and `.ko`).  
-**Next epic: Phase 9** (broader Linux surface). Do **not** treat “IDE as a `.ko` on ext2” as unfinished P8.
+**Current epic: Phase 9** (broader Linux surface toward a real userspace). Later epics (dynlink, net, graphics, install) are **in scope** for the desktop goal. Do **not** treat “IDE as a `.ko` on ext2” as unfinished P8.
 
 ---
 
 ## Guiding principles
 
-1. **Linux ABI first** — numbers, structs, errno, ELF, auxv, TLS (`arch_prctl`), process model.
-2. **Correct layering** — MM → isolation → schedule → threads → signals/futex → **VFS → modules**.
-3. **Validation without becoming BusyBox-shaped** — small Rust/C test programs + selective musl/BusyBox smoke.
-4. **Rust kernel discipline** — `no_std`, explicit unsafe boundaries, module ABI that does not require forever-unstable Rust dylibs (prefer C-compatible kernel API for modules, modules themselves can be Rust or C).
+1. **Same results as Linux** — numbers, structs, errno, ELF, auxv, TLS, process/thread/file/mmap semantics. Userspace (BusyBox today, glibc + a DE later) should not care that the kernel is Rust.
+2. **Different internals are fine** — not a Linux source clone, not mainline `.ko` binary compat, not “do it the Linux way” unless that is the cheapest path to the same result.
+3. **Correct layering** — MM → isolation → schedule → threads → signals/futex → **VFS → modules** → remaining Linux surface → desktop stack.
+4. **Validate with real userspace** — focused smokes + BusyBox regression now; grow to musl/glibc dynlink, then a desktop. Do not let applet-count become the work queue, but do not stop short of what a DE needs.
+5. **Rust kernel discipline** — `no_std`, explicit unsafe boundaries, module ABI that does not require forever-unstable Rust dylibs (prefer C-compatible kernel API for modules, modules themselves can be Rust or C).
 
 ---
 
@@ -71,10 +75,25 @@ BusyBox / musl binaries are **compatibility probes** (does `fork`/`clone`/`mmap`
   P8  Kernel modules (loader, symbols, init/exit, refcount)
                        │
                        ▼
-  P9  Broader Linux surface (net optional, more FS, SMP later)
+  P9  Broader Linux surface (syscalls, mmap, FS, poll)   ← current
+                       │
+                       ▼
+  P10 Dynamic linking + ELF file maps (musl/glibc-class process)
+                       │
+                       ▼
+  P11 TTYs / PTYs / termios / job control
+                       │
+                       ▼
+  P12 Networking (sockets → TCP/IP → virtio-net)
+                       │
+                       ▼
+  P13 Graphics + input (fb/KMS, evdev → X11/Wayland)
+                       │
+                       ▼
+  P14 Installable Linux desktop (packages + DE + daily use)
 ```
 
-BusyBox suite stays a **regression gate** after each phase — not the work queue.
+BusyBox suite stays a **regression gate** after each phase. It is not the destination.
 
 ---
 
@@ -149,7 +168,7 @@ BusyBox suite stays a **regression gate** after each phase — not the work queu
 
 ---
 
-## Phase 4 — Threads (north star #1)
+## Phase 4 — Threads (spine)
 
 **Status (2026-08-02):** **4a–4c done** — `tid`/`tgid`, `gettid`, `clone` (VM/FILES/THREAD/settids),
 shared-mm + shared-FD refcounts, `exit_group` kills thread group. Smoke: `clonetest`.
@@ -259,7 +278,7 @@ threads, wait runs Ready **children only**, nest-safe spurious wake. Smoke: `fut
 
 ---
 
-## Phase 8 — Kernel modules (north star #2)
+## Phase 8 — Kernel modules (spine)
 
 **Status (2026-08-07):** **done (8a–8c).** Phase 8 is **closed**.
 
@@ -334,24 +353,46 @@ Optional later (not P8, not a Phase 9 gate):
 
 ## Phase 9 — Broaden Linux compatibility (ongoing)
 
-Prioritize by **kernel completeness**, not applet count:
+P9 is the **current** epic: grow the Linux syscall/VFS/mmap surface so more real userspace works. That surface is required for dynlink, a desktop, and everything after.
+
+Prioritize by **what Linux userspace (and later a DE) actually needs**, not by “implement syscall N next” and not by BusyBox applet count.
 
 | Priority | Area | Why |
 |----------|------|-----|
 | High | ~~`readlink`/`symlink`/`statx`~~ ✅ P9a | Real userspace tooling |
 | High | ~~File-backed `mmap`~~ ✅ P9b snapshot `MAP_PRIVATE` | True COW / `MAP_SHARED` writeback later |
-| High | ELF loader using file maps | Dynamic linkers later |
-| High | `execveat`, `prctl` | Tooling / process control |
+| High | ELF loader using file maps | Dynamic linkers (P10) |
+| High | `execveat`, `prctl` | Tooling / process control — **next slice** |
 | Medium | ~~`epoll`/`select`~~ ✅ P9c level-triggered | `ppoll` sigmask / ET epoll later |
-| Medium | `mount`/`umount`, ramfs, better `/proc`/`sys` | Module-loaded FS |
-| Later | Sockets / TCP | Only if networking is a goal |
-| Later | SMP, ACPI, initrd / optional disk `.ko` | Boot + scale-out — not unfinished P8 |
+| Medium | `mount`/`umount`, ramfs, better `/proc`/`sys` | Module-loaded FS + install story |
+| Medium | `vfork`, richer `clone3`, waitid | glibc/musl spawn paths |
+| Later in P9 | MAP_SHARED / COW fork, demand paging | Correct mmap + fork for real binaries |
 
-Syscall coverage % is a **metric**, not a milestone by itself.
+Syscall coverage % (**88 / 385 ≈ 22.9%** today) is a **progress metric** toward the desktop, not a vanity KPI and not a reason to stop. Implement what userspace needs with **Linux semantics**; skip Linux-internal-only or obsolete calls until something actually requires them.
 
 ---
 
-## Validation strategy (not “all BusyBox”)
+## Phases 10–14 — Path to a Linux desktop
+
+These are **in scope**. Internals can differ from Linux; the **result** must not.
+
+| Phase | Result we are aiming for | Notes |
+|-------|--------------------------|-------|
+| **P10** | Dynamically linked musl/glibc binaries run | File-backed ELF maps, `PT_INTERP`, auxv/`AT_*`, TLS, `MAP_SHARED` as needed |
+| **P11** | Real terminals and job control | PTYs, termios, session/pgrp, `TIOCSCTTY`, `wait`/SIGCHLD polish — needed for a DE terminal |
+| **P12** | Networking works | `socket`/`bind`/`connect`/…, loopback, then virtio-net; desktop install + browsers need this |
+| **P13** | Graphics + input | Framebuffer or KMS/DRM + evdev/mice/keyboard in Linux ABI form; then Xorg or a Wayland compositor |
+| **P14** | **Install and use a Linux desktop** | Package a userspace (or boot a distro rootfs), start a display manager / DE, use it like Linux |
+
+**OK to differ from Linux:** language (Rust), module container (MNX1 + our ET_REL `.ko` vs mainline vermagic), scheduler/VFS internals, missing Linux-only debugfs, no binary compat with Ubuntu `nvidia.ko`.
+
+**Not OK to differ:** userspace-visible ABI and behavior that a DE, libc, or package manager relies on.
+
+SMP, ACPI, initrd, and “optional disk `.ko` after initrd” are **boot/scale** work that a serious desktop install will eventually want — not leftover P8.
+
+---
+
+## Validation strategy
 
 | Layer | What to run |
 |-------|-------------|
@@ -359,7 +400,8 @@ Syscall coverage % is a **metric**, not a milestone by itself.
 | ABI smoke | Tiny static musl programs per feature (`pthread_create`, `mmap`, …) |
 | Regression | Keep **strict BusyBox suite** (~48 cases) green after each phase |
 | Module | Load/unload hello + chardev under qemu-connect headless |
-| Avoid | 300-applet zero-arg BusyBox marathon as planning input |
+| Later | Dynlinked hello-world → glibc tools → X/Wayland smoke → DE session |
+| Avoid | 300-applet zero-arg BusyBox marathon as the *only* planning input |
 
 ---
 
@@ -375,7 +417,7 @@ Syscall coverage % is a **metric**, not a milestone by itself.
 | **M6** | **VFS ops + register_chrdev** | Pluggable drivers | ✅ P7 practical |
 | **M7** | **module loader + EXPORT_SYMBOL + hello + echo chrdev** | Loadable kernel code | ✅ P8a–8c (MNX1 + ET_REL) |
 
-Everything else (more syscalls, net, polish) hangs off this spine.
+Everything else (more syscalls, net, graphics, desktop install) hangs off this spine — that “everything else” **is** the product after P8.
 
 ---
 
@@ -383,12 +425,14 @@ Everything else (more syscalls, net, polish) hangs off this spine.
 
 - One-off applets that only need another ENOSYS stub.
 - Growing shared-AS workarounds (image snap is **deleted** — keep it that way).
-- Treating “% of Linux syscalls implemented” as the main KPI.
+- Treating munux as a **teaching kernel that stops at threads + modules**.
 - Reopening P8 to turn the **root IDE disk** into a `.ko` on that same disk.
+- Copying Linux *internals* (or mainline `.ko` ABI) when a different implementation already yields the same userspace result.
 
 What **to** keep:
 
-- Linux syscall numbers and struct layouts.
+- Linux syscall numbers, struct layouts, and **observable** behavior.
+- Syscall / ABI coverage as a **progress metric** toward a desktop.
 - Headless qemu-connect tests + focused smokes (`preempttest`, `clonetest`, `signaltest`, `futextest`).
 - Small, reviewable phases with clear exit criteria.
 
@@ -401,22 +445,25 @@ What **to** keep:
 | Identity-map kernel forever blocks high-half / modules | Plan kernel VA when modules need it; identity is OK for P7 start |
 | Nest depth ≥ 2 stays cooperative | Document; only deepen nest preempt with careful testing |
 | Rust module ABI fragility | C ABI boundary for all module exports |
-| Too many goals at once | P8 is closed; next epic is Phase 9 — not BusyBox stubs or IDE-as-`.ko` |
-| BusyBox regressions demoralize | Gate: suite + focused smokes after each M*, not drive design |
+| Too many goals at once | One epic at a time (now P9); desktop is the *destination*, not this week’s slice |
+| BusyBox regressions demoralize | Gate: suite + focused smokes after each M*; do not let applets replace the desktop goal |
 
 ---
 
-## Success definition (12–18 month horizon, rough)
+## Success definition
 
-munux is a **Linux-compatible teaching/research kernel in Rust** when:
+munux **succeeds** when you can **install a Linux desktop environment and use the system like Linux** — same apps, same results, kernel written in a different language (clang vs gcc).
 
-1. Static musl programs use **fork, exec, threads (pthread), futex, mmap, files** as on Linux.
-2. Processes are **memory-isolated**.
-3. The kernel can **load and unload a driver module** that registers a device under VFS.
-4. Syscall surface grows deliberately behind that architecture — not ahead of it.
+Milestones on that path:
 
-**Today:** (1) partial (threads + basic futex/signals; no full musl pthread),
-(2) yes, (3) **yes** (`echo.ko` / `echo.mnx` chardev), (4) intentional.
+| Horizon | Result | Status |
+|---------|--------|--------|
+| Spine | Isolated processes, joinable threads, loadable drivers | ✅ P1–P8 |
+| Probe userspace | Static musl / BusyBox: fork, exec, pthread path, futex, mmap, files | 🟡 partial (no full musl pthread / dynlink) |
+| Real userspace | Dynamically linked glibc/musl, PTYs, net, graphics/input | ❌ P10–P13 not started |
+| **Desktop** | Install a DE and use it as a daily Linux machine | ❌ P14 — **the product goal** |
+
+**Today:** spine is in; ~23% of Linux x86_64 syscalls dispatched; BusyBox/static musl are probes. That is **early** on the path to a desktop, not a reason to redefine the goal.
 
 ---
 
@@ -424,10 +471,10 @@ munux is a **Linux-compatible teaching/research kernel in Rust** when:
 
 **Phase 8 is complete.** Do not reopen it for “make IDE a `.ko` on ext2.”
 
-**P9c (`poll` / `select` / `epoll`) landed.** Next Phase 9 slice:
+**P9c (`poll` / `select` / `epoll`) landed.** Next Phase 9 slice (still toward the desktop, one step):
 
 1. **`execveat` / `prctl`**
-2. ELF loader using file maps / `MAP_SHARED` writeback
+2. ELF loader using file maps / `MAP_SHARED` writeback (feeds P10 dynlink)
 3. `ppoll` sigmask / edge-triggered epoll polish
 
 Keep qemu-connect smokes green: `signaltest`, `clonetest`, `futextest`, `echotest`,

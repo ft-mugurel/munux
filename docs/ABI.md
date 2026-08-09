@@ -7,9 +7,9 @@ This document freezes conventions for userspace and the kernel.
 |-------|--------|
 | **Status** | **v0.3.3** — P9c poll/select/epoll |
 | **Arch** | **x86_64** only on `main` |
-| **Goal** | Static Linux/musl binaries use the **same numbers and register ABI** as Linux; missing calls return **`-ENOSYS`** |
+| **Goal** | Linux userspace (static musl today, glibc + a **desktop** later) uses the **same numbers, structs, and register ABI** as Linux; missing calls return **`-ENOSYS`**. Internals may differ; **results must match**. |
 
-Product direction (threads, modules, per-process mm): **[ROADMAP.md](ROADMAP.md)**.  
+Product direction (install and use a Linux desktop): **[ROADMAP.md](ROADMAP.md)**.  
 Full Linux vs munux matrix: **[SYSCALL_COMPARE.md](SYSCALL_COMPARE.md)**.
 
 ---
@@ -208,7 +208,7 @@ Common errno values:
 | TLS | Per-task `fs_base` / `gs_base`; `arch_prctl` |
 | Scheduling | Timer user→user preempt; nest depth ≥ 2 stays cooperative |
 
-**Userspace shell:** freestanding `/bin/sh` (builtins + fork/exec); ignores SIGINT/SIGQUIT. BusyBox applets used as probes.
+**Userspace shell:** freestanding `/bin/sh` (builtins + fork/exec); ignores SIGINT/SIGQUIT. BusyBox applets used as probes toward a full Linux userspace / desktop.
 
 **Kernel debug shell:** after userspace `exit` (`munux>`): `preempttest`, `run sh`, `ps`, …
 

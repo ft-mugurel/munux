@@ -13,7 +13,7 @@ Many “CRASH” / “ENOSYS” rows are **obsolete** after later syscall and as
 |----------|-----|
 | [`BUSYBOX_SUITE_REPORT.md`](BUSYBOX_SUITE_REPORT.md) | Strict ~48-case regression |
 | Suite runner | **Not in this tree** — use qemu-connect; see [BUSYBOX_SUITE_REPORT.md](BUSYBOX_SUITE_REPORT.md) |
-| [`ROADMAP.md`](ROADMAP.md) | Kernel architecture goals |
+| [`ROADMAP.md`](ROADMAP.md) | Product goal (Linux desktop) + phased plan |
 | [`SYSCALL_COMPARE.md`](SYSCALL_COMPARE.md) | Linux vs munux syscall map |
 
 ---

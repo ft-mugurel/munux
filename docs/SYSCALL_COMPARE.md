@@ -1,10 +1,10 @@
 # Linux x86_64 syscalls vs munux
 
-**Last updated:** 2026-08-07 (count synced to dispatch `match`; qemu-connect smoke).  
+**Last updated:** 2026-08-09 (count still 88; goal text: desktop Linux results).  
 Source of Linux names/numbers: host `/usr/include/asm/unistd_64.h`.  
 Source of munux set: `src/syscalls/mod.rs` dispatch `match` (not merely `num` constants — `READLINK` is defined but ENOSYS).
 
-**Product goal:** Linux-compatible kernel (see [ROADMAP.md](ROADMAP.md)) — not 100% syscall count for its own sake.
+**Product goal:** install and use a **Linux desktop** on munux (clang vs gcc: same results, different kernel). Coverage **88 / 385** is a **progress metric** toward that — implement what userspace needs with Linux semantics; do not treat “architecture only” as done. See [ROADMAP.md](ROADMAP.md).
 
 | Metric | Value |
 |--------|------:|

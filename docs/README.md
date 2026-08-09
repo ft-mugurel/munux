@@ -3,7 +3,7 @@
 | Document | Description |
 |----------|-------------|
 | **[../README.md](../README.md)** | Project overview, build, current capabilities |
-| **[ROADMAP.md](ROADMAP.md)** | Architecture plan: mm → schedule → threads → modules |
+| **[ROADMAP.md](ROADMAP.md)** | Product goal (Linux desktop) + phased plan P1–P14 |
 | **[MM.md](MM.md)** | Memory layout + phase checklist (P1–P6 foundation; P7–P8 done, P9 next) |
 | **[SMOKE_VFS.md](SMOKE_VFS.md)** | VFS mounts / fops / pipes (Phase 7 practical) |
 | **[SMOKE_MODULE.md](SMOKE_MODULE.md)** | Modules: MNX1 + ELF `.ko`, hello + `/dev/echo` (P8a–8c) |
@@ -23,4 +23,4 @@
 1. **New contributor** → README → ROADMAP → ABI  
 2. **Implementing a syscall** → ABI + SYSCALL_COMPARE  
 3. **Regression after a change** → SMOKE + focused SMOKE_* + BusyBox suite  
-4. **Planning next architecture** → ROADMAP (P9a–9c done; execveat/prctl next)
+4. **Planning next work** → ROADMAP (desktop is the destination; next slice is execveat/prctl)

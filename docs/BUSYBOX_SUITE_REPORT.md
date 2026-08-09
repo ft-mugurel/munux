@@ -1,7 +1,7 @@
 # BusyBox strict suite report (munux)
 
-> **Role of this report:** regression / ABI probe — **not** the product goal.  
-> Product direction: Linux-compatible Rust kernel (threads, modules, mm isolation).  
+> **Role of this report:** regression / ABI probe. BusyBox is **not** the product.  
+> Product goal: install and use a **Linux desktop** on munux (same results as Linux; kernel in Rust).  
 > See [ROADMAP.md](ROADMAP.md) and the root [README.md](../README.md).
 
 **Note:** `scripts/busybox_suite.py` is **not in this tree**. The JSON + table below are a

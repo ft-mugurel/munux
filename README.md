@@ -1,7 +1,7 @@
 # munux
 
 **munux** is a freestanding **x86_64** operating-system kernel written in **Rust** and **NASM**.  
-It boots via **Multiboot / GRUB**, runs under **QEMU**, and targets a **Linux-compatible** kernel ABI (syscalls, processes, threads, memory, and later VFS + modules).
+It boots via **Multiboot / GRUB**, runs under **QEMU**, and targets **Linux userspace results**: same syscall ABI, same programs, eventually the same desktop — clang vs gcc, not a Linux source clone.
 
 Started as a **42 KFS** learning kernel; development continues independently as **munux**.
 
@@ -16,17 +16,19 @@ Repository: [github.com/ft-mugurel/munux](https://github.com/ft-mugurel/munux)
 
 ## Project goal
 
-Build a **Linux x86_64 ABI–compatible kernel in Rust** — not “run every BusyBox applet.”
+Build a **Linux x86_64 kernel in Rust** that you can treat like Linux: **install a Linux desktop environment and use the system as a Linux machine**.
 
-BusyBox / static musl binaries are **compatibility probes** and regression tests.  
-Primary architecture targets:
+Internals may differ (Rust vs C, our module format vs mainline `.ko`, different VFS/scheduler). **Results must not** — same syscall numbers and structs, same process/thread/file/mmap/ELF behavior, same userspace.
+
+BusyBox / static musl binaries are **probes and regression tests**, not the product.
+
+**Path (see [docs/ROADMAP.md](docs/ROADMAP.md)):**
 
 1. ~~**Per-process address spaces** and a real process model~~ ✅  
 2. ~~**Threads** (`clone`, TID, futex, TLS) + signals~~ ✅ (practical slices)  
-3. ~~**Loadable kernel modules** (export table, init/exit, chardev)~~ ✅ practical (MNX1, not mainline `.ko`)  
-4. Growing syscall / VFS surface on top of that foundation (Phase 9)  
-
-See **[docs/ROADMAP.md](docs/ROADMAP.md)** for the phased plan.
+3. ~~**Loadable kernel modules** (export table, init/exit, chardev)~~ ✅ practical (MNX1 + ELF ET_REL `.ko`, not mainline vermagic)  
+4. **Phase 9** — grow the Linux surface (`execveat`/`prctl` next)  
+5. **Later** — dynlink/glibc, PTYs/job control, networking, graphics+input, **installable desktop**
 
 ---
 
@@ -37,7 +39,8 @@ VFS (incl. pipes/vops), and **loadable modules** (MNX1 **and** ELF64 ET_REL `.ko
 + Linux `init_module` / `delete_module` / `finit_module`, `/bin/insmod|rmmod|lsmod`,
 `hello.{mnx,ko}`, `echo.{mnx,ko}` → `/dev/echo` with unload refcount).
 
-**Phase 9a–9c** in: symlink/statx, file mmap, **poll/select/epoll**. Next: `execveat`/`prctl`. IDE stays built-in.
+**Phase 9a–9c** in: symlink/statx, file mmap, **poll/select/epoll**. Next: `execveat`/`prctl`.  
+Destination remains a **Linux desktop** (P10–P14). IDE stays built-in.
 
 ### Boot & build
 - Multiboot → long mode trampoline → Rust `kmain`
@@ -91,7 +94,7 @@ VFS (incl. pipes/vops), and **loadable modules** (MNX1 **and** ELF64 ET_REL `.ko
 
 | Doc | Contents |
 |-----|----------|
-| **[docs/ROADMAP.md](docs/ROADMAP.md)** | Architecture roadmap (mm → schedule → threads → modules) |
+| **[docs/ROADMAP.md](docs/ROADMAP.md)** | Product goal (Linux desktop results) + phased plan (P1–P14) |
 | **[docs/MM.md](docs/MM.md)** | Memory layout + phase checklist |
 | **[docs/ABI.md](docs/ABI.md)** | Syscall calling convention, process model, FD rules |
 | **[docs/SYSCALL_COMPARE.md](docs/SYSCALL_COMPARE.md)** | Linux x86_64 vs munux syscall coverage |
