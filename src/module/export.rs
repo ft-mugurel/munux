@@ -122,6 +122,11 @@ const EXPORT_NAMES: &[&str] = &[
     "pci_write_config_dword",
     "pci_iomap",
     "pci_iounmap",
+    "pci_read_config_byte",
+    "pci_read_config_word",
+    "pci_find_capability",
+    "munux_add_disk",
+    "munux_del_disk",
 ];
 
 /// Look up an exported symbol by name. Returns absolute address or None.
@@ -179,6 +184,11 @@ pub fn lookup(name: &str) -> Option<u64> {
         "pci_write_config_dword" => Some(linuxkpi::pci::pci_write_config_dword as usize as u64),
         "pci_iomap" => Some(linuxkpi::pci::pci_iomap as usize as u64),
         "pci_iounmap" => Some(linuxkpi::pci::pci_iounmap as usize as u64),
+        "pci_read_config_byte" => Some(linuxkpi::pci::pci_read_config_byte as usize as u64),
+        "pci_read_config_word" => Some(linuxkpi::pci::pci_read_config_word as usize as u64),
+        "pci_find_capability" => Some(linuxkpi::pci::pci_find_capability as usize as u64),
+        "munux_add_disk" => Some(linuxkpi::blk::munux_add_disk as usize as u64),
+        "munux_del_disk" => Some(linuxkpi::blk::munux_del_disk as usize as u64),
         _ => None,
     }
 }

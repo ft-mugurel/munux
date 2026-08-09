@@ -4,6 +4,7 @@
 //! Keep signatures C-compatible. Do not `#[no_mangle]` names that collide with
 //! `compiler_builtins` (`memcpy` / `memset`) — the export table holds the address.
 
+pub mod blk;
 pub mod fs;
 pub mod irq;
 pub mod mmio;

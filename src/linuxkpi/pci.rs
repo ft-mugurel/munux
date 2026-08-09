@@ -298,6 +298,72 @@ pub extern "C" fn pci_read_config_dword(dev: *mut PciDev, where_: i32, val: *mut
     0
 }
 
+pub extern "C" fn pci_read_config_byte(dev: *mut PciDev, where_: i32, val: *mut u8) -> i32 {
+    if val.is_null() || where_ < 0 {
+        return -22;
+    }
+    let mut dw = 0u32;
+    let rc = pci_read_config_dword(dev, where_ & !3, core::ptr::addr_of_mut!(dw));
+    if rc != 0 {
+        return rc;
+    }
+    let shift = ((where_ & 3) * 8) as u32;
+    unsafe {
+        *val = ((dw >> shift) & 0xff) as u8;
+    }
+    0
+}
+
+pub extern "C" fn pci_read_config_word(dev: *mut PciDev, where_: i32, val: *mut u16) -> i32 {
+    if val.is_null() || where_ < 0 {
+        return -22;
+    }
+    let mut dw = 0u32;
+    let rc = pci_read_config_dword(dev, where_ & !3, core::ptr::addr_of_mut!(dw));
+    if rc != 0 {
+        return rc;
+    }
+    let shift = ((where_ & 2) * 8) as u32;
+    unsafe {
+        *val = ((dw >> shift) & 0xffff) as u16;
+    }
+    0
+}
+
+/// First capability with `id`, or 0.
+pub extern "C" fn pci_find_capability(dev: *mut PciDev, id: i32) -> u8 {
+    let id = id as u8;
+    let mut status = 0u16;
+    if pci_read_config_word(dev, 0x06, core::ptr::addr_of_mut!(status)) != 0 {
+        return 0;
+    }
+    if status & (1 << 4) == 0 {
+        return 0; // no cap list
+    }
+    let mut pos = 0u8;
+    if pci_read_config_byte(dev, 0x34, core::ptr::addr_of_mut!(pos)) != 0 {
+        return 0;
+    }
+    pos &= 0xFC;
+    for _ in 0..48 {
+        if pos < 0x40 {
+            break;
+        }
+        let mut cid = 0u8;
+        if pci_read_config_byte(dev, pos as i32, core::ptr::addr_of_mut!(cid)) != 0 {
+            break;
+        }
+        if cid == id {
+            return pos;
+        }
+        if pci_read_config_byte(dev, pos as i32 + 1, core::ptr::addr_of_mut!(pos)) != 0 {
+            break;
+        }
+        pos &= 0xFC;
+    }
+    0
+}
+
 pub extern "C" fn pci_write_config_dword(dev: *mut PciDev, where_: i32, val: u32) -> i32 {
     if dev.is_null() || where_ < 0 {
         return -22;

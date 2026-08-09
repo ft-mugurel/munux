@@ -84,7 +84,7 @@ Destination remains a **Linux desktop** (P10–P14). IDE stays built-in.
 - `hello.mnx` / `hello.ko` (printk); `echo.*` registers `/dev/echo` via C-ABI `register_chrdev`
 - Unload blocked while the device is open (`echotest` checks EBUSY)
 - Kernel debug shell also has `insmod` / `rmmod` / `lsmod` (after `exit` from sh)
-- **linuxkpi L0–L4:** `hello_c` / `echo_c` / `irqtest` / **`vprobe.ko`** (PCI `pci_register_driver`; PASS on QEMU i440FX). `make run` also attaches virtio-blk-pci. Plan: [docs/LINUXKPI.md](docs/LINUXKPI.md).
+- **linuxkpi L0–L5:** `hello_c` / `echo_c` / `irqtest` / `vprobe` / **`virtio_blk.ko`** → `/dev/vda` (`vdatest`). `make run` attaches virtio-blk-pci + `build/vda.img`. qemu-connect is IDE-only (module prints no device). Plan: [docs/LINUXKPI.md](docs/LINUXKPI.md).
 
 ### Console
 - VGA 80×25 text, PS/2 keyboard (US QWERTY)

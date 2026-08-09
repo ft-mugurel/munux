@@ -36,8 +36,11 @@ int pci_register_driver(struct pci_driver *drv);
 void pci_unregister_driver(struct pci_driver *drv);
 int pci_enable_device(struct pci_dev *dev);
 void pci_disable_device(struct pci_dev *dev);
+int pci_read_config_byte(struct pci_dev *dev, int where, u8 *val);
+int pci_read_config_word(struct pci_dev *dev, int where, u16 *val);
 int pci_read_config_dword(struct pci_dev *dev, int where, u32 *val);
 int pci_write_config_dword(struct pci_dev *dev, int where, u32 val);
+unsigned char pci_find_capability(struct pci_dev *dev, int cap);
 void __iomem *pci_iomap(struct pci_dev *dev, int bar, unsigned long max);
 void pci_iounmap(struct pci_dev *dev, void __iomem *addr);
 

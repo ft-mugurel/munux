@@ -973,25 +973,28 @@ fn open_chrdev(name: &str, readable: bool, writable: bool) -> Result<FileData, V
             if e.module_slot >= 0 {
                 let _ = crate::module::try_get(e.module_slot as usize);
             }
+            let private = if e.fops_id == FOPS_BLK {
+                crate::fs::blockdev::slot_by_name(name).unwrap_or(0) as u64
+            } else {
+                i as u64
+            };
             return Ok(FileData {
                 pos: 0,
                 readable,
                 writable,
-                private: i as u64,
+                private,
                 is_dir: false,
                 fops_id: e.fops_id,
             });
         }
     }
-    // Block device node (e.g. hda) — open via blkdev table.
-    if crate::fs::blockdev::name_at(0) == Some(name)
-        || (name == "hda" && crate::fs::blockdev::count() > 0)
-    {
+    // Block device node not yet in chrdev table.
+    if let Some(slot) = crate::fs::blockdev::slot_by_name(name) {
         return Ok(FileData {
             pos: 0,
             readable,
             writable,
-            private: 0,
+            private: slot as u64,
             is_dir: false,
             fops_id: FOPS_BLK,
         });
@@ -1278,15 +1281,17 @@ fn blk_read_op(f: &mut FileData, buf: &mut [u8]) -> Result<usize, VfsError> {
     if buf.is_empty() {
         return Ok(0);
     }
+    let slot = f.private as usize;
+    let nsec = crate::fs::blockdev::nsectors_on(slot);
     let mut done = 0usize;
     while done < buf.len() {
         let lba = (f.pos / 512) as u32;
         let off = (f.pos % 512) as usize;
-        if lba >= crate::fs::blockdev::sector_count() {
+        if lba >= nsec {
             break;
         }
         let mut sec = [0u8; 512];
-        if crate::fs::blockdev::read_sector(lba, &mut sec).is_err() {
+        if crate::fs::blockdev::read_sector_on(slot, lba, &mut sec).is_err() {
             return if done > 0 {
                 Ok(done)
             } else {
@@ -1309,20 +1314,22 @@ fn blk_write_op(f: &mut FileData, data: &[u8]) -> Result<usize, VfsError> {
     if data.is_empty() {
         return Ok(0);
     }
+    let slot = f.private as usize;
+    let nsec = crate::fs::blockdev::nsectors_on(slot);
     let mut done = 0usize;
     while done < data.len() {
         let lba = (f.pos / 512) as u32;
         let off = (f.pos % 512) as usize;
-        if lba >= crate::fs::blockdev::sector_count() {
+        if lba >= nsec {
             break;
         }
         let mut sec = [0u8; 512];
         if off != 0 || data.len() - done < 512 {
-            let _ = crate::fs::blockdev::read_sector(lba, &mut sec);
+            let _ = crate::fs::blockdev::read_sector_on(slot, lba, &mut sec);
         }
         let n = (512 - off).min(data.len() - done);
         sec[off..off + n].copy_from_slice(&data[done..done + n]);
-        if crate::fs::blockdev::write_sector(lba, &sec).is_err() {
+        if crate::fs::blockdev::write_sector_on(slot, lba, &sec).is_err() {
             return if done > 0 {
                 Ok(done)
             } else {
@@ -1614,7 +1621,8 @@ fn stat_dev_rest(rest: &str) -> Result<VfsStat, VfsError> {
         if e.used && chrdev_name_str(e) == rest {
             let t = vfs_now();
             let (mode, rdev, size, blocks) = if e.fops_id == FOPS_BLK {
-                let secs = crate::fs::blockdev::sector_count() as u64;
+                let slot = crate::fs::blockdev::slot_by_name(rest).unwrap_or(0);
+                let secs = crate::fs::blockdev::nsectors_on(slot) as u64;
                 (S_IFBLK | 0o660, 0x0300, secs * 512, secs)
             } else {
                 (S_IFCHR | 0o666, 0x0100 + i as u32, 0, 0)
@@ -1777,7 +1785,7 @@ pub fn vfs_stat_open(f: &FileData) -> Result<VfsStat, VfsError> {
             })
         }
         FOPS_BLK => {
-            let secs = crate::fs::blockdev::sector_count() as u64;
+            let secs = crate::fs::blockdev::nsectors_on(f.private as usize) as u64;
             let t = vfs_now();
             Ok(VfsStat {
                 ino: 0xF000_02FF,

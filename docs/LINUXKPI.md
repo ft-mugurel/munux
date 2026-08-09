@@ -1,6 +1,6 @@
 # Linux driver sources on munux (linuxkpi)
 
-**Status:** L0–L4 **done** (2026-08-09). Next: L5 virtio-blk (first hardware Linux driver).  
+**Status:** L0–L5 **done** (2026-08-09). virtio-blk → `/dev/vda`. Next: more virtio (net) after P12, or P9 userspace.  
 **Success bar (chosen):** **compile Linux driver `.c` sources** against munux headers, `insmod` the resulting ELF `.ko`, and have the device work.  
 **Not the bar:** drop a prebuilt Ubuntu/Fedora `.ko` into `/lib/modules` and have it load. That needs one exact Linux kernel ABI (vermagic + thousands of `EXPORT_SYMBOL`s + identical struct layouts).
 
@@ -162,19 +162,11 @@ After L2, **new modules are C + linuxkpi only.** Do not load NASM `echo.ko` and 
 **Exit:** munux sees PCI devices and a linuxkpi probe runs. ✅  
 `insmod /lib/modules/vprobe.ko` → Intel/VGA (and **virtio** when QEMU has `-device virtio-blk-pci`, as in `make run`). qemu-connect (IDE-only) still PASSes on i440FX.
 
-### L5 — First real Linux driver
+### L5 — First real Linux driver ✅
 
-Pick **one** QEMU device and compile its Linux `.c` (plus the few local files it includes):
+`modules/linux/virtio_blk.c` — modern virtio-pci blk using linuxkpi (`pci_*`, `dma_alloc_coherent`, `request_irq`, `munux_add_disk`). Not a paste of mainline `virtio_blk.c` (blk-mq), but the same PCI/virtqueue/request contract.
 
-| Candidate | Why | Pulls in |
-|-----------|-----|----------|
-| **virtio-blk** (recommended) | Block root/disk story; QEMU standard; feeds desktop/install | `virtio_ring`, `virtio_mmio` or `virtio_pci` |
-| virtio-net | Desktop networking | netdev stack (huge) — only after a munux netif |
-| e1000 | Common QEMU NIC | PCI + netdev |
-
-**Do not** start e1000/i915 until virtio-blk (or another bounded driver) is green.
-
-**Exit:** `insmod virtio-blk.ko` (built from Linux sources + our headers) → `/dev/vda` or a second blkdev readable in the guest.
+**Exit:** `insmod /lib/modules/virtio_blk.ko` → `/dev/vda` readable. ✅ `vdatest: PASS` with QEMU `-device virtio-blk-pci` (`make run` attaches `build/vda.img`). qemu-connect (IDE-only) prints `virtio_blk: no virtio-blk PCI device` and init fails — expected.
 
 ### After L5 (desktop path)
 
@@ -233,8 +225,9 @@ Do **not** pause Phase 9 forever. Interleave:
 2. ~~**L2** echo as Linux C miscdevice~~ ✅  
 3. ~~**L3** spinlock / wait / `request_irq`~~ ✅ `irqtest.ko`  
 4. ~~**L4** ioremap + PCI `pci_register_driver`~~ ✅ `vprobe.ko`  
-5. **L5 virtio-blk** — first hardware Linux driver (tell user when ready)  
+5. ~~**L5 virtio-blk**~~ ✅ `/dev/vda` + `vdatest: PASS`  
 6. **P9** `execveat` / `prctl` — can interleave  
+7. virtio-net after P12 sockets  
 
 ---
 

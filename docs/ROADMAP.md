@@ -383,7 +383,7 @@ Syscall coverage % (**88 / 385 ≈ 22.9%** today) is a **progress metric** towar
 
 ## Epic LK — Linux driver sources (linuxkpi)
 
-**Plan:** [LINUXKPI.md](LINUXKPI.md). **L0–L4 done.** Parallel to P9.
+**Plan:** [LINUXKPI.md](LINUXKPI.md). **L0–L5 done** (virtio-blk `/dev/vda`). Parallel to P9.
 
 Compile Linux **`.c` drivers** against munux-owned `include/linux/*.h`. Implement that C API in Rust (`extern "C"`). Do **not** load prebuilt Ubuntu `.ko` files.
 
@@ -394,7 +394,7 @@ Compile Linux **`.c` drivers** against munux-owned `include/linux/*.h`. Implemen
 | **L2** | Linux `file_operations` / misc — `echo_c.ko` + `echotest` PASS | ✅ |
 | **L3** | spinlock / completion / `request_irq` — `irqtest.ko` | ✅ |
 | **L4** | `ioremap` + PCI scan / `pci_register_driver` — `vprobe.ko` | ✅ |
-| **L5** | One upstream driver (virtio-blk recommended) | |
+| **L5** | virtio-blk → `/dev/vda` (`vdatest: PASS`) | ✅ |
 
 MNX1 + NASM modules stay until L2 is green, then freeze.
 
@@ -505,7 +505,7 @@ Milestones on that path:
 
 **P9 (userspace):** `execveat` / `prctl` → file-map ELF / `MAP_SHARED` → dynlink.
 
-**LK (drivers):** [LINUXKPI.md](LINUXKPI.md) — L0–L4 done (`vprobe.ko` PCI probe). Next **L5 virtio-blk**.
+**LK (drivers):** [LINUXKPI.md](LINUXKPI.md) — L0–L5 done. Next: virtio-net after P12, or more linuxkpi as needed.
 
 Do not reopen P8 for MNX1 features. New modules are linuxkpi C.
 
