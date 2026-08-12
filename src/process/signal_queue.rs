@@ -17,7 +17,11 @@ pub const SIGQUIT: u32 = 3;
 pub const SIGKILL: u32 = 9;
 pub const SIGTERM: u32 = 15;
 pub const SIGCHLD: u32 = 17;
+pub const SIGCONT: u32 = 18;
 pub const SIGSTOP: u32 = 19;
+pub const SIGTSTP: u32 = 20;
+pub const SIGTTIN: u32 = 21;
+pub const SIGTTOU: u32 = 22;
 
 /// Handler sentinels (Linux).
 pub const SIG_DFL: u64 = 0;
@@ -39,6 +43,10 @@ fn default_terminates(sig: u32) -> bool {
         SIGHUP | SIGINT | SIGQUIT | SIGKILL | SIGTERM | 6 | 4 | 8 | 11
         // ABRT=6, ILL=4, FPE=8, SEGV=11
     )
+}
+
+fn default_stops(sig: u32) -> bool {
+    matches!(sig, SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU)
 }
 
 fn is_blocked(p: &super::pcb::Process, sig: u32) -> bool {
@@ -74,6 +82,13 @@ pub fn proc_kill(pid: Pid, sig: u32) -> i32 {
 
     // Process-directed kill: act on the whole thread group for fatal defaults.
     let tgid = target.1;
+    if sig == SIGCONT {
+        return continue_group(tgid);
+    }
+    if default_stops(sig) && (sig == SIGSTOP || (!is_ignored_group(tgid, sig) && !is_handled_group(tgid, sig)))
+    {
+        return stop_group(tgid, sig);
+    }
     if default_terminates(sig) && !is_ignored_group(tgid, sig) && !is_handled_group(tgid, sig) {
         return terminate_group(tgid, sig);
     }
@@ -137,6 +152,23 @@ pub fn proc_tkill(tid: Pid, sig: u32) -> i32 {
         return -3;
     }
 
+    let tgid = table::with_pid(tid, |p| if p.tgid != 0 { p.tgid } else { p.pid }).unwrap_or(tid);
+    if sig == SIGCONT {
+        return continue_group(tgid);
+    }
+    if default_stops(sig) {
+        let ign = table::with_pid(tid, |p| p.sig_ignore[sig as usize] && !is_uncatchable(sig))
+            .unwrap_or(false);
+        let handled = table::with_pid(tid, |p| {
+            p.sig_handlers[sig as usize] != 0
+                && p.sig_handlers[sig as usize] != SIG_IGN as usize
+                && !is_uncatchable(sig)
+        })
+        .unwrap_or(false);
+        if sig == SIGSTOP || (!ign && !handled) {
+            return stop_group(tgid, sig);
+        }
+    }
     if default_terminates(sig) {
         let ign = table::with_pid(tid, |p| p.sig_ignore[sig as usize] && !is_uncatchable(sig))
             .unwrap_or(false);
@@ -147,9 +179,6 @@ pub fn proc_tkill(tid: Pid, sig: u32) -> i32 {
         })
         .unwrap_or(false);
         if !ign && !handled {
-            // Terminate whole group (thread death of fatal = process death for now).
-            let tgid = table::with_pid(tid, |p| if p.tgid != 0 { p.tgid } else { p.pid })
-                .unwrap_or(tid);
             return terminate_group(tgid, sig);
         }
     }
@@ -280,6 +309,52 @@ fn queue_or_ignore(tid: Pid, sig: u32) -> i32 {
         Some(Ok(_)) => 0,
         Some(Err(e)) => e,
         None => -3,
+    }
+}
+
+/// Stop every live task in `tgid`. Current task is left Stopped (caller yields).
+pub fn stop_group(tgid: Pid, sig: u32) -> i32 {
+    if tgid <= 1 {
+        return 0;
+    }
+    table::for_each_process(|i, _| {
+        let _ = table::with_index(i, |p| {
+            if !p.used {
+                return;
+            }
+            let g = if p.tgid != 0 { p.tgid } else { p.pid };
+            if g != tgid || p.state == ProcessState::Zombie || p.state == ProcessState::Unused {
+                return;
+            }
+            p.state = ProcessState::Stopped;
+            p.stopped_sig = sig;
+            p.stop_reported = false;
+        });
+    });
+    0
+}
+
+fn continue_group(tgid: Pid) -> i32 {
+    let mut n = 0i32;
+    table::for_each_process(|i, _| {
+        let _ = table::with_index(i, |p| {
+            if !p.used {
+                return;
+            }
+            let g = if p.tgid != 0 { p.tgid } else { p.pid };
+            if g != tgid || p.state != ProcessState::Stopped {
+                return;
+            }
+            p.state = ProcessState::Ready;
+            p.stopped_sig = 0;
+            p.stop_reported = false;
+            n += 1;
+        });
+    });
+    if n == 0 {
+        0
+    } else {
+        0
     }
 }
 

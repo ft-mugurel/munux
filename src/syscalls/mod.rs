@@ -1121,6 +1121,42 @@ pub fn fatal_signal_exit(sig: u32) -> ! {
     finish_exit(status, true);
 }
 
+/// Cooperative yield after job-control stop (SIGTTIN/SIGTTOU). Nest returns
+/// to the waiter so `waitpid(WUNTRACED)` can see the Stopped child.
+pub fn job_stop_yield() -> ! {
+    let via_nest = crate::process::with_current(|p| p.entered_via_nest).unwrap_or(true);
+    let parent = crate::process::with_current(|p| p.parent).unwrap_or(1);
+    let _ = crate::process::with_current(|p| {
+        if p.state != crate::process::ProcessState::Stopped {
+            p.state = crate::process::ProcessState::Stopped;
+        }
+    });
+    if parent > 0 {
+        if let Some(i) = crate::process::table::find_pid(parent) {
+            crate::process::table::set_current_index(i);
+            let _ = crate::process::table::with_pid(parent, |p| {
+                if p.state != crate::process::ProcessState::Zombie
+                    && p.state != crate::process::ProcessState::Stopped
+                {
+                    p.state = crate::process::ProcessState::Running;
+                }
+            });
+        }
+    }
+    crate::process::apply_tls();
+    if via_nest {
+        extern "C" {
+            fn get_enter_nest_depth() -> u64;
+        }
+        if unsafe { get_enter_nest_depth() } > 0 {
+            unsafe {
+                return_from_user();
+            }
+        }
+    }
+    resume_current_from_trap();
+}
+
 // Linux clockid_t (subset)
 const CLOCK_REALTIME: u64 = 0;
 const CLOCK_MONOTONIC: u64 = 1;
@@ -1671,6 +1707,21 @@ fn tty_ioctl_common(dev: TtyDev, cmd: u64, arg: u64) -> u64 {
     const TIOCSWINSZ: u64 = 0x5414;
     const TIOCNOTTY: u64 = 0x5422;
     const TIOCGSID: u64 = 0x5429;
+
+    let changing = matches!(
+        cmd,
+        TCSETS | TCSETSW | TCSETSF | TCSETS2 | TCSETSW2 | TCSETSF2 | TIOCSPGRP
+    );
+    if changing {
+        let (ctty_id, fg) = match dev {
+            TtyDev::Console => (1, crate::tty::console_fg_pgid()),
+            TtyDev::Pty(n) => (crate::fs::pty::ctty_for(n), crate::fs::pty::fg_pgid(n)),
+        };
+        let rc = crate::tty::job_check_ioctl(ctty_id, fg);
+        if rc < 0 {
+            return errno::neg(errno::EIO);
+        }
+    }
 
     match cmd {
         TCGETS => {
@@ -3795,13 +3846,15 @@ fn load_elf_from_ino(ino: u32, argv: &[&str]) -> Result<crate::elf::LoadedImage,
 /// run them), then reaps.
 fn sys_wait4(pid: u64, status_ptr: u64, options: u64) -> u64 {
     const WNOHANG: u64 = 1;
+    const WUNTRACED: u64 = 2;
     let wait_for = pid as i32;
     let nohang = (options & WNOHANG) != 0;
+    let wuntraced = (options & WUNTRACED) != 0;
 
     // Blocking wait: run Ready children until one zombies or none left to run.
     for _ in 0..32 {
         let mut status = 0i32;
-        let got = crate::process::waitpid(wait_for, Some(&mut status), true);
+        let got = crate::process::waitpid_opts(wait_for, Some(&mut status), true, wuntraced);
 
         if got > 0 {
             if status_ptr != 0 {

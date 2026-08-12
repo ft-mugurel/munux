@@ -117,6 +117,7 @@ pub const ICANON: u32 = 0o0000002;
 pub const ECHO: u32 = 0o0000010;
 pub const ECHOE: u32 = 0o0000020;
 pub const ECHOK: u32 = 0o0000040;
+pub const TOSTOP: u32 = 0o0000400;
 const IEXTEN: u32 = 0o100000;
 const CS8: u32 = 0o0000060;
 const CREAD: u32 = 0o0000200;
@@ -306,4 +307,64 @@ pub fn tiocsctty_pty(n: usize, steal: bool) -> i32 {
         });
     }
     0
+}
+
+/// Background tty access. `0` = proceed, `-5` = EIO.
+/// Default action stops the caller and does not return (`job_stop_yield`).
+pub fn job_check(ctty_id: i32, fg_pgid: i32, sig: u32) -> i32 {
+    if ctty_id <= 0 || fg_pgid <= 0 {
+        return 0;
+    }
+    let (pgid, ctty, tgid) = crate::process::with_current(|p| (p.pgid, p.ctty, p.tgid))
+        .unwrap_or((0, 0, 0));
+    if ctty != ctty_id || pgid == 0 || pgid == fg_pgid {
+        return 0;
+    }
+    let ign_or_block = crate::process::with_current(|p| {
+        let si = sig as usize;
+        if si >= crate::process::pcb::MAX_SIGNALS {
+            return false;
+        }
+        if p.sig_ignore[si] {
+            return true;
+        }
+        if sig < 64 && (p.sig_blocked & (1u64 << sig as u64)) != 0 {
+            return true;
+        }
+        false
+    })
+    .unwrap_or(false);
+    if ign_or_block {
+        return -5; // EIO
+    }
+    let handled = crate::process::with_current(|p| {
+        let h = p.sig_handlers[sig as usize];
+        h != 0 && h != crate::process::signal_queue::SIG_IGN as usize
+    })
+    .unwrap_or(false);
+    if handled {
+        return -5;
+    }
+    let tg = if tgid != 0 {
+        tgid
+    } else {
+        crate::process::gettid()
+    };
+    let _ = crate::process::signal_queue::stop_group(tg, sig);
+    crate::syscalls::job_stop_yield();
+}
+
+pub fn job_check_read(ctty_id: i32, fg_pgid: i32) -> i32 {
+    job_check(ctty_id, fg_pgid, crate::process::signal_queue::SIGTTIN)
+}
+
+pub fn job_check_write(ctty_id: i32, fg_pgid: i32, tostop: bool) -> i32 {
+    if !tostop {
+        return 0;
+    }
+    job_check(ctty_id, fg_pgid, crate::process::signal_queue::SIGTTOU)
+}
+
+pub fn job_check_ioctl(ctty_id: i32, fg_pgid: i32) -> i32 {
+    job_check(ctty_id, fg_pgid, crate::process::signal_queue::SIGTTOU)
 }

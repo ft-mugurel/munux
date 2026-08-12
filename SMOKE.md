@@ -40,6 +40,7 @@ From freestanding **`$`**:
 - [ ] `jobtest` — session/pgrp + console termios; `jobtest: ALL PASS`
 - [ ] `ptytest` — `/dev/ptmx` + `/dev/pts/N`; `ptytest: ALL PASS`
 - [ ] `n_ttytest` — cooked line + `^C`; `n_ttytest: ALL PASS`
+- [ ] `jobstoptest` — `SIGTTIN`/`SIGTTOU` stop; `jobstoptest: ALL PASS`
 - [ ] `busybox true` — returns to `$`
 - [ ] Optional Ctrl-C: `busybox sleep 30` then **Ctrl+C** → back to `$` (shell stays alive)
 

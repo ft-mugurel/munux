@@ -59,6 +59,8 @@ pub enum ProcessState {
     Thread = 4,
     /// Blocked in wait() or similar
     Sleeping = 5,
+    /// Job-control stop (SIGTTIN / SIGTTOU / SIGTSTP / SIGSTOP)
+    Stopped = 6,
 }
 
 impl ProcessState {
@@ -70,6 +72,7 @@ impl ProcessState {
             ProcessState::Zombie => "zombie",
             ProcessState::Thread => "thread",
             ProcessState::Sleeping => "sleeping",
+            ProcessState::Stopped => "stopped",
         }
     }
 }
@@ -174,6 +177,10 @@ pub struct Process {
     /// `prctl(PR_SET_PDEATHSIG)` — signal delivered when the parent task exits.
     /// 0 = none. Not inherited across `fork`/`clone` (Linux).
     pub pdeathsig: u32,
+    /// Signal that last stopped this task (`WSTOPSIG`); 0 if not stopped.
+    pub stopped_sig: u32,
+    /// `wait(WUNTRACED)` already reported this stop (until `SIGCONT`).
+    pub stop_reported: bool,
 }
 
 impl Process {
@@ -226,6 +233,8 @@ impl Process {
             dumpable: 1,
             no_new_privs: false,
             pdeathsig: 0,
+            stopped_sig: 0,
+            stop_reported: false,
         }
     }
 

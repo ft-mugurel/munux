@@ -12,6 +12,7 @@
 | `/dev/ptmx` | Open allocates a pair; `TIOCGPTN` / `TIOCSPTLCK` |
 | `/dev/pts/N` | Slave tty (termios, `TIOCSCTTY`); byte rings to master |
 | n_tty (P11c) | Master input: `ICANON` line/erase, `ECHO`, `ISIG` (`^C`/`^\`) |
+| Job stop (P11d) | Background tty `read`/`write` → `SIGTTIN`/`SIGTTOU`; `wait(WUNTRACED)`; `SIGCONT` |
 
 ## Quick test (qemu-connect)
 
@@ -39,9 +40,16 @@ n_ttytest: ALL PASS
 
 `n_ttytest`: master writes `ab` + DEL + `c` + NL → slave reads `ac\n`; then a child `TIOCSCTTY` + write `^C` on the master dies with SIGINT.
 
+```text
+$ jobstoptest
+jobstoptest: ALL PASS
+```
+
+Background slave `read` → `SIGTTIN` stop (`WUNTRACED`); `TOSTOP` + background `write` → `SIGTTOU`. `SIGCONT` then `SIGKILL` reaps.
+
 ## Not yet
 
 - Full n_tty (IXON, reprint, UTF-8 erase)
-- `SIGTTOU`/`SIGTTIN` / stopped jobs
+- Orphaned pgrp / `WCONTINUED` polish
 - Unlimited PTY count (pool is 4)
 - Console keyboard is not yet fed through the same cook path

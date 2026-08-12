@@ -23,7 +23,7 @@ pub use memory::{
 pub use pcb::{Pid, Process, ProcessState, Uid, MAX_PROCESSES};
 pub use sys::{
     begin_user_task, exit_group, exit_user, getpid, getppid, gettid, getuid, reap_any_child,
-    waitpid,
+    waitpid, waitpid_opts,
 };
 pub use table::{current_index, current_pid, for_each_process, process_count, with_current};
 

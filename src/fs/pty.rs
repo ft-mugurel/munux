@@ -307,6 +307,17 @@ pub fn slave_write(n: usize, data: &[u8]) -> Result<usize, i32> {
     if data.is_empty() {
         return Ok(0);
     }
+    let lflag = {
+        let p = &ptys()[n];
+        if !p.used {
+            return Err(-9);
+        }
+        tty::termios_u32(&p.termios, 12)
+    };
+    let rc = crate::tty::job_check_write(ctty_for(n), fg_pgid(n), (lflag & tty::TOSTOP) != 0);
+    if rc < 0 {
+        return Err(rc);
+    }
     let oflag = {
         let p = &ptys()[n];
         if !p.used {
@@ -462,6 +473,11 @@ fn push_master(n: usize, data: &[u8]) -> usize {
 
 /// Slave read (stdin).
 pub fn slave_read(n: usize, buf: &mut [u8]) -> Result<usize, i32> {
+    let fg = fg_pgid(n);
+    let rc = crate::tty::job_check_read(ctty_for(n), fg);
+    if rc < 0 {
+        return Err(rc);
+    }
     end_read(n, buf, true)
 }
 

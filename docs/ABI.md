@@ -5,7 +5,7 @@ This document freezes conventions for userspace and the kernel.
 
 | Field | Value |
 |-------|--------|
-| **Status** | **v0.3.12** — P11c n_tty cook on PTY |
+| **Status** | **v0.3.13** — P11d SIGTTIN/SIGTTOU job stop |
 | **Arch** | **x86_64** only on `main` |
 | **Goal** | Linux userspace (static musl today, glibc + a **desktop** later) uses the **same numbers, structs, and register ABI** as Linux; missing calls return **`-ENOSYS`**. Internals may differ; **results must match**. |
 
@@ -219,9 +219,9 @@ Common errno values:
 | `exit` | One task → zombie; parent woken |
 | `exit_group` | Tear down thread group; one zombie for wait |
 | `wait4` | Reap zombie; schedules Ready children cooperatively |
-| Signals | `kill`/`tkill`/`tgkill`, `rt_sigaction`/`rt_sigprocmask`/`rt_sigreturn`; default terminate + user handlers; `kill(-pgid)` |
+| Signals | `kill`/`tkill`/`tgkill`; default terminate + **stop** (`SIGTTIN`/`SIGTTOU`/`SIGTSTP`/`SIGSTOP`); `SIGCONT`; `wait(WUNTRACED)` |
 | Session | `sid`/`pgid` on PCB; `setsid`/`setpgid`/`getpgrp`/`getpgid`/`getsid`; fork inherits |
-| TTY | Console stdio is a tty; **PTY pair** `/dev/ptmx` + `/dev/pts/N`; master input cooked (`ICANON`/`ECHO`/`ISIG`) |
+| TTY | Console + PTY; n_tty cook; background read/write → `SIGTTIN`/`SIGTTOU` (write needs `TOSTOP`) |
 | Futex | `FUTEX_WAIT`/`WAKE`/`REQUEUE`/`CMP_REQUEUE` (+PRIVATE, relative timeout); `clear_child_tid` wake on exit |
 | cwd | Per-process (not yet real `CLONE_FS` object share) |
 | TLS | Per-task `fs_base` / `gs_base`; `arch_prctl`; `CLONE_SETTLS`; do not reload FS/GS selectors on enter (would clear base MSRs) |
@@ -270,7 +270,7 @@ Foundation for threads is in; polish and next architecture:
 4. Full signal frames (`siginfo`/`ucontext`), absolute/PI futex, musl pthread soak  
 5. ~~`pipe`/`dup`, `rename`/`link`, VFS + modules~~ ✅ P7–P8c  
 6. ~~`readlink`/`symlink`/`statx`~~ ✅ P9a; ~~file mmap~~ ✅ P9b; ~~poll/select/epoll~~ ✅ P9c; ~~`execveat`/`prctl`~~ ✅ P9d; ~~file-map ELF + `MAP_SHARED`~~ ✅ P9e  
-7. ~~session/pgrp + console termios~~ ✅ P11a; ~~PTY pair~~ ✅ P11b; ~~n_tty cook~~ ✅ P11c; `SIGTTOU`/`SIGTTIN` still open
+7. ~~P11 terminals / job control~~ ✅ P11a–d (session, PTY, n_tty, job stop)
 
 Using **wrong syscall numbers** would make Linux binaries impossible — munux keeps Linux numbers from v0.2 forward.
 
@@ -299,3 +299,4 @@ Using **wrong syscall numbers** would make Linux binaries impossible — munux k
 | **0.3.10** | P11a: `setsid`/`setpgid`/`getpgrp`/`getpgid`/`getsid`; console termios + `TIOCSCTTY`; smoke `jobtest` |
 | **0.3.11** | P11b: `/dev/ptmx` + `/dev/pts/N`; smoke `ptytest` |
 | **0.3.12** | P11c: PTY n_tty (`ICANON`/`ECHO`/`ISIG`); smoke `n_ttytest` |
+| **0.3.13** | P11d: `SIGTTIN`/`SIGTTOU` stop + `SIGCONT` + `WUNTRACED`; smoke `jobstoptest` |

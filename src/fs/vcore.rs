@@ -1185,6 +1185,17 @@ pub fn vfs_open_rel(dir_ino: u32, path: &str, flags: u32) -> Result<FileData, Vf
 // ---------------------------------------------------------------------------
 
 fn console_write_op(_f: &mut FileData, data: &[u8]) -> Result<usize, VfsError> {
+    let mut tios = [0u8; crate::tty::TERMIOS_LEN];
+    crate::tty::console_get_termios(&mut tios);
+    let lflag = crate::tty::termios_u32(&tios, 12);
+    let rc = crate::tty::job_check_write(
+        1,
+        crate::tty::console_fg_pgid(),
+        (lflag & crate::tty::TOSTOP) != 0,
+    );
+    if rc < 0 {
+        return Err(VfsError::Fault);
+    }
     let mut n = 0usize;
     for &b in data {
         if b == b'\n' || b == b'\t' {
@@ -1213,6 +1224,10 @@ fn console_write_op(_f: &mut FileData, data: &[u8]) -> Result<usize, VfsError> {
 fn console_read_op(_f: &mut FileData, buf: &mut [u8]) -> Result<usize, VfsError> {
     if buf.is_empty() {
         return Ok(0);
+    }
+    let rc = crate::tty::job_check_read(1, crate::tty::console_fg_pgid());
+    if rc < 0 {
+        return Err(VfsError::Fault);
     }
     crate::tty::enter_console_read();
     loop {
@@ -1415,7 +1430,8 @@ fn pipe_release_w(f: &mut FileData) {
 fn map_pty_err(e: i32) -> VfsError {
     match e {
         -11 => VfsError::Inval,
-        -32 | -5 => VfsError::Fault,
+        -5 => VfsError::Inval, // EIO surfaced as EINVAL until Io variant
+        -32 => VfsError::Fault,
         -9 => VfsError::Inval,
         _ => VfsError::Fault,
     }

@@ -198,6 +198,15 @@ pub fn exit_group(status: i32) {
 /// waitpid(pid, status): pid == -1 → any child.
 /// If `nohang` and no zombie, returns 0. If no children at all, returns -1 (ECHILD).
 pub fn waitpid(wait_for: Pid, status_out: Option<&mut i32>, nohang: bool) -> Pid {
+    waitpid_opts(wait_for, status_out, nohang, false)
+}
+
+pub fn waitpid_opts(
+    wait_for: Pid,
+    status_out: Option<&mut i32>,
+    nohang: bool,
+    wuntraced: bool,
+) -> Pid {
     let parent = table::current_pid();
 
     // Do we have any matching children (alive or zombie)?
@@ -215,26 +224,61 @@ pub fn waitpid(wait_for: Pid, status_out: Option<&mut i32>, nohang: bool) -> Pid
     let mut found_pid: Pid = -1;
     let mut found_code = 0;
     let mut found_idx = 0usize;
+    let mut found_stopped = false;
+    let mut found_stopsig = 0u32;
 
     table::for_each_process(|idx, p| {
         if found_pid != -1 {
             return;
         }
-        if p.used
-            && p.state == ProcessState::Zombie
-            && p.parent == parent
-            && (wait_for == -1 || wait_for == 0 || p.pid == wait_for)
-        {
+        if !p.used || p.parent != parent {
+            return;
+        }
+        if !(wait_for == -1 || wait_for == 0 || p.pid == wait_for) {
+            return;
+        }
+        if p.state == ProcessState::Zombie {
             found_pid = p.pid;
             found_code = p.exit_code;
             found_idx = idx;
+            found_stopped = false;
         }
     });
 
+    if found_pid < 0 && wuntraced {
+        table::for_each_process(|idx, p| {
+            if found_pid != -1 {
+                return;
+            }
+            if !p.used || p.parent != parent || p.state != ProcessState::Stopped {
+                return;
+            }
+            if p.stop_reported {
+                return;
+            }
+            if !(wait_for == -1 || wait_for == 0 || p.pid == wait_for) {
+                return;
+            }
+            found_pid = p.pid;
+            found_idx = idx;
+            found_stopped = true;
+            found_stopsig = p.stopped_sig;
+        });
+    }
+
     if found_pid < 0 {
-        // No scheduler sleep yet: behave like WNOHANG when children exist.
         let _ = nohang;
         return if has_child { 0 } else { -1 };
+    }
+    if found_stopped {
+        let _ = table::with_index(found_idx, |p| {
+            p.stop_reported = true;
+        });
+        if let Some(s) = status_out {
+            // WIFSTOPPED: (sig << 8) | 0x7f
+            *s = ((found_stopsig as i32) << 8) | 0x7f;
+        }
+        return found_pid;
     }
     if let Some(s) = status_out {
         // Linux wait status: normal exit → (code & 0xff) << 8
