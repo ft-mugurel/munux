@@ -98,6 +98,9 @@ impl FdTable {
     /// Close every entry (process exit / slot free).
     pub fn close_all(&mut self) {
         for i in 0..FD_MAX {
+            if self.entries[i].is_open() {
+                vcore::vfs_release(&mut self.entries[i].data);
+            }
             self.entries[i] = File::closed();
         }
     }
@@ -181,6 +184,12 @@ impl FdTable {
         if file.data.fops_id == vcore::FOPS_MOD {
             vcore::mod_chrdev_dup(&file.data);
         }
+        if file.data.fops_id == vcore::FOPS_PTY_MASTER {
+            crate::fs::pty::dup_master(file.data.private as usize);
+        }
+        if file.data.fops_id == vcore::FOPS_PTY_SLAVE {
+            crate::fs::pty::dup_slave(file.data.private as usize);
+        }
         self.install(file)
     }
 
@@ -198,6 +207,12 @@ impl FdTable {
         }
         if file.data.fops_id == vcore::FOPS_MOD {
             vcore::mod_chrdev_dup(&file.data);
+        }
+        if file.data.fops_id == vcore::FOPS_PTY_MASTER {
+            crate::fs::pty::dup_master(file.data.private as usize);
+        }
+        if file.data.fops_id == vcore::FOPS_PTY_SLAVE {
+            crate::fs::pty::dup_slave(file.data.private as usize);
         }
         self.entries[new] = file;
         Ok(new)
@@ -391,6 +406,18 @@ pub fn clone_table(parent_idx: usize, child_idx: usize) {
         let parent = *core::ptr::addr_of!(TABLES[parent_files]);
         TABLES[child_idx].clone_from(&parent);
         FILES_REFS[child_idx] = 1;
+        for i in 0..FD_MAX {
+            let f = &TABLES[child_idx].entries[i];
+            if !f.is_open() {
+                continue;
+            }
+            if f.data.fops_id == vcore::FOPS_PTY_MASTER {
+                crate::fs::pty::dup_master(f.data.private as usize);
+            }
+            if f.data.fops_id == vcore::FOPS_PTY_SLAVE {
+                crate::fs::pty::dup_slave(f.data.private as usize);
+            }
+        }
     }
     let _ = crate::process::table::with_index(child_idx, |p| {
         p.files_slot = child_idx;
@@ -709,5 +736,37 @@ pub fn sys_fd_is_console(fd: u64) -> bool {
         t.get(fd as usize)
             .map(|f| f.data.fops_id == vcore::FOPS_CONSOLE)
             .unwrap_or(false)
+    })
+}
+
+/// PTY master index if `fd` is `/dev/ptmx`.
+pub fn sys_fd_pty_master(fd: u64) -> Option<usize> {
+    if !is_ready() || fd >= FD_MAX as u64 {
+        return None;
+    }
+    with_current(|t| {
+        t.get(fd as usize).and_then(|f| {
+            if f.data.fops_id == vcore::FOPS_PTY_MASTER {
+                Some(f.data.private as usize)
+            } else {
+                None
+            }
+        })
+    })
+}
+
+/// PTY slave index if `fd` is `/dev/pts/N`.
+pub fn sys_fd_pty_slave(fd: u64) -> Option<usize> {
+    if !is_ready() || fd >= FD_MAX as u64 {
+        return None;
+    }
+    with_current(|t| {
+        t.get(fd as usize).and_then(|f| {
+            if f.data.fops_id == vcore::FOPS_PTY_SLAVE {
+                Some(f.data.private as usize)
+            } else {
+                None
+            }
+        })
     })
 }

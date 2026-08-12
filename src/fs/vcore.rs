@@ -88,12 +88,17 @@ pub const FOPS_BLK: u8 = 11;
 pub const FOPS_MOD: u8 = 12;
 /// epoll instance fd.
 pub const FOPS_EPOLL: u8 = 13;
+/// `/dev/ptmx` registry id (open returns [`FOPS_PTY_MASTER`]).
+pub const FOPS_PTMX: u8 = 14;
+pub const FOPS_PTY_MASTER: u8 = 15;
+pub const FOPS_PTY_SLAVE: u8 = 16;
 
 /// Synthetic inodes for virtual directories (not on ext2).
 pub const VINO_PROC: u32 = 0xF000_0001;
 pub const VINO_DEV: u32 = 0xF000_0002;
 pub const VINO_RAM: u32 = 0xF000_0003;
 pub const VINO_PROC_SELF: u32 = 0xF000_0004;
+pub const VINO_PTS: u32 = 0xF000_0005;
 
 pub fn is_virtual_ino(ino: u32) -> bool {
     (ino & 0xF000_0000) == 0xF000_0000
@@ -108,7 +113,7 @@ pub const DT_DIR: u8 = 4;
 pub const DT_REG: u8 = 8;
 pub const DT_CHR: u8 = 2;
 
-static FOPS_TABLE: [FileOperations; 14] = [
+static FOPS_TABLE: [FileOperations; 17] = [
     FileOperations {
         name: "none",
         read: None,
@@ -192,6 +197,24 @@ static FOPS_TABLE: [FileOperations; 14] = [
         read: None,
         write: None,
         release: Some(epoll_release_op),
+    },
+    FileOperations {
+        name: "ptmx",
+        read: None,
+        write: None,
+        release: None,
+    },
+    FileOperations {
+        name: "pty_m",
+        read: Some(pty_master_read_op),
+        write: Some(pty_master_write_op),
+        release: Some(pty_master_release),
+    },
+    FileOperations {
+        name: "pty_s",
+        read: Some(pty_slave_read_op),
+        write: Some(pty_slave_write_op),
+        release: Some(pty_slave_release),
     },
 ];
 
@@ -491,6 +514,7 @@ pub fn init_after_ext2() {
     let _ = register_chrdev("zero", FOPS_ZERO);
     // Block node name under /dev (opens FOPS_BLK via open_chrdev).
     let _ = register_chrdev("hda", FOPS_BLK);
+    let _ = register_chrdev("ptmx", FOPS_PTMX);
     ramfs_init();
     unsafe {
         VFS_READY = true;
@@ -581,6 +605,18 @@ pub fn vfs_open(path: &str, flags: u32, readable: bool, writable: bool) -> Resul
             return Err(VfsError::IsDir);
         }
         return Ok(vdir_file(VINO_DEV));
+    }
+    if path == "/dev/pts" || path == "/dev/pts/" {
+        if writable {
+            return Err(VfsError::IsDir);
+        }
+        return Ok(vdir_file(VINO_PTS));
+    }
+    if let Some(rest) = path.strip_prefix("/dev/pts/") {
+        return open_pts_slave(rest, readable, writable);
+    }
+    if let Some(rest) = path.strip_prefix("dev/pts/") {
+        return open_pts_slave(rest, readable, writable);
     }
     if path == "/ram" || path == "/ram/" {
         if writable {
@@ -687,7 +723,16 @@ fn open_under_vdir(
                 Err(VfsError::NoEnt)
             }
         }
-        VINO_DEV => open_chrdev(name, readable, writable),
+        VINO_DEV => {
+            if name == "pts" {
+                if writable {
+                    return Err(VfsError::IsDir);
+                }
+                return Ok(vdir_file(VINO_PTS));
+            }
+            open_chrdev(name, readable, writable)
+        }
+        VINO_PTS => open_pts_slave(name, readable, writable),
         VINO_RAM => ramfs_open_name(name, flags, readable, writable),
         _ => Err(VfsError::NoEnt),
     }
@@ -893,6 +938,36 @@ fn vdir_next(vino: u32, pos: u64) -> Option<VfsDirEnt> {
                 }
                 n += 1;
             }
+            if n + 2 == idx {
+                return Some(make_dent(VINO_PTS as u64, (idx as u64) + 1, DT_DIR, "pts"));
+            }
+            None
+        }
+        VINO_PTS => {
+            if idx == 0 {
+                return Some(make_dent(VINO_PTS as u64, 1, DT_DIR, "."));
+            }
+            if idx == 1 {
+                return Some(make_dent(VINO_DEV as u64, 2, DT_DIR, ".."));
+            }
+            let mut seen = 0usize;
+            for i in 0..crate::fs::pty::MAX_PTY {
+                if !crate::fs::pty::is_used(i) {
+                    continue;
+                }
+                if seen + 2 == idx {
+                    let mut nb = [0u8; 4];
+                    let nl = crate::fs::pty::name_of(i, &mut nb);
+                    let name = core::str::from_utf8(&nb[..nl]).unwrap_or("?");
+                    return Some(make_dent(
+                        0xF000_0600 + i as u64,
+                        (idx as u64) + 1,
+                        DT_CHR,
+                        name,
+                    ));
+                }
+                seen += 1;
+            }
             None
         }
         VINO_RAM => {
@@ -959,7 +1034,34 @@ fn strip_dev_prefix(path: &str) -> Option<&str> {
     None
 }
 
+fn open_pts_slave(name: &str, readable: bool, writable: bool) -> Result<FileData, VfsError> {
+    let n = crate::fs::pty::parse_index(name).ok_or(VfsError::NoEnt)?;
+    match crate::fs::pty::open_slave(n) {
+        Ok(id) => Ok(FileData {
+            pos: 0,
+            readable,
+            writable,
+            private: id as u64,
+            is_dir: false,
+            fops_id: FOPS_PTY_SLAVE,
+        }),
+        Err(-5) => Err(VfsError::Fault),
+        Err(_) => Err(VfsError::NoEnt),
+    }
+}
+
 fn open_chrdev(name: &str, readable: bool, writable: bool) -> Result<FileData, VfsError> {
+    if name == "ptmx" {
+        let n = crate::fs::pty::open_master().map_err(|_| VfsError::NoMem)?;
+        return Ok(FileData {
+            pos: 0,
+            readable: true,
+            writable: true,
+            private: n as u64,
+            is_dir: false,
+            fops_id: FOPS_PTY_MASTER,
+        });
+    }
     for (i, e) in chrdevs_mut().iter_mut().enumerate() {
         if e.used && chrdev_name_str(e) == name {
             if !e.linux_fops.is_null() {
@@ -1310,6 +1412,39 @@ fn pipe_release_w(f: &mut FileData) {
     crate::fd::pipe::close_writer(f.private as usize);
 }
 
+fn map_pty_err(e: i32) -> VfsError {
+    match e {
+        -11 => VfsError::Inval,
+        -32 | -5 => VfsError::Fault,
+        -9 => VfsError::Inval,
+        _ => VfsError::Fault,
+    }
+}
+
+fn pty_master_read_op(f: &mut FileData, buf: &mut [u8]) -> Result<usize, VfsError> {
+    crate::fs::pty::master_read(f.private as usize, buf).map_err(map_pty_err)
+}
+
+fn pty_master_write_op(f: &mut FileData, data: &[u8]) -> Result<usize, VfsError> {
+    crate::fs::pty::master_write(f.private as usize, data).map_err(map_pty_err)
+}
+
+fn pty_master_release(f: &mut FileData) {
+    crate::fs::pty::close_master(f.private as usize);
+}
+
+fn pty_slave_read_op(f: &mut FileData, buf: &mut [u8]) -> Result<usize, VfsError> {
+    crate::fs::pty::slave_read(f.private as usize, buf).map_err(map_pty_err)
+}
+
+fn pty_slave_write_op(f: &mut FileData, data: &[u8]) -> Result<usize, VfsError> {
+    crate::fs::pty::slave_write(f.private as usize, data).map_err(map_pty_err)
+}
+
+fn pty_slave_release(f: &mut FileData) {
+    crate::fs::pty::close_slave(f.private as usize);
+}
+
 fn epoll_release_op(f: &mut FileData) {
     crate::fd::epoll::free(f.private as usize);
 }
@@ -1651,6 +1786,12 @@ fn stat_dev_rest(rest: &str) -> Result<VfsStat, VfsError> {
     if rest.is_empty() {
         return Ok(stat_dir(VINO_DEV as u64));
     }
+    if rest == "pts" {
+        return Ok(stat_dir(VINO_PTS as u64));
+    }
+    if let Some(name) = rest.strip_prefix("pts/") {
+        return stat_dev_rest_pts(name);
+    }
     if rest.contains('/') {
         return Err(VfsError::NoEnt);
     }
@@ -1681,6 +1822,28 @@ fn stat_dev_rest(rest: &str) -> Result<VfsStat, VfsError> {
         }
     }
     Err(VfsError::NoEnt)
+}
+
+fn stat_dev_rest_pts(name: &str) -> Result<VfsStat, VfsError> {
+    let n = crate::fs::pty::parse_index(name).ok_or(VfsError::NoEnt)?;
+    if !crate::fs::pty::is_used(n) {
+        return Err(VfsError::NoEnt);
+    }
+    let t = vfs_now();
+    Ok(VfsStat {
+        ino: 0xF000_0610 + n as u64,
+        mode: S_IFCHR | 0o620,
+        nlink: 1,
+        uid: 0,
+        gid: 0,
+        size: 0,
+        blocks_512: 0,
+        blksize: 1024,
+        rdev: 0x8800 + n as u32,
+        atime: t,
+        mtime: t,
+        ctime: t,
+    })
 }
 
 fn stat_ram_rest(rest: &str) -> Result<VfsStat, VfsError> {
@@ -1730,6 +1893,9 @@ fn try_stat_virtual(path: &str, allow_rel_mount: bool) -> Result<Option<VfsStat>
             return stat_proc_rest(rest).map(Some);
         }
     }
+    if p == "/dev/pts" {
+        return Ok(Some(stat_dir(VINO_PTS as u64)));
+    }
     if let Some(rest) = p.strip_prefix("/dev/") {
         return stat_dev_rest(rest).map(Some);
     }
@@ -1766,6 +1932,13 @@ fn vfs_stat_under_vdir(vino: u32, name: &str) -> Result<VfsStat, VfsError> {
             }
         }
         VINO_DEV => stat_dev_rest(name),
+        VINO_PTS => {
+            if name == "." {
+                Ok(stat_dir(VINO_PTS as u64))
+            } else {
+                stat_dev_rest_pts(name)
+            }
+        }
         VINO_RAM => stat_ram_rest(name),
         _ => Err(VfsError::NoEnt),
     }
@@ -1863,6 +2036,40 @@ pub fn vfs_stat_open(f: &FileData) -> Result<VfsStat, VfsError> {
                 blocks_512: 0,
                 blksize: 1024,
                 rdev: 0x0501,
+                atime: t,
+                mtime: t,
+                ctime: t,
+            })
+        }
+        FOPS_PTMX | FOPS_PTY_MASTER => {
+            let t = vfs_now();
+            Ok(VfsStat {
+                ino: 0xF000_0600,
+                mode: S_IFCHR | 0o666,
+                nlink: 1,
+                uid: 0,
+                gid: 0,
+                size: 0,
+                blocks_512: 0,
+                blksize: 1024,
+                rdev: 0x0502,
+                atime: t,
+                mtime: t,
+                ctime: t,
+            })
+        }
+        FOPS_PTY_SLAVE => {
+            let t = vfs_now();
+            Ok(VfsStat {
+                ino: 0xF000_0610 + f.private,
+                mode: S_IFCHR | 0o620,
+                nlink: 1,
+                uid: 0,
+                gid: 0,
+                size: 0,
+                blocks_512: 0,
+                blksize: 1024,
+                rdev: 0x8800 + f.private as u32,
                 atime: t,
                 mtime: t,
                 ctime: t,

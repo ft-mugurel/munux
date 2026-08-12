@@ -143,6 +143,10 @@ fn put_u32(buf: &mut [u8], off: usize, v: u32) {
     buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
 }
 
+pub fn fill_default_termios(out: &mut [u8; TERMIOS_LEN]) {
+    default_termios(out);
+}
+
 fn default_termios(out: &mut [u8; TERMIOS_LEN]) {
     *out = [0; TERMIOS_LEN];
     put_u32(out, 0, ICRNL | IXON); // c_iflag
@@ -249,6 +253,40 @@ pub fn tiocnotty() -> i32 {
     }
     if CONSOLE_SID.load(Ordering::Relaxed) == sid {
         CONSOLE_SID.store(0, Ordering::Relaxed);
+    }
+    if let Some(n) = crate::fs::pty::index_from_ctty(ctty) {
+        crate::fs::pty::set_sid(n, 0);
+    }
+    0
+}
+
+/// Attach PTY `n` as controlling tty. Returns 0 or -errno.
+pub fn tiocsctty_pty(n: usize, steal: bool) -> i32 {
+    let (pid, sid, pgid, ctty) = crate::process::with_current(|p| (p.pid, p.sid, p.pgid, p.ctty))
+        .unwrap_or((0, 0, 0, 0));
+    if pid <= 0 || pid != sid {
+        return -1;
+    }
+    if ctty != 0 {
+        return 0;
+    }
+    if !crate::fs::pty::is_used(n) {
+        return -25;
+    }
+    let owner = crate::fs::pty::sid(n);
+    if owner != 0 && owner != sid && !steal {
+        return -1;
+    }
+    crate::fs::pty::set_sid(n, sid);
+    crate::fs::pty::set_fg_pgid(n, if pgid != 0 { pgid } else { sid });
+    let tgid = crate::process::getpid();
+    let mark = crate::fs::pty::ctty_for(n);
+    for i in 0..crate::process::pcb::MAX_PROCESSES {
+        let _ = crate::process::table::with_index(i, |p| {
+            if p.used && p.tgid == tgid {
+                p.ctty = mark;
+            }
+        });
     }
     0
 }

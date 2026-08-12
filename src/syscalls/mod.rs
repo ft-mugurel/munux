@@ -142,6 +142,7 @@ mod errno {
     pub const EMFILE: i64 = 24;
     pub const ERANGE: i64 = 34;
     pub const ENOTTY: i64 = 25;
+    pub const EIO: i64 = 5;
     pub const ENOTEMPTY: i64 = 39;
     pub const ELOOP: i64 = 40;
     pub const ETIMEDOUT: i64 = 110;
@@ -1590,13 +1591,74 @@ fn sys_readv(fd: u64, iov_ptr: u64, iovcnt: u64) -> u64 {
     total
 }
 
-/// Linux ioctl(2) — console is a tty (P11a). Other fds → ENOTTY.
+/// Linux ioctl(2) — console + PTY slave are ttys; master has TIOCGPTN/lock.
 fn sys_ioctl(fd: u64, cmd: u64, arg: u64) -> u64 {
+    const TIOCGWINSZ: u64 = 0x5413;
+    const TIOCSWINSZ: u64 = 0x5414;
+    const TIOCGPTN: u64 = 0x8004_5430;
+    const TIOCSPTLCK: u64 = 0x4004_5431;
+    const TIOCGPTLCK: u64 = 0x8004_5439;
+
+    if crate::fd::sys_fd_stat(fd).is_err() {
+        return errno::neg(errno::EBADF);
+    }
+
+    if let Some(n) = crate::fd::sys_fd_pty_master(fd) {
+        return match cmd {
+            TIOCGPTN => {
+                if !user_ptr_ok(arg, 4) {
+                    return errno::neg(errno::EFAULT);
+                }
+                unsafe {
+                    core::ptr::write_volatile(arg as *mut u32, n as u32);
+                }
+                0
+            }
+            TIOCSPTLCK => {
+                if !user_ptr_ok(arg, 4) {
+                    return errno::neg(errno::EFAULT);
+                }
+                let lock = unsafe { core::ptr::read_volatile(arg as *const i32) };
+                if !crate::fs::pty::set_locked(n, lock != 0) {
+                    return errno::neg(errno::EIO);
+                }
+                0
+            }
+            TIOCGPTLCK => {
+                if !user_ptr_ok(arg, 4) {
+                    return errno::neg(errno::EFAULT);
+                }
+                let v = if crate::fs::pty::is_locked(n) { 1 } else { 0 };
+                unsafe {
+                    core::ptr::write_volatile(arg as *mut i32, v);
+                }
+                0
+            }
+            TIOCGWINSZ | TIOCSWINSZ => tty_ioctl_common(TtyDev::Pty(n), cmd, arg),
+            _ => errno::neg(errno::ENOTTY),
+        };
+    }
+
+    let dev = if crate::fd::sys_fd_is_console(fd) {
+        TtyDev::Console
+    } else if let Some(n) = crate::fd::sys_fd_pty_slave(fd) {
+        TtyDev::Pty(n)
+    } else {
+        return errno::neg(errno::ENOTTY);
+    };
+    tty_ioctl_common(dev, cmd, arg)
+}
+
+enum TtyDev {
+    Console,
+    Pty(usize),
+}
+
+fn tty_ioctl_common(dev: TtyDev, cmd: u64, arg: u64) -> u64 {
     const TCGETS: u64 = 0x5401;
     const TCSETS: u64 = 0x5402;
     const TCSETSW: u64 = 0x5403;
     const TCSETSF: u64 = 0x5404;
-    // glibc isatty/tcgetattr: _IOR('T', 0x2A, struct termios2)
     const TCGETS2: u64 = 0x802c_542a;
     const TCSETS2: u64 = 0x402c_542b;
     const TCSETSW2: u64 = 0x402c_542c;
@@ -1610,20 +1672,16 @@ fn sys_ioctl(fd: u64, cmd: u64, arg: u64) -> u64 {
     const TIOCNOTTY: u64 = 0x5422;
     const TIOCGSID: u64 = 0x5429;
 
-    if crate::fd::sys_fd_stat(fd).is_err() {
-        return errno::neg(errno::EBADF);
-    }
-    if !crate::fd::sys_fd_is_console(fd) {
-        return errno::neg(errno::ENOTTY);
-    }
-
     match cmd {
         TCGETS => {
             if !user_ptr_ok(arg, crate::tty::TERMIOS_LEN as u64) {
                 return errno::neg(errno::EFAULT);
             }
             let mut buf = [0u8; crate::tty::TERMIOS_LEN];
-            crate::tty::console_get_termios(&mut buf);
+            match dev {
+                TtyDev::Console => crate::tty::console_get_termios(&mut buf),
+                TtyDev::Pty(n) => crate::fs::pty::get_termios(n, &mut buf),
+            }
             unsafe {
                 core::ptr::copy_nonoverlapping(buf.as_ptr(), arg as *mut u8, buf.len());
             }
@@ -1634,7 +1692,10 @@ fn sys_ioctl(fd: u64, cmd: u64, arg: u64) -> u64 {
                 return errno::neg(errno::EFAULT);
             }
             let mut buf = [0u8; TERMIOS2_LEN];
-            crate::tty::console_get_termios(&mut buf[..crate::tty::TERMIOS_LEN]);
+            match dev {
+                TtyDev::Console => crate::tty::console_get_termios(&mut buf[..crate::tty::TERMIOS_LEN]),
+                TtyDev::Pty(n) => crate::fs::pty::get_termios(n, &mut buf[..crate::tty::TERMIOS_LEN]),
+            }
             buf[36..40].copy_from_slice(&38400u32.to_le_bytes());
             buf[40..44].copy_from_slice(&38400u32.to_le_bytes());
             unsafe {
@@ -1650,7 +1711,10 @@ fn sys_ioctl(fd: u64, cmd: u64, arg: u64) -> u64 {
             unsafe {
                 core::ptr::copy_nonoverlapping(arg as *const u8, buf.as_mut_ptr(), buf.len());
             }
-            crate::tty::console_set_termios(&buf);
+            match dev {
+                TtyDev::Console => crate::tty::console_set_termios(&buf),
+                TtyDev::Pty(n) => crate::fs::pty::set_termios(n, &buf),
+            }
             0
         }
         TCSETS2 | TCSETSW2 | TCSETSF2 => {
@@ -1665,14 +1729,20 @@ fn sys_ioctl(fd: u64, cmd: u64, arg: u64) -> u64 {
                     crate::tty::TERMIOS_LEN,
                 );
             }
-            crate::tty::console_set_termios(&buf);
+            match dev {
+                TtyDev::Console => crate::tty::console_set_termios(&buf),
+                TtyDev::Pty(n) => crate::fs::pty::set_termios(n, &buf),
+            }
             0
         }
         TIOCGWINSZ => {
             if !user_ptr_ok(arg, 8) {
                 return errno::neg(errno::EFAULT);
             }
-            let (rows, cols) = crate::tty::console_winsize();
+            let (rows, cols) = match dev {
+                TtyDev::Console => crate::tty::console_winsize(),
+                TtyDev::Pty(n) => crate::fs::pty::winsize(n),
+            };
             unsafe {
                 core::ptr::write_volatile(arg as *mut u16, rows);
                 core::ptr::write_volatile((arg + 2) as *mut u16, cols);
@@ -1685,13 +1755,21 @@ fn sys_ioctl(fd: u64, cmd: u64, arg: u64) -> u64 {
             if !user_ptr_ok(arg, 8) {
                 return errno::neg(errno::EFAULT);
             }
-            0 // accept; VGA size is fixed
+            let rows = unsafe { core::ptr::read_volatile(arg as *const u16) };
+            let cols = unsafe { core::ptr::read_volatile((arg + 2) as *const u16) };
+            if let TtyDev::Pty(n) = dev {
+                crate::fs::pty::set_winsize(n, rows, cols);
+            }
+            0
         }
         TIOCGPGRP => {
             if !user_ptr_ok(arg, 4) {
                 return errno::neg(errno::EFAULT);
             }
-            let fg = crate::tty::console_fg_pgid();
+            let fg = match dev {
+                TtyDev::Console => crate::tty::console_fg_pgid(),
+                TtyDev::Pty(n) => crate::fs::pty::fg_pgid(n),
+            };
             unsafe {
                 core::ptr::write_volatile(arg as *mut i32, fg);
             }
@@ -1706,19 +1784,25 @@ fn sys_ioctl(fd: u64, cmd: u64, arg: u64) -> u64 {
                 return errno::neg(errno::EINVAL);
             }
             let sid = crate::process::with_current(|p| p.sid).unwrap_or(0);
-            let ok = pgrp_in_session(pg, sid);
-            if !ok {
+            if !pgrp_in_session(pg, sid) {
                 return errno::neg(errno::EPERM);
             }
-            crate::tty::set_console_fg_pgid(pg);
+            match dev {
+                TtyDev::Console => crate::tty::set_console_fg_pgid(pg),
+                TtyDev::Pty(n) => crate::fs::pty::set_fg_pgid(n, pg),
+            }
             0
         }
         TIOCSCTTY => {
             let steal = arg != 0;
-            match crate::tty::tiocsctty(steal) {
-                0 => 0,
-                e if e < 0 => e as u64,
-                _ => errno::neg(errno::EPERM),
+            let rc = match dev {
+                TtyDev::Console => crate::tty::tiocsctty(steal),
+                TtyDev::Pty(n) => crate::tty::tiocsctty_pty(n, steal),
+            };
+            if rc < 0 {
+                rc as u64
+            } else {
+                0
             }
         }
         TIOCNOTTY => match crate::tty::tiocnotty() {
@@ -1730,7 +1814,10 @@ fn sys_ioctl(fd: u64, cmd: u64, arg: u64) -> u64 {
             if !user_ptr_ok(arg, 4) {
                 return errno::neg(errno::EFAULT);
             }
-            let sid = crate::tty::console_sid();
+            let sid = match dev {
+                TtyDev::Console => crate::tty::console_sid(),
+                TtyDev::Pty(n) => crate::fs::pty::sid(n),
+            };
             if sid <= 0 {
                 return errno::neg(errno::ENOTTY);
             }

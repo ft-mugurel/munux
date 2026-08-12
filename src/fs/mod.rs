@@ -5,6 +5,7 @@ pub mod ext2;
 pub mod ext2_write;
 pub mod path;
 pub mod procfs;
+pub mod pty;
 pub mod vcore;
 pub mod vops;
 pub mod vfs;

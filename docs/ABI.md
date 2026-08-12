@@ -5,7 +5,7 @@ This document freezes conventions for userspace and the kernel.
 
 | Field | Value |
 |-------|--------|
-| **Status** | **v0.3.10** — P11a session/pgrp + console termios |
+| **Status** | **v0.3.11** — P11b `/dev/ptmx` + `/dev/pts/N` |
 | **Arch** | **x86_64** only on `main` |
 | **Goal** | Linux userspace (static musl today, glibc + a **desktop** later) uses the **same numbers, structs, and register ABI** as Linux; missing calls return **`-ENOSYS`**. Internals may differ; **results must match**. |
 
@@ -55,7 +55,7 @@ Source of truth: `src/syscalls/mod.rs` dispatch `match` (not merely `num` consta
 | 13 | `rt_sigaction` | done (handler / `SIG_IGN` / `SIG_DFL`; no full `siginfo`) |
 | 14 | `rt_sigprocmask` | done (64-bit mask) |
 | 15 | `rt_sigreturn` | done (restorer trampoline) |
-| 16 | `ioctl` | done (P11a; console `TCGETS`/`TCGETS2`/winsize/pgrp/`TIOCSCTTY`) |
+| 16 | `ioctl` | done (P11; console + PTY `TCGETS`/`TCGETS2`/winsize/pgrp/`TIOCSCTTY`; master `TIOCGPTN`/`TIOCSPTLCK`) |
 | 17 | `pread64` | done (ld.so) |
 | 19 | `readv` | done |
 | 20 | `writev` | done |
@@ -220,7 +220,7 @@ Common errno values:
 | `wait4` | Reap zombie; schedules Ready children cooperatively |
 | Signals | `kill`/`tkill`/`tgkill`, `rt_sigaction`/`rt_sigprocmask`/`rt_sigreturn`; default terminate + user handlers; `kill(-pgid)` |
 | Session | `sid`/`pgid` on PCB; `setsid`/`setpgid`/`getpgrp`/`getpgid`/`getsid`; fork inherits |
-| TTY | Console stdio is a tty: `isatty`, termios, winsize 80×25, `TIOCSCTTY`/`TIOCGPGRP`; no PTY pair yet |
+| TTY | Console stdio is a tty; **PTY pair** `/dev/ptmx` + `/dev/pts/N` (byte rings, slave termios/`TIOCSCTTY`) |
 | Futex | `FUTEX_WAIT`/`WAKE`/`REQUEUE`/`CMP_REQUEUE` (+PRIVATE, relative timeout); `clear_child_tid` wake on exit |
 | cwd | Per-process (not yet real `CLONE_FS` object share) |
 | TLS | Per-task `fs_base` / `gs_base`; `arch_prctl`; `CLONE_SETTLS`; do not reload FS/GS selectors on enter (would clear base MSRs) |
@@ -250,7 +250,7 @@ See **[MM.md](MM.md)** for kernel windows and isolation rules.
 
 - Root: **ext2** on IDE primary master.
 - Virtual **`/proc`**: kernel-generated (`meminfo`, `mounts`, `modules`, pid nodes, …).
-- Virtual **`/dev`**: `null`, `zero`, `hda`; `echo` only after `insmod echo.mnx`.
+- Virtual **`/dev`**: `null`, `zero`, `hda`, **`ptmx`**, **`pts/`**; `echo` only after `insmod echo.mnx`.
 - Virtual **`/ram`**: ramfs.
 - Live `/proc/mounts` (qemu-connect 2026-08-07): `/dev/hda / ext2`, `ramfs /ram`, `proc /proc`, `devtmpfs /dev`.
 - Writes: create/unlink/mkdir/rmdir/chmod/rename/link as wired in syscalls → vops → ext2.
@@ -269,7 +269,7 @@ Foundation for threads is in; polish and next architecture:
 4. Full signal frames (`siginfo`/`ucontext`), absolute/PI futex, musl pthread soak  
 5. ~~`pipe`/`dup`, `rename`/`link`, VFS + modules~~ ✅ P7–P8c  
 6. ~~`readlink`/`symlink`/`statx`~~ ✅ P9a; ~~file mmap~~ ✅ P9b; ~~poll/select/epoll~~ ✅ P9c; ~~`execveat`/`prctl`~~ ✅ P9d; ~~file-map ELF + `MAP_SHARED`~~ ✅ P9e  
-7. ~~session/pgrp + console termios~~ ✅ P11a; PTY pair (`ptmx`/`pts`) still open
+7. ~~session/pgrp + console termios~~ ✅ P11a; ~~PTY pair~~ ✅ P11b (`ptmx`/`pts`); n_tty / job-stop still open
 
 Using **wrong syscall numbers** would make Linux binaries impossible — munux keeps Linux numbers from v0.2 forward.
 
@@ -296,3 +296,4 @@ Using **wrong syscall numbers** would make Linux binaries impossible — munux k
 | **0.3.8** | P10c: glibc `ld.so`+`libc` `hello_dyn`; pread64/getrandom/prlimit64/rseq/robust_list |
 | **0.3.9** | P10d: `clone3` + `CLONE_SETTLS` + GPR inherit; smokes `tlsclone` / glibc `clonec` |
 | **0.3.10** | P11a: `setsid`/`setpgid`/`getpgrp`/`getpgid`/`getsid`; console termios + `TIOCSCTTY`; smoke `jobtest` |
+| **0.3.11** | P11b: `/dev/ptmx` + `/dev/pts/N`; smoke `ptytest` |

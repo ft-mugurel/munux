@@ -1,4 +1,4 @@
-# P11a smoke: session / pgrp / console termios
+# P11 smoke: session / pgrp / console termios / PTY
 
 ## What is implemented
 
@@ -9,6 +9,8 @@
 | `setsid` (112) | New session if not already a pgrp leader; drop ctty |
 | Console ioctl | `TCGETS`/`TCGETS2`, `TCSETS*`, `TIOCGWINSZ` (80×25), `TIOCGPGRP`/`TIOCSPGRP`, `TIOCSCTTY`/`TIOCNOTTY`/`TIOCGSID` |
 | `kill(-pgid)` / `kill(0)` | Process-group directed |
+| `/dev/ptmx` | Open allocates a pair; `TIOCGPTN` / `TIOCSPTLCK` |
+| `/dev/pts/N` | Slave tty (termios, `TIOCSCTTY`); byte rings to master |
 
 ## Quick test (qemu-connect)
 
@@ -22,8 +24,15 @@ hello_dyn: ALL PASS
 
 `jobtest` is a glibc binary: `isatty`, `tcgetattr`, winsize, `setpgid(0,0)`, child `setsid` + `TIOCSCTTY`.
 
+```text
+$ ptytest
+ptytest: ALL PASS
+```
+
+`ptytest` opens `/dev/ptmx`, unlocks, forks a child on `/dev/pts/N` (`setsid` + `TIOCSCTTY`), writes one byte on the master, reads `PTY-CHILD-OK`.
+
 ## Not yet
 
-- `/dev/ptmx` + `/dev/pts/N` pair (P11b)
-- Real n_tty line discipline (canonical editing in kernel)
+- Real n_tty line discipline (canonical editing / echo in kernel)
 - `SIGTTOU`/`SIGTTIN` / stopped jobs
+- Unlimited PTY count (pool is 4)

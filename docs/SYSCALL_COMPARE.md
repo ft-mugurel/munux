@@ -1,6 +1,6 @@
 # Linux x86_64 syscalls vs munux
 
-**Last updated:** 2026-08-09 (P11a: 101 dispatched; session/pgrp + console termios).  
+**Last updated:** 2026-08-09 (P11b: 101 dispatched; PTY pair).  
 Source of Linux names/numbers: host `/usr/include/asm/unistd_64.h`.  
 Source of munux set: `src/syscalls/mod.rs` dispatch `match` (not merely `num` constants — `READLINK` is defined but ENOSYS).
 
@@ -35,7 +35,7 @@ Legend in the tables below: implemented rows list munux notes; “NOT in munux�
 | 13 | `rt_sigaction` | RT_SIGACTION | done (handler / IGN / DFL) |
 | 14 | `rt_sigprocmask` | RT_SIGPROCMASK | done (64-bit mask) |
 | 15 | `rt_sigreturn` | RT_SIGRETURN | done (restorer) |
-| 16 | `ioctl` | IOCTL | done (P11a; console termios/winsize/pgrp/ctty) |
+| 16 | `ioctl` | IOCTL | done (P11; console + PTY termios/winsize/pgrp/ctty; `TIOCGPTN`) |
 | 17 | `pread64` | PREAD64 | done (P10c; ld.so) |
 | 19 | `readv` | READV | implemented |
 | 20 | `writev` | WRITEV | implemented |
