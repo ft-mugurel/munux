@@ -5,7 +5,7 @@ This document freezes conventions for userspace and the kernel.
 
 | Field | Value |
 |-------|--------|
-| **Status** | **v0.3.11** — P11b `/dev/ptmx` + `/dev/pts/N` |
+| **Status** | **v0.3.12** — P11c n_tty cook on PTY |
 | **Arch** | **x86_64** only on `main` |
 | **Goal** | Linux userspace (static musl today, glibc + a **desktop** later) uses the **same numbers, structs, and register ABI** as Linux; missing calls return **`-ENOSYS`**. Internals may differ; **results must match**. |
 
@@ -198,7 +198,8 @@ Common errno values:
 
 - May block until data is available.
 - Marks the process as TTY foreground (Ctrl-C target preference).
-- Byte stream; no full line discipline. **Ctrl-C → SIGINT** (via `tty` + keyboard).
+- Console: byte stream from keyboard; **Ctrl-C → SIGINT** (via `tty` + keyboard).
+- PTY master input: **n_tty** — `ICANON` (line + erase), `ECHO`, `ISIG` (`^C`/`^\` → fg pgrp).
 
 ---
 
@@ -220,7 +221,7 @@ Common errno values:
 | `wait4` | Reap zombie; schedules Ready children cooperatively |
 | Signals | `kill`/`tkill`/`tgkill`, `rt_sigaction`/`rt_sigprocmask`/`rt_sigreturn`; default terminate + user handlers; `kill(-pgid)` |
 | Session | `sid`/`pgid` on PCB; `setsid`/`setpgid`/`getpgrp`/`getpgid`/`getsid`; fork inherits |
-| TTY | Console stdio is a tty; **PTY pair** `/dev/ptmx` + `/dev/pts/N` (byte rings, slave termios/`TIOCSCTTY`) |
+| TTY | Console stdio is a tty; **PTY pair** `/dev/ptmx` + `/dev/pts/N`; master input cooked (`ICANON`/`ECHO`/`ISIG`) |
 | Futex | `FUTEX_WAIT`/`WAKE`/`REQUEUE`/`CMP_REQUEUE` (+PRIVATE, relative timeout); `clear_child_tid` wake on exit |
 | cwd | Per-process (not yet real `CLONE_FS` object share) |
 | TLS | Per-task `fs_base` / `gs_base`; `arch_prctl`; `CLONE_SETTLS`; do not reload FS/GS selectors on enter (would clear base MSRs) |
@@ -269,7 +270,7 @@ Foundation for threads is in; polish and next architecture:
 4. Full signal frames (`siginfo`/`ucontext`), absolute/PI futex, musl pthread soak  
 5. ~~`pipe`/`dup`, `rename`/`link`, VFS + modules~~ ✅ P7–P8c  
 6. ~~`readlink`/`symlink`/`statx`~~ ✅ P9a; ~~file mmap~~ ✅ P9b; ~~poll/select/epoll~~ ✅ P9c; ~~`execveat`/`prctl`~~ ✅ P9d; ~~file-map ELF + `MAP_SHARED`~~ ✅ P9e  
-7. ~~session/pgrp + console termios~~ ✅ P11a; ~~PTY pair~~ ✅ P11b (`ptmx`/`pts`); n_tty / job-stop still open
+7. ~~session/pgrp + console termios~~ ✅ P11a; ~~PTY pair~~ ✅ P11b; ~~n_tty cook~~ ✅ P11c; `SIGTTOU`/`SIGTTIN` still open
 
 Using **wrong syscall numbers** would make Linux binaries impossible — munux keeps Linux numbers from v0.2 forward.
 
@@ -297,3 +298,4 @@ Using **wrong syscall numbers** would make Linux binaries impossible — munux k
 | **0.3.9** | P10d: `clone3` + `CLONE_SETTLS` + GPR inherit; smokes `tlsclone` / glibc `clonec` |
 | **0.3.10** | P11a: `setsid`/`setpgid`/`getpgrp`/`getpgid`/`getsid`; console termios + `TIOCSCTTY`; smoke `jobtest` |
 | **0.3.11** | P11b: `/dev/ptmx` + `/dev/pts/N`; smoke `ptytest` |
+| **0.3.12** | P11c: PTY n_tty (`ICANON`/`ECHO`/`ISIG`); smoke `n_ttytest` |

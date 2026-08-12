@@ -108,26 +108,27 @@ pub const TERMIOS_LEN: usize = 36;
 const NCCS: usize = 19;
 
 // c_iflag / c_oflag / c_lflag / c_cflag (kernel octal bits)
-const ICRNL: u32 = 0o0000400;
+pub const ICRNL: u32 = 0o0000400;
 const IXON: u32 = 0o0002000;
-const OPOST: u32 = 0o0000001;
-const ONLCR: u32 = 0o0000004;
-const ISIG: u32 = 0o0000001;
-const ICANON: u32 = 0o0000002;
-const ECHO: u32 = 0o0000010;
-const ECHOE: u32 = 0o0000020;
-const ECHOK: u32 = 0o0000040;
+pub const OPOST: u32 = 0o0000001;
+pub const ONLCR: u32 = 0o0000004;
+pub const ISIG: u32 = 0o0000001;
+pub const ICANON: u32 = 0o0000002;
+pub const ECHO: u32 = 0o0000010;
+pub const ECHOE: u32 = 0o0000020;
+pub const ECHOK: u32 = 0o0000040;
 const IEXTEN: u32 = 0o100000;
 const CS8: u32 = 0o0000060;
 const CREAD: u32 = 0o0000200;
 const HUPCL: u32 = 0o0002000;
 const B38400: u32 = 0o0000017;
 
-const VINTR: usize = 0;
-const VQUIT: usize = 1;
-const VERASE: usize = 2;
-const VKILL: usize = 3;
-const VEOF: usize = 4;
+pub const CC_OFF: usize = 17;
+pub const VINTR: usize = 0;
+pub const VQUIT: usize = 1;
+pub const VERASE: usize = 2;
+pub const VKILL: usize = 3;
+pub const VEOF: usize = 4;
 const VTIME: usize = 5;
 const VMIN: usize = 6;
 const VSTART: usize = 8;
@@ -154,7 +155,7 @@ fn default_termios(out: &mut [u8; TERMIOS_LEN]) {
     put_u32(out, 8, B38400 | CS8 | CREAD | HUPCL); // c_cflag
     put_u32(out, 12, ISIG | ICANON | ECHO | ECHOE | ECHOK | IEXTEN); // c_lflag
     out[16] = 0; // c_line
-    let cc = 17;
+    let cc = CC_OFF;
     out[cc + VINTR] = 0x03;
     out[cc + VQUIT] = 0x1c;
     out[cc + VERASE] = 0x7f;
@@ -166,6 +167,22 @@ fn default_termios(out: &mut [u8; TERMIOS_LEN]) {
     out[cc + VSTOP] = 0x13;
     out[cc + VSUSP] = 0x1a;
     let _ = NCCS;
+}
+
+pub fn termios_u32(t: &[u8], off: usize) -> u32 {
+    if off + 4 > t.len() {
+        return 0;
+    }
+    u32::from_le_bytes([t[off], t[off + 1], t[off + 2], t[off + 3]])
+}
+
+pub fn termios_cc(t: &[u8], idx: usize) -> u8 {
+    let i = CC_OFF + idx;
+    if i < t.len() {
+        t[i]
+    } else {
+        0
+    }
 }
 
 fn ensure_termios() {

@@ -1,7 +1,9 @@
-/* P11b: Unix98 PTY — /dev/ptmx + /dev/pts/N byte bridge. */
+/* P11b: Unix98 PTY — /dev/ptmx + /dev/pts/N byte bridge.
+ * P11c: default n_tty is canonical — this smoke turns ICANON off for a 1-byte read. */
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 
 #ifndef TIOCGPTN
@@ -72,6 +74,19 @@ int main(void) {
         }
         if (!isatty(s)) {
             fail("ptytest FAIL isatty\n", 20);
+        }
+        {
+            struct termios t;
+            if (tcgetattr(s, &t) != 0) {
+                fail("ptytest FAIL tcgetattr\n", 23);
+            }
+            t.c_lflag &= ~(tcflag_t)(ICANON | ECHO);
+            t.c_oflag &= ~(tcflag_t)OPOST;
+            t.c_cc[VMIN] = 1;
+            t.c_cc[VTIME] = 0;
+            if (tcsetattr(s, TCSANOW, &t) != 0) {
+                fail("ptytest FAIL tcsetattr\n", 23);
+            }
         }
         if (ioctl(s, TIOCSCTTY, 0) != 0) {
             fail("ptytest FAIL TIOCSCTTY\n", 23);

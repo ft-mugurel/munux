@@ -11,6 +11,7 @@
 | `kill(-pgid)` / `kill(0)` | Process-group directed |
 | `/dev/ptmx` | Open allocates a pair; `TIOCGPTN` / `TIOCSPTLCK` |
 | `/dev/pts/N` | Slave tty (termios, `TIOCSCTTY`); byte rings to master |
+| n_tty (P11c) | Master input: `ICANON` line/erase, `ECHO`, `ISIG` (`^C`/`^\`) |
 
 ## Quick test (qemu-connect)
 
@@ -29,10 +30,18 @@ $ ptytest
 ptytest: ALL PASS
 ```
 
-`ptytest` opens `/dev/ptmx`, unlocks, forks a child on `/dev/pts/N` (`setsid` + `TIOCSCTTY`), writes one byte on the master, reads `PTY-CHILD-OK`.
+`ptytest` opens `/dev/ptmx`, unlocks, forks a child on `/dev/pts/N` (`setsid` + `TIOCSCTTY`), turns **`ICANON` off**, writes one byte on the master, reads `PTY-CHILD-OK`.
+
+```text
+$ n_ttytest
+n_ttytest: ALL PASS
+```
+
+`n_ttytest`: master writes `ab` + DEL + `c` + NL → slave reads `ac\n`; then a child `TIOCSCTTY` + write `^C` on the master dies with SIGINT.
 
 ## Not yet
 
-- Real n_tty line discipline (canonical editing / echo in kernel)
+- Full n_tty (IXON, reprint, UTF-8 erase)
 - `SIGTTOU`/`SIGTTIN` / stopped jobs
 - Unlimited PTY count (pool is 4)
+- Console keyboard is not yet fed through the same cook path

@@ -27,7 +27,7 @@ BusyBox / static musl binaries are **probes and regression tests**, not the prod
 1. ~~**Per-process address spaces** and a real process model~~ ✅  
 2. ~~**Threads** (`clone`, TID, futex, TLS) + signals~~ ✅ (practical slices)  
 3. ~~**Loadable kernel modules** (export table, init/exit, chardev)~~ ✅ practical (MNX1 + ELF ET_REL `.ko`)  
-4. **Phase 9–11** — Linux surface; **P10a–d** dynlink + **P11a–b** session/pgrp + PTY pair  
+4. **Phase 9–11** — Linux surface; **P10a–d** dynlink + **P11a–c** session/pgrp + PTY + n_tty  
 5. **linuxkpi** — compile Linux driver `.c` ([docs/LINUXKPI.md](docs/LINUXKPI.md)); not distro `.ko` blobs  
 6. **Later** — sockets, graphics+input, **installable desktop**
 
@@ -40,7 +40,7 @@ VFS (incl. pipes/vops), and **loadable modules** (MNX1 **and** ELF64 ET_REL `.ko
 + Linux `init_module` / `delete_module` / `finit_module`, `/bin/insmod|rmmod|lsmod`,
 `hello.{mnx,ko}`, `echo.{mnx,ko}` → `/dev/echo` with unload refcount).
 
-**Phase 9a–9e** in; **P10a–d** dynlink; **P11a–b** `jobtest` + `ptytest`. Next: sockets (P12) or n_tty polish.  
+**Phase 9a–9e** in; **P10a–d** dynlink; **P11a–c** `jobtest` + `ptytest` + `n_ttytest`. Next: P12 sockets.  
 Destination remains a **Linux desktop** (P10–P14). IDE stays built-in.
 
 ### Boot & build

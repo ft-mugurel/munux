@@ -39,6 +39,7 @@ From freestanding **`$`**:
 - [ ] `hello_dyn` — real glibc `ld.so` + `libc.so.6`; `hello_dyn: ALL PASS`
 - [ ] `jobtest` — session/pgrp + console termios; `jobtest: ALL PASS`
 - [ ] `ptytest` — `/dev/ptmx` + `/dev/pts/N`; `ptytest: ALL PASS`
+- [ ] `n_ttytest` — cooked line + `^C`; `n_ttytest: ALL PASS`
 - [ ] `busybox true` — returns to `$`
 - [ ] Optional Ctrl-C: `busybox sleep 30` then **Ctrl+C** → back to `$` (shell stays alive)
 

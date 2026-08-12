@@ -1,6 +1,6 @@
 # munux roadmap — Linux-compatible kernel in Rust
 
-**Last updated:** 2026-08-09 (P11b PTY pair).
+**Last updated:** 2026-08-09 (P11c n_tty).
 
 **Goal:** munux is a **Linux x86_64 kernel written in Rust**. The destination is to **install a Linux desktop environment and use the machine like a Linux system**.
 
@@ -407,7 +407,7 @@ These are **in scope**. Internals can differ from Linux; the **result** must not
 | Phase | Result we are aiming for | Notes |
 |-------|--------------------------|-------|
 | **P10** | Dynamically linked musl/glibc binaries run | P10a–d ✅ interp + `ET_DYN` + **glibc `hello_dyn`** + `clone3`/`CLONE_SETTLS`; full `pthread_create` still open |
-| **P11** | Real terminals and job control | P11a–b ✅ session/pgrp + console tty + **PTY pair**; still need n_tty / `SIGTTOU` |
+| **P11** | Real terminals and job control | P11a–c ✅ session/pgrp + PTY + **n_tty**; still need `SIGTTOU`/`SIGTTIN` |
 | **P12** | Networking works | virtio-net + ICMP ping ✅; still need `socket`/`bind`/`connect` for userspace |
 | **P13** | Graphics + input | Framebuffer or KMS/DRM + evdev/mice/keyboard in Linux ABI form; then Xorg or a Wayland compositor |
 | **P14** | **Install and use a Linux desktop** | Package a userspace (or boot a distro rootfs), start a display manager / DE, use it like Linux |
@@ -490,7 +490,7 @@ Milestones on that path:
 |---------|--------|--------|
 | Spine | Isolated processes, joinable threads, loadable drivers | ✅ P1–P8 |
 | Probe userspace | Static musl / BusyBox: fork, exec, pthread path, futex, mmap, files | 🟡 partial (no full musl/glibc pthread soak) |
-| Real userspace | Dynamically linked glibc/musl, PTYs, net, graphics/input | 🟡 P10a–d + P11a–b in; P12–P13 still open |
+| Real userspace | Dynamically linked glibc/musl, PTYs, net, graphics/input | 🟡 P10a–d + P11a–c in; P12–P13 still open |
 | **Desktop** | Install a DE and use it as a daily Linux machine | ❌ P14 — **the product goal** |
 
 **Today:** spine is in; ~26% of Linux x86_64 syscalls dispatched; BusyBox/static musl/glibc hello are probes. That is **early** on the path to a desktop, not a reason to redefine the goal.
@@ -501,7 +501,7 @@ Milestones on that path:
 
 **Phase 8 is complete.** Do not reopen it for “make IDE a `.ko` on ext2.”
 
-**P11b (PTY pair) landed.** Smoke: `ptytest`. Next: n_tty polish or P12 BSD sockets so userspace can use the NIC.
+**P11c (n_tty) landed.** Smoke: `n_ttytest`. Next: P12 BSD sockets (`socket`/`bind`/`connect`) so userspace can use the NIC, or a tiny P11d for `SIGTTOU`.
 
 **P9 leftover:** COW fork / demand paging as needed by dynlink.
 
